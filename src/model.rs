@@ -307,6 +307,8 @@ pub struct Preferences {
     pub luma_player: bool,
     /// Home widgets right of the headline (Settings › Widgets).
     pub widgets: crate::widgets::WidgetPrefs,
+    /// ImmichFrame server for the photo wallpaper (Settings › Wallpaper).
+    pub immich: crate::immich_frame::ImmichFrameLink,
 }
 
 impl Default for Preferences {
@@ -357,6 +359,7 @@ impl Default for Preferences {
             playback_progress: BTreeMap::new(),
             luma_player: true,
             widgets: Default::default(),
+            immich: Default::default(),
         }
     }
 }
@@ -482,8 +485,13 @@ impl Preferences {
         if self.video_sources_mask == 0 {
             self.video_sources_mask = crate::video_catalog::ALL_SOURCES;
         }
+        self.immich.normalize();
+        // The ImmichFrame wallpaper needs its server; without one, play video.
+        if self.background == "immich" && !self.immich.linked() {
+            self.background = "video".into();
+        }
         if (self.background == "video" && !VIDEO_WALLPAPER_SUPPORTED)
-            || (self.background != "video"
+            || (!matches!(self.background.as_str(), "video" | "immich")
                 && !BACKGROUNDS.iter().any(|(id, _)| *id == self.background))
         {
             self.background = "dunes".into();

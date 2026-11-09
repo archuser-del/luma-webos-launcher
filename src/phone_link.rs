@@ -27,6 +27,8 @@ pub struct Field {
     pub kind: FieldType,
     pub max_len: usize,
     pub placeholder: String,
+    /// May be left empty.
+    pub optional: bool,
 }
 #[derive(Clone)]
 pub struct Form {
@@ -128,9 +130,10 @@ fn form_page(spec: &Form, nonce: &str, error: Option<&str>) -> String {
             FieldType::Secret => "password",
         };
         // All field metadata is caller-controlled, but always HTML-escaped.
-        content.push_str(&format!("<label>{}<input type=\"{}\" name=\"{}\" placeholder=\"{}\" maxlength=\"{}\" required autocomplete=\"off\"></label>",
+        content.push_str(&format!("<label>{}<input type=\"{}\" name=\"{}\" placeholder=\"{}\" maxlength=\"{}\"{} autocomplete=\"off\"></label>",
             escape_html(&field.label),ty,escape_html(&field.name),
-            escape_html(&field.placeholder),field.max_len.min(4096)));
+            escape_html(&field.placeholder),field.max_len.min(4096),
+            if field.optional { "" } else { " required" }));
     }
     content.push_str(&format!(
         "<button type=\"submit\">{}</button></form>",
@@ -186,7 +189,7 @@ impl<T, F: Fn(&HashMap<String, String>) -> Result<T, String>> Session<T, F> {
                 let Some(value) = fields.get(&field.name) else {
                     return Some("Please fill in every field".to_owned());
                 };
-                if value.is_empty()
+                if (value.is_empty() && !field.optional)
                     || value.len() > field.max_len
                     || value.chars().any(|c| c.is_control())
                 {
@@ -510,6 +513,7 @@ mod tests {
             hint: "Paste your key".into(),
             help: Some(("Get a key".into(), "https://example.com/".into())),
             fields: vec![Field {
+                optional: false,
                 label: "API key".into(),
                 name: "key".into(),
                 kind: FieldType::Secret,

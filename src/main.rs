@@ -7,6 +7,7 @@ mod font;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod hw_wallpaper;
 mod i18n;
+mod immich_frame;
 mod jellyfin;
 mod library;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -408,6 +409,13 @@ fn effects(
             }
             Effect::VideoUploadStop => {
                 VIDEO_UPLOAD.lock().unwrap().take();
+            }
+            Effect::ImmichFormStart => immich_form_start(preferences),
+            Effect::ImmichFormStop => immich_form_stop(),
+            Effect::ImmichSkip => {
+                if let Some(service) = IMMICH.get() {
+                    service.send(immich_frame::Command::Skip);
+                }
             }
             Effect::PlexLink => {
                 if state.preferences.plex.client_id.is_empty() {
@@ -847,6 +855,158 @@ static JELLYFIN_FORM: std::sync::Mutex<Option<JellyfinForm>> = std::sync::Mutex:
 /// Settings › Wallpaper › Upload Videos page server, while the page is open.
 static VIDEO_UPLOAD: std::sync::Mutex<Option<custom_videos::Server>> = std::sync::Mutex::new(None);
 
+/// ImmichFrame wallpaper worker, created with the preferences folder at startup.
+static IMMICH: std::sync::OnceLock<immich_frame::Service> = std::sync::OnceLock::new();
+/// Server last told to the worker, so it hears only about changes.
+static IMMICH_SHOWN: std::sync::Mutex<Option<immich_frame::ImmichFrameLink>> =
+    std::sync::Mutex::new(None);
+type ImmichLinked = (immich_frame::ImmichFrameLink, immich_frame::Frame);
+/// The phone form that takes an ImmichFrame address and optional secret.
+struct ImmichForm {
+    ready: std::sync::mpsc::Receiver<Result<String, String>>,
+    linked: std::sync::mpsc::Receiver<ImmichLinked>,
+    errors: std::sync::mpsc::Receiver<String>,
+    canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    folder: std::path::PathBuf,
+}
+static IMMICH_FORM: std::sync::Mutex<Option<ImmichForm>> = std::sync::Mutex::new(None);
+
+fn immich_folder(preferences: &std::path::Path) -> std::path::PathBuf {
+    preferences
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .join("immich")
+}
+
+fn immich_form_stop() {
+    if let Some(form) = IMMICH_FORM.lock().unwrap().take() {
+        form.canceled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn immich_form_start(preferences: &std::path::Path) {
+    immich_form_stop();
+    let folder = immich_folder(preferences);
+    let form = phone_link::Form {
+        title: "ImmichFrame".into(),
+        hint: "Type the address you open ImmichFrame with, for example 192.168.1.20:8080".into(),
+        help: Some((
+            "What is ImmichFrame?".into(),
+            "https://immichframe.dev".into(),
+        )),
+        fields: vec![
+            phone_link::Field {
+                label: "ImmichFrame address".into(),
+                name: "address".into(),
+                kind: phone_link::FieldType::Text,
+                max_len: 300,
+                placeholder: "http://192.168.1.20:8080".into(),
+                optional: false,
+            },
+            phone_link::Field {
+                label: "Authentication secret (only if your server has one)".into(),
+                name: "secret".into(),
+                kind: phone_link::FieldType::Secret,
+                max_len: 512,
+                placeholder: "Leave empty if none".into(),
+                optional: true,
+            },
+        ],
+        submit_label: "Connect".into(),
+        success_title: "Connected".into(),
+        success_message: "Look at your TV: your photos are the wallpaper now.".into(),
+        route: "/immich".into(),
+    };
+    let (linked_tx, linked) = std::sync::mpsc::channel();
+    let (error_tx, errors) = std::sync::mpsc::channel();
+    let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let check_folder = folder.clone();
+    let ready = phone_link::spawn_form(
+        form,
+        move |fields| {
+            immich_frame::check(
+                &check_folder,
+                fields.get("address").map(String::as_str).unwrap_or(""),
+                fields.get("secret").map(String::as_str).unwrap_or(""),
+            )
+        },
+        linked_tx,
+        error_tx,
+        canceled.clone(),
+    );
+    *IMMICH_FORM.lock().unwrap() = Some(ImmichForm {
+        ready,
+        linked,
+        errors,
+        canceled,
+        folder,
+    });
+}
+
+/// Keep the ImmichFrame worker in step with the wallpaper, and apply its
+/// photos and the phone form's results.
+fn immich_tick(state: &mut State, preferences_path: &std::path::Path, visible: bool) {
+    let wanted =
+        (visible && state.preferences.background == "immich" && state.preferences.immich.linked())
+            .then(|| state.preferences.immich.clone());
+    {
+        let mut shown = IMMICH_SHOWN.lock().unwrap();
+        if *shown != wanted {
+            if let Some(service) = IMMICH.get() {
+                service.send(immich_frame::Command::Show(wanted.clone()));
+            }
+            *shown = wanted;
+        }
+    }
+    if let Some(service) = IMMICH.get()
+        && let Ok(updates) = service.updates.try_lock()
+    {
+        while let Ok(update) = updates.try_recv() {
+            match update {
+                immich_frame::Update::Frame(frame) => state.immich_show(frame),
+                immich_frame::Update::Failed(error) => {
+                    state.immich_status = Some((error, true));
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+    let mut linked = vec![];
+    let mut restart = None;
+    if let Some(form) = IMMICH_FORM.lock().unwrap().as_ref() {
+        while let Ok(ready) = form.ready.try_recv() {
+            state.dirty = true;
+            match ready {
+                Ok(link) => state.immich_qr = phone_link::qr_matrix(&link),
+                Err(error) => state.immich_status = Some((error, true)),
+            }
+        }
+        while let Ok(error) = form.errors.try_recv() {
+            state.immich_status = Some((error, true));
+            state.dirty = true;
+        }
+        while let Ok(result) = form.linked.try_recv() {
+            linked.push(result);
+            restart = Some(form.folder.clone());
+        }
+    }
+    for (link, frame) in linked {
+        state.immich_linked(link, frame);
+        let _ = storage::save(preferences_path, &state.preferences);
+    }
+    // The form's code is used up; show a fresh one while the page stays open.
+    if restart.is_some() {
+        state.immich_qr.clear();
+        if state.settings_level == state::SettingsLevel::WallpaperImmich {
+            immich_form_start(preferences_path);
+        } else {
+            immich_form_stop();
+        }
+    }
+}
+
 /// Apply what the video upload page did: its address, new and deleted clips.
 fn video_upload_tick(state: &mut State, preferences_path: &std::path::Path) {
     let mut events = vec![];
@@ -897,6 +1057,7 @@ fn jellyfin_form_start() {
         hint: "Type the address you open Jellyfin with, for example 192.168.1.20:8096".into(),
         help: None,
         fields: vec![phone_link::Field {
+            optional: false,
             label: "Server address".into(),
             name: "address".into(),
             kind: phone_link::FieldType::Text,
@@ -1849,6 +2010,7 @@ fn run() -> Result<(), String> {
     // Uploaded video wallpapers join the catalog before preferences load, so
     // their saved selection survives normalization.
     custom_videos::init(&preferences_path);
+    let _ = IMMICH.set(immich_frame::Service::new(immich_folder(&preferences_path)));
     // Start the preview with the user's current choices, but keep test favorites
     // and hidden placeholders out of their normal preferences file.
     let initial_preferences = if options.test_extra_apps > 0
@@ -2839,6 +3001,7 @@ fn run() -> Result<(), String> {
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
         video_upload_tick(&mut state, &preferences_path);
+        immich_tick(&mut state, &preferences_path, visible);
         plex_tick(&mut state, &preferences_path, &platform);
         // Poll a native worker rather than doing any media I/O in the render loop.
         while let Some(update) = player_backend::poll() {
@@ -3674,6 +3837,7 @@ fn run() -> Result<(), String> {
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
         video_upload_tick(&mut state, &preferences_path);
+        immich_tick(&mut state, &preferences_path, visible);
         plex_tick(&mut state, &preferences_path, &platform);
         moonlight_tick(&mut state, &preferences_path, &platform);
         library_tick(&mut state, &preferences_path);

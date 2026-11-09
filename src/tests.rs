@@ -2865,6 +2865,11 @@ fn typography_all_pages_use_semantic_tv_scale() {
                     assert!(style.size >= 21.);
                     continue;
                 }
+                // The Home headline (greeting or weather phrase) is display type
+                // that shrinks from 78 px until it fits two lines.
+                if page == 0 && style.display == Some(true) && (42. ..=78.).contains(&style.size) {
+                    continue;
+                }
                 if weather {
                     assert!(
                         (18. ..=84.).contains(&style.size),
