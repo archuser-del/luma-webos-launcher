@@ -10,7 +10,95 @@ use std::{collections::BTreeMap, path::PathBuf};
 fn ready() -> State {
     let mut state = State::new(Preferences::default());
     state.set_inventory(demo_inventory(), None);
+    // These tests exercise manual hiding; start from nothing hidden. The LG
+    // system apps hidden by default are covered by their own test below.
+    state.preferences.hidden.clear();
     state
+}
+
+#[test]
+fn video_wallpapers_are_the_default() {
+    assert_eq!(Preferences::default().background, "video");
+}
+
+#[test]
+fn uploaded_videos_join_the_catalog_and_can_play_alone() {
+    let builtin = crate::video_catalog::all().len();
+    let mut state = ready();
+    crate::video_catalog::set_custom(vec![crate::video_catalog::Video::custom(
+        "custom-0123456789abcdef0123456789abcdef".into(),
+        "Beach".into(),
+        std::path::Path::new("/tmp/beach.mp4"),
+        false,
+    )]);
+    state.refresh_video_catalog();
+    let index = builtin;
+    assert_eq!(crate::video_catalog::all()[index].name, "Beach");
+    assert!(
+        crate::video_catalog::groups(5)
+            .iter()
+            .any(|g| g.2.contains(&index))
+    );
+    state.preferences.background = "dunes".into();
+    assert_eq!(state.video_uploaded(index, "Beach"), vec![Effect::Save]);
+    assert_eq!(state.preferences.background, "video");
+    assert_eq!(state.preferences.video_index, index);
+    state.focus = Target::VideoUploadOnlyMine;
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(
+        crate::video_catalog::selected(&state.preferences.video_excluded),
+        vec![index]
+    );
+    crate::video_catalog::set_custom(vec![]);
+    state.refresh_video_catalog();
+    assert!(state.preferences.video_excluded.len() < builtin);
+}
+
+#[test]
+fn lg_system_apps_are_hidden_once_and_unhiding_sticks() {
+    let mut state = State::new(Preferences::default());
+    assert!(state.set_inventory(demo_inventory(), None));
+    for id in [
+        "com.webos.app.browser",
+        "com.webos.app.igallery",
+        "com.webos.app.roomconnect",
+        "com.lgtvod.kr.app",
+    ] {
+        assert!(state.preferences.hidden.contains(&id.to_owned()), "{id}");
+    }
+    // Live TV and third-party apps stay visible.
+    for id in ["com.webos.app.livetv", "netflix", "org.jellyfin.webos"] {
+        assert!(!state.preferences.hidden.contains(&id.to_owned()), "{id}");
+    }
+    assert!(
+        state
+            .apps()
+            .iter()
+            .all(|app| !app.id.starts_with("com.webos.app.browser"))
+    );
+    // A user who unhides an LG app keeps it visible on the next inventory read.
+    state
+        .preferences
+        .hidden
+        .retain(|id| id != "com.webos.app.browser");
+    assert!(!state.set_inventory(demo_inventory(), None));
+    assert!(
+        !state
+            .preferences
+            .hidden
+            .contains(&"com.webos.app.browser".to_owned())
+    );
+    // Titles catch LG apps shipped under other IDs.
+    assert!(crate::model::is_lg_system_app(
+        "com.example.mc",
+        "Memory Care"
+    ));
+    assert!(crate::model::is_lg_system_app("x.y", "LG Link"));
+    assert!(crate::model::is_lg_system_app(
+        "com.webos.app.multiview",
+        "Multi View"
+    ));
+    assert!(!crate::model::is_lg_system_app("netflix", "Netflix"));
 }
 
 fn scene(state: &State) -> view::Scene {
@@ -42,6 +130,8 @@ fn controls(state: &State) -> Vec<crate::state::Control> {
 #[test]
 fn remote_routes_from_header_and_back_through_settings() {
     let mut state = ready();
+    // A photo wallpaper: with video, Up first stops on the clip title.
+    state.preferences.background = "dunes".into();
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::App("netflix".into()));
     state.direction(Direction::Up, &controls(&state));
@@ -537,7 +627,7 @@ fn greeting_subpage_opens_the_keyboard_and_back_restores_its_parent() {
     assert!(state.finish_text_input().is_empty());
     assert_eq!(
         crate::i18n::Language::En.greeting(9, &state.preferences.greeting_name),
-        "Good morning, Ana."
+        "Boot complete. Morning, Ana."
     );
     assert_eq!(state.subpage, Some(crate::state::Subpage::Greeting));
     assert!(state.back().is_empty());
@@ -1429,6 +1519,7 @@ fn video_wallpaper_mode_keeps_its_setting() {
 #[test]
 fn video_gallery_filters_selection_and_hold_are_independent() {
     let mut state = ready();
+    state.preferences.background = "dunes".into();
     state.open(2);
     state.focus = Target::Sidebar(1);
     state.activate();
@@ -2243,7 +2334,7 @@ fn settings_preview_illustrations_stay_in_panel_with_centered_copy() {
     for (section, name, summary) in [
         (0, "General", "Language, clock and motion"),
         (1, "Wallpaper", "Video wallpaper collection"),
-        (2, "Widgets", "Weather, crypto, HDMI and Smart Home on Home"),
+        (2, "Widgets", "Weather, HDMI and Smart Home on Home"),
         (3, "Inputs", "Connected HDMI devices"),
         (4, "Smart Home", "Home Assistant devices"),
         (5, "System", "Device and launcher controls"),

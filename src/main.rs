@@ -1,6 +1,7 @@
 mod aerial_video;
 mod app_artwork;
 mod branding;
+mod custom_videos;
 mod diagnostics;
 mod font;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -402,6 +403,12 @@ fn effects(
                 jellyfin_form_stop();
             }
             Effect::JellyfinAddress => jellyfin_form_start(),
+            Effect::VideoUploadStart => {
+                *VIDEO_UPLOAD.lock().unwrap() = Some(custom_videos::start());
+            }
+            Effect::VideoUploadStop => {
+                VIDEO_UPLOAD.lock().unwrap().take();
+            }
             Effect::PlexLink => {
                 if state.preferences.plex.client_id.is_empty() {
                     state.preferences.plex.client_id = phone_link::random_hex()[..32].to_owned();
@@ -717,48 +724,6 @@ fn script(
     })
 }
 
-fn bitcoin_worker() -> std::sync::mpsc::Receiver<Option<String>> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        loop {
-            // The actual spot rate, never a synthetic placeholder.
-            let response = (|| {
-                let raw: String = ureq::get("https://api.coinbase.com/v2/prices/BTC-USD/spot")
-                    .header("Accept", "application/json")
-                    .call()
-                    .ok()?
-                    .body_mut()
-                    .read_to_string()
-                    .ok()?;
-                let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
-                let price = data
-                    .get("data")?
-                    .get("amount")?
-                    .as_str()?
-                    .parse::<f64>()
-                    .ok()?;
-                if !price.is_finite() || price <= 0. {
-                    return None;
-                }
-                let value = format!("{:.0}", price);
-                let grouped = value
-                    .as_bytes()
-                    .rchunks(3)
-                    .rev()
-                    .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                Some(grouped)
-            })();
-            if sender.send(response).is_err() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(300));
-        }
-    });
-    receiver
-}
-
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--pad-watch") {
         pad_watch::run();
@@ -861,8 +826,8 @@ fn compose(
 fn jellyfin_service() -> &'static jellyfin::Service {
     static SERVICE: std::sync::OnceLock<jellyfin::Service> = std::sync::OnceLock::new();
     SERVICE.get_or_init(|| {
-        let cache = if std::path::Path::new("/media/developer/com.denisefremov.luma").exists() {
-            std::path::PathBuf::from("/media/developer/com.denisefremov.luma/posters")
+        let cache = if std::path::Path::new("/media/developer/com.archbtw.luma").exists() {
+            std::path::PathBuf::from("/media/developer/com.archbtw.luma/posters")
         } else {
             std::env::temp_dir().join("luma-posters")
         };
@@ -879,6 +844,44 @@ struct JellyfinForm {
     canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 static JELLYFIN_FORM: std::sync::Mutex<Option<JellyfinForm>> = std::sync::Mutex::new(None);
+/// Settings › Wallpaper › Upload Videos page server, while the page is open.
+static VIDEO_UPLOAD: std::sync::Mutex<Option<custom_videos::Server>> = std::sync::Mutex::new(None);
+
+/// Apply what the video upload page did: its address, new and deleted clips.
+fn video_upload_tick(state: &mut State, preferences_path: &std::path::Path) {
+    let mut events = vec![];
+    if let Some(server) = VIDEO_UPLOAD.lock().unwrap().as_ref() {
+        while let Ok(event) = server.events.try_recv() {
+            events.push(event);
+        }
+    }
+    for event in events {
+        state.dirty = true;
+        match event {
+            custom_videos::Event::Ready(Ok(link)) => {
+                state.video_upload_qr = phone_link::qr_matrix(&link);
+                state.video_upload_link = Some(link);
+            }
+            custom_videos::Event::Ready(Err(error)) => {
+                state.video_upload_status = Some((error, true));
+            }
+            custom_videos::Event::Added(id) => {
+                custom_videos::reload();
+                if let Some(index) = custom_videos::catalog_index(&id) {
+                    let name = video_catalog::all()[index].name.clone();
+                    state.video_uploaded(index, &name);
+                    let _ = storage::save(preferences_path, &state.preferences);
+                }
+            }
+            custom_videos::Event::Removed => {
+                custom_videos::reload();
+                state.refresh_video_catalog();
+                state.video_upload_status = Some(("Video deleted.".into(), false));
+                let _ = storage::save(preferences_path, &state.preferences);
+            }
+        }
+    }
+}
 
 fn jellyfin_form_stop() {
     if let Some(form) = JELLYFIN_FORM.lock().unwrap().take() {
@@ -1092,8 +1095,8 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
 fn plex_service() -> &'static plex::Service {
     static SERVICE: std::sync::OnceLock<plex::Service> = std::sync::OnceLock::new();
     SERVICE.get_or_init(|| {
-        let cache = if std::path::Path::new("/media/developer/com.denisefremov.luma").exists() {
-            std::path::PathBuf::from("/media/developer/com.denisefremov.luma/posters")
+        let cache = if std::path::Path::new("/media/developer/com.archbtw.luma").exists() {
+            std::path::PathBuf::from("/media/developer/com.archbtw.luma/posters")
         } else {
             std::env::temp_dir().join("luma-posters")
         };
@@ -1189,8 +1192,8 @@ fn jellyfin_device_id(state: &mut State) -> String {
 fn steam_service() -> &'static steam::Service {
     static SERVICE: std::sync::OnceLock<steam::Service> = std::sync::OnceLock::new();
     SERVICE.get_or_init(|| {
-        let cache = if std::path::Path::new("/media/developer/com.denisefremov.luma").exists() {
-            std::path::PathBuf::from("/media/developer/com.denisefremov.luma/moonlight-cache")
+        let cache = if std::path::Path::new("/media/developer/com.archbtw.luma").exists() {
+            std::path::PathBuf::from("/media/developer/com.archbtw.luma/moonlight-cache")
         } else {
             std::env::temp_dir().join("luma-moonlight-cache")
         };
@@ -1200,8 +1203,8 @@ fn steam_service() -> &'static steam::Service {
 fn moonlight_service() -> &'static moonlight::Service {
     static SERVICE: std::sync::OnceLock<moonlight::Service> = std::sync::OnceLock::new();
     SERVICE.get_or_init(|| {
-        let cache = if std::path::Path::new("/media/developer/com.denisefremov.luma").exists() {
-            std::path::PathBuf::from("/media/developer/com.denisefremov.luma/moonlight-cache")
+        let cache = if std::path::Path::new("/media/developer/com.archbtw.luma").exists() {
+            std::path::PathBuf::from("/media/developer/com.archbtw.luma/moonlight-cache")
         } else {
             std::env::temp_dir().join("luma-moonlight-cache")
         };
@@ -1470,7 +1473,7 @@ fn open_player(state: &mut State, platform: &Platform, request: player::OpenRequ
     state.dirty = true;
 }
 
-/// Launch parameters for com.denisefremov.luma.player. Holds signed URLs and the token;
+/// Launch parameters for com.archbtw.luma.player. Holds signed URLs and the token;
 /// never logged.
 fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json::Value {
     let (a, b) = state.accent_colors();
@@ -1843,6 +1846,9 @@ fn run() -> Result<(), String> {
     } else {
         default_preferences.clone()
     };
+    // Uploaded video wallpapers join the catalog before preferences load, so
+    // their saved selection survives normalization.
+    custom_videos::init(&preferences_path);
     // Start the preview with the user's current choices, but keep test favorites
     // and hidden placeholders out of their normal preferences file.
     let initial_preferences = if options.test_extra_apps > 0
@@ -2234,7 +2240,7 @@ fn run() -> Result<(), String> {
     // TV diagnosis without the remote: a URL dropped into this file opens
     // the Luma player once at start (the file is consumed).
     if webos {
-        let path = "/media/developer/com.denisefremov.luma/cinema-test-url";
+        let path = "/media/developer/com.archbtw.luma/cinema-test-url";
         if let Ok(url) = std::fs::read_to_string(path) {
             let _ = std::fs::remove_file(path);
             let mut request = player::OpenRequest::preview(player::Source::Movie);
@@ -2295,7 +2301,6 @@ fn run() -> Result<(), String> {
         smart_home::auth_path(&preferences_path),
         state.preferences.smart_home.server_url.clone(),
     );
-    let bitcoin_updates = if webos { Some(bitcoin_worker()) } else { None };
     let platform = Platform::new(webos);
     effects(
         vec![Effect::Refresh, Effect::Root(None)],
@@ -2398,7 +2403,7 @@ fn run() -> Result<(), String> {
     eprintln!("Luma GL: {samples} samples, {alpha_bits} alpha bits");
     if webos {
         let _ = std::fs::write(
-            "/media/developer/com.denisefremov.luma/luma-egl.txt",
+            "/media/developer/com.archbtw.luma/luma-egl.txt",
             format!(
                 "window={}x{} samples={} alpha_bits={}\n",
                 requested.width, requested.height, samples, alpha_bits
@@ -2582,7 +2587,7 @@ fn run() -> Result<(), String> {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/media/developer/com.denisefremov.luma/luma-video-state.txt")
+                .open("/media/developer/com.archbtw.luma/luma-video-state.txt")
             {
                 let _ = f.write_all(line.as_bytes());
             }
@@ -2667,7 +2672,7 @@ fn run() -> Result<(), String> {
                 state.dirty = true;
                 if player.frame_count() <= 3 || player.frame_count() % 300 == 0 {
                     eprintln!("Luma video GPU frame #{} uploaded", player.frame_count());
-                    let path = "/media/developer/com.denisefremov.luma/luma-gpu-frames.txt";
+                    let path = "/media/developer/com.archbtw.luma/luma-gpu-frames.txt";
                     use std::io::Write;
                     if let Ok(mut file) = std::fs::OpenOptions::new()
                         .create(true)
@@ -2726,14 +2731,6 @@ fn run() -> Result<(), String> {
                 renderer.preload_stills(&paths);
             }
         }
-        if let Some(receiver) = &bitcoin_updates {
-            while let Ok(next) = receiver.try_recv() {
-                if state.bitcoin_usd != next {
-                    state.bitcoin_usd = next;
-                    state.dirty = true;
-                }
-            }
-        }
         state.dirty |= assets.artwork.poll();
         // Decode every app icon ahead of time: cards that enter before their
         // icon arrive grey and turn colored a moment later.
@@ -2757,7 +2754,9 @@ fn run() -> Result<(), String> {
                         options.test_extra_apps,
                         state.preferences.language,
                     );
-                    state.set_inventory(inventory, warning);
+                    if state.set_inventory(inventory, warning) {
+                        let _ = storage::save(&preferences_path, &state.preferences);
+                    }
                     if initial_focus
                         && state.focus == Target::Nav(0)
                         && state.page == state::Page::Home
@@ -2839,6 +2838,7 @@ fn run() -> Result<(), String> {
             state.movie_thumbs(id, images);
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
+        video_upload_tick(&mut state, &preferences_path);
         plex_tick(&mut state, &preferences_path, &platform);
         // Poll a native worker rather than doing any media I/O in the render loop.
         while let Some(update) = player_backend::poll() {
@@ -3673,6 +3673,7 @@ fn run() -> Result<(), String> {
             state.movie_thumbs(id, images);
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
+        video_upload_tick(&mut state, &preferences_path);
         plex_tick(&mut state, &preferences_path, &platform);
         moonlight_tick(&mut state, &preferences_path, &platform);
         library_tick(&mut state, &preferences_path);

@@ -14,7 +14,7 @@ const requestedTag =
 if (requestedTag && requestedTag !== tag)
   throw new Error(`Release tag must be ${tag}, matching the packaged app version.`);
 
-const repository = process.env.GITHUB_REPOSITORY || 'funnymataleao/luma-webos-launcher';
+const repository = process.env.GITHUB_REPOSITORY || 'archuser-del/luma-webos-launcher';
 if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Invalid GitHub repository name.');
 const sourceUrl = `https://github.com/${repository}`;
 const releaseUrl = `${sourceUrl}/releases/latest/download`;
@@ -28,7 +28,7 @@ if (!shortDescription) throw new Error('appinfo.json must provide a non-empty ap
 const player = JSON.parse(
   await fs.readFile(path.join(root, 'extras/player/app/appinfo.json'), 'utf8'),
 );
-if (player.id !== 'com.denisefremov.luma.player' || player.type !== 'web') {
+if (player.id !== 'com.archbtw.luma.player' || player.type !== 'web') {
   throw new Error('Companion player manifest does not match the public identity.');
 }
 const playerFilename = `${player.id}_${player.version}_all.ipk`;

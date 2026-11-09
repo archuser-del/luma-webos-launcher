@@ -84,6 +84,23 @@ impl Assets {
     fn path(&self, path: impl AsRef<Path>) -> String {
         self.root.join(path).to_string_lossy().into_owned()
     }
+    /// Small picture of a wallpaper clip. Uploaded clips use the preview their
+    /// upload page made, or a bundled gradient when it could not make one.
+    pub fn video_thumbnail(&self, index: usize) -> String {
+        match crate::custom_videos::image(index, false) {
+            Some(path) if !path.is_empty() => path,
+            Some(_) => self.path("thumbnails/midnight.jpg"),
+            None => self.path(format!("video-thumbnails/{index}.jpg")),
+        }
+    }
+    /// Full-resolution first frame of a wallpaper clip, shown while it loads.
+    pub fn video_still(&self, index: usize) -> String {
+        match crate::custom_videos::image(index, true) {
+            Some(path) if !path.is_empty() => path,
+            Some(_) => self.path("wallpapers/midnight.jpg"),
+            None => self.path(format!("video-stills/{index}.jpg")),
+        }
+    }
 
     /// Exact glyph metrics, matched to the renderer's live font selection.
     fn glyph_advance(&self, c: char, style: TextStyle) -> f32 {
@@ -619,10 +636,7 @@ pub fn navigation_for(assets: &Assets, language: Language, show_smart: bool) -> 
 
 /// Full-resolution first frame of a wallpaper clip, shown while it loads.
 pub fn video_still_path(assets: &Assets, index: usize) -> String {
-    assets.path(format!(
-        "video-stills/{}.jpg",
-        index.min(crate::video_catalog::all().len() - 1)
-    ))
+    assets.video_still(index.min(crate::video_catalog::all().len() - 1))
 }
 
 pub fn scene_with_pill(
@@ -1065,7 +1079,6 @@ fn header(
     let layout = navigation_for(assets, language, state.show_smart_tab());
     // The clock digits are exactly as tall as the selected navigation pill
     // (52 px, NAV_TOP + NAV_PAD to its bottom); the date sits close under it.
-    // Bitcoin stays in state for a future widget.
     let clock_style = heading_fixed(assets, 64., 700).tracking(-0.03);
     out.text(
         &clock,
@@ -1763,7 +1776,7 @@ fn draw_rude_phrase(
     // Gradient accents run across each highlighted word, letter by letter.
     let (accent, accent_end) =
         configured_accent.map_or((accent, accent), |(a, b)| (c(a, alpha), c(b, alpha)));
-    // Every swear word takes the accent; a clean phrase accents one weather word.
+    // Every swear word takes the accent; a clean phrase accents one tech word.
     let swearing = phrase.title.split_whitespace().any(is_swear);
     let accent_word = if swearing {
         ""
@@ -1773,8 +1786,52 @@ fn draw_rude_phrase(
             .split_whitespace()
             .find(|token| {
                 [
-                    "oven", "fridge", "grey", "snow", "sun", "rain", "wind", "cold", "fog", "hot",
-                    "night", "thunder",
+                    "system",
+                    "uptime",
+                    "exe",
+                    "latency",
+                    "compile",
+                    "thermal",
+                    "cool",
+                    "fan",
+                    "cpu",
+                    "boot",
+                    "server",
+                    "heatsink",
+                    "kernel",
+                    "cryo",
+                    "overclock",
+                    "cache",
+                    "overheat",
+                    "patch",
+                    "hotfix",
+                    "cloud",
+                    "screen",
+                    "contrast",
+                    "dll",
+                    "packet",
+                    "liquid",
+                    "download",
+                    "surge",
+                    "lightning",
+                    "ups",
+                    "noise",
+                    "pixel",
+                    "frame",
+                    "airflow",
+                    "bandwidth",
+                    "resolution",
+                    "render",
+                    "blur",
+                    "dark",
+                    "sleep",
+                    "shift",
+                    "loop",
+                    "404",
+                    "update",
+                    "swap",
+                    "breaking",
+                    "rollback",
                 ]
                 .iter()
                 .any(|key| token.to_ascii_lowercase().contains(key))
@@ -2876,7 +2933,7 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                         == crate::weather_phrases::GreetingStyle::Classic,
                 ),
                 (
-                    "Rude",
+                    "Tech",
                     None,
                     state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude,
                 ),
@@ -3474,7 +3531,7 @@ fn background_settings(out: &mut Scene, state: &State, assets: &Assets) {
                 out.shadow(lift_rect, 15., 15., 5., 0.33);
             }
             out.shape(lift_rect, 15., c(0x1c1d1e, 1.));
-            let path = assets.path(format!("video-thumbnails/{index}.jpg"));
+            let path = assets.video_thumbnail(*index);
             if std::path::Path::new(&path).is_file() {
                 if chosen {
                     out.image(path, lift_rect, 15., false);
@@ -3535,7 +3592,7 @@ fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let style_value =
         if state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude {
-            "Rude"
+            "Tech"
         } else {
             "Classic"
         };
@@ -3549,7 +3606,7 @@ fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
             title: "Greeting style",
             icon: Some("type"),
             value: Some(style_value),
-            description: Some("Classic greeting or weather-aware Rude headlines"),
+            description: Some("Classic greeting or weather-aware tech headlines"),
             selected: false,
             chevron: true,
         },
@@ -3592,14 +3649,14 @@ fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
             chevron: false,
         },
     );
-    // Keep the Rude preview in the same padded right-hand glass as the rows.
+    // Keep the Tech preview in the same padded right-hand glass as the rows.
     // All text widths are bounded to the panel, including translated phrases.
     let left = tvos_settings_view::RIGHT + tvos_settings_view::S32;
     let usable = tvos_settings_view::WIDTH - 2. * tvos_settings_view::S32;
     // Clear all three greeting rows, including the 104px description cell.
     let y = tvos_settings_view::TOP + tvos_settings_view::S32 + 3. * 116. + tvos_settings_view::S32;
     out.text(
-        "RUDE PREVIEW",
+        "TECH PREVIEW",
         Rect::new(left, y, usable, 36.),
         text(25., 600, 0.025),
         c(0xffffff, 0.55),
@@ -3645,7 +3702,7 @@ fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
         );
     } else {
         out.text(
-            "Set a weather location to preview Rude",
+            "Set a weather location to preview Tech",
             Rect::new(left, y + 48., usable, 44.),
             text(25., 500, 0.),
             c(0xffffff, 0.73),
