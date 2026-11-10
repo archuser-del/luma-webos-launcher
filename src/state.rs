@@ -209,6 +209,8 @@ pub enum Target {
     /// The Hide/Show button of a camera's long-press menu.
     SmartCameraHide,
     SmartBrightness(i8),
+    /// Smart Home tab: open the Home Assistant web interface.
+    SmartWebUi,
     /// Title card (movie popup).
     MovieClose,
     MoviePlay,
@@ -374,6 +376,8 @@ pub enum Effect {
     ImmichFormStop,
     /// Load another ImmichFrame photo now.
     ImmichSkip,
+    /// Open a web page in the TV's browser.
+    OpenUrl(String),
     /// Fetch the Plex libraries offered as row contents.
     PlexViews,
     MoonlightProbe(String),
@@ -841,6 +845,29 @@ impl State {
                 ));
         }
         self.video_selected_count_cache.get()
+    }
+
+    /// OK on a Home Assistant device: toggle, lock, play or pause, start.
+    /// The tile shows the expected state until Home Assistant confirms it.
+    pub fn ha_primary(&mut self, id: &str) -> Vec<Effect> {
+        if !self.ha_online {
+            return vec![];
+        }
+        let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id) else {
+            return vec![];
+        };
+        let Some((service, expected)) = entity.primary() else {
+            return vec![];
+        };
+        if let Some(state) = expected {
+            entity.state = state.into();
+        }
+        self.dirty = true;
+        vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
+            entity_id: id.to_owned(),
+            service: service.into(),
+            data: serde_json::json!({ "entity_id": id }),
+        })]
     }
 
     /// Wallpaper type: 0 photo, 1 video, 2 ImmichFrame.
@@ -3161,20 +3188,22 @@ impl State {
                         -10i8
                     };
                     let id = self.ha_detail.as_deref().unwrap_or("").to_owned();
+                    // Brightness, speed, position, target temperature, volume:
+                    // whatever this device's dial is, one step per press.
                     if let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id)
-                        && entity.domain == "light"
                         && self.ha_online
+                        && let Some(dial) = entity.dial()
                     {
-                        let value = (entity.brightness.unwrap_or(50) as i16 + delta as i16)
-                            .clamp(1, 100) as u8;
-                        entity.brightness = Some(value);
-                        return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                            entity_id: id.clone(),
-                            service: "turn_on".into(),
-                            data: serde_json::json!({
-                                "entity_id": id, "brightness_pct": value
-                            }),
-                        })];
+                        let value = dial.stepped(delta > 0);
+                        if let Some((service, data)) = entity.dial_call(value) {
+                            entity.set_dial(value);
+                            self.dirty = true;
+                            return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
+                                entity_id: id,
+                                service: service.into(),
+                                data,
+                            })];
+                        }
                     }
                 }
                 return vec![];
@@ -4449,24 +4478,25 @@ impl State {
                 self.focus = Target::SmartClose;
             }
             Target::SmartEntity(id) => {
-                if let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id)
-                    && entity.actionable()
-                    && self.ha_online
-                {
-                    let turn_on = !entity.on();
-                    let service = if entity.domain == "cover" {
-                        if turn_on { "open_cover" } else { "close_cover" }
-                    } else if turn_on {
-                        "turn_on"
-                    } else {
-                        "turn_off"
-                    };
-                    entity.state = if turn_on { "on".into() } else { "off".into() };
-                    return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                        entity_id: id.clone(),
-                        service: service.into(),
-                        data: serde_json::json!({ "entity_id": id }),
-                    })];
+                // A lock asks twice, and a device with only a dial (a number)
+                // has nothing to toggle: both open their panel instead.
+                let panel = self
+                    .ha_entities
+                    .iter()
+                    .find(|e| e.id == id)
+                    .is_some_and(|e| e.confirm_first() || (!e.actionable() && e.dial().is_some()));
+                if panel {
+                    self.ha_detail = Some(id);
+                    self.focus = Target::SmartBrightness(0);
+                    self.dirty = true;
+                    return vec![];
+                }
+                return self.ha_primary(&id);
+            }
+            Target::SmartWebUi => {
+                let url = self.preferences.smart_home.server_url.clone();
+                if !url.is_empty() && !self.launching {
+                    return vec![Effect::OpenUrl(url)];
                 }
             }
             Target::SmartScene(id) => {
@@ -4481,16 +4511,8 @@ impl State {
                 }
             }
             Target::SmartBrightness(_) => {
-                if let Some(id) = &self.ha_detail
-                    && let Some(e) = self.ha_entities.iter().find(|e| &e.id == id)
-                    && e.domain == "light"
-                    && self.ha_online
-                {
-                    return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                        entity_id: id.clone(),
-                        service: if e.on() { "turn_off" } else { "turn_on" }.into(),
-                        data: serde_json::json!({ "entity_id": id }),
-                    })];
+                if let Some(id) = self.ha_detail.clone() {
+                    return self.ha_primary(&id);
                 }
             }
             Target::SmartSection(section) => {

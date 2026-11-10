@@ -10,6 +10,8 @@ use std::{collections::HashSet, sync::mpsc, thread};
 
 pub const APP_ID: &str = "com.archbtw.luma";
 pub const HOME_ID: &str = "com.webos.app.home";
+/// LG's web browser; `target` in its launch parameters is the page to open.
+pub const BROWSER_ID: &str = "com.webos.app.browser";
 
 pub fn redirect_to_home() -> Result<bool, String> {
     // The root-only integration mounts this marker with its native Home
@@ -34,6 +36,8 @@ pub fn redirect_to_home() -> Result<bool, String> {
 pub enum Request {
     Refresh,
     Launch(String),
+    /// Open this http(s) address in the TV's web browser.
+    OpenUrl(String),
     MoonlightLaunch(crate::moonlight::MoonlightLink, i64),
     /// Close another app (best effort; webOS may refuse without root).
     CloseApp(String),
@@ -141,6 +145,20 @@ impl Platform {
                         }
                         continue;
                     }
+                    Request::OpenUrl(url) => Response::Launched(if !webos {
+                        Ok(())
+                    } else if !(url.starts_with("http://") || url.starts_with("https://"))
+                        || url.len() > 2048
+                        || url.chars().any(char::is_control)
+                    {
+                        Err("Invalid web address".into())
+                    } else {
+                        call(
+                            "luna://com.webos.applicationManager/launch",
+                            json!({"id": BROWSER_ID, "params": {"target": url}}),
+                        )
+                        .map(|_| ())
+                    }),
                     Request::Launch(id) => Response::Launched(if webos {
                         if crate::scroll_preview::is_placeholder(&id) {
                             Err("Scroll preview cards cannot be launched".into())

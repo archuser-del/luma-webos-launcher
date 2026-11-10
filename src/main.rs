@@ -260,6 +260,16 @@ fn effects(
                     platform.send(Request::Refresh);
                 }
             }
+            Effect::OpenUrl(url) => {
+                if platform.webos {
+                    if !state.launching {
+                        state.launching = true;
+                        platform.send(Request::OpenUrl(url));
+                    }
+                } else {
+                    state.notify(format!("Would open {url} in the TV browser"));
+                }
+            }
             Effect::Launch(id) => {
                 if scroll_preview::is_placeholder(&id) {
                     state.notify(state.preferences.language.t("scrollTestOnly"));
@@ -543,7 +553,7 @@ fn script(
 ) -> Result<Vec<Effect>, String> {
     Ok(match action {
         "smart-demo" | "smart-detail" | "smart-camera" | "smart-settings" | "smart-connect"
-        | "smart-devices" | "smart-signin" | "smart-hide" => {
+        | "smart-devices" | "smart-signin" | "smart-hide" | "smart-thermostat" | "smart-lock" => {
             state.preferences.smart_home.server_url = "http://demo.homeassistant.local:8123".into();
             state.preferences.smart_home.show_tab = true;
             let names = [
@@ -599,10 +609,50 @@ fn script(
                     }
                     .into(),
                     brightness,
+                    adjustable: brightness.is_some(),
                     hidden: false,
                     device_class: String::new(),
+                    ..Default::default()
                 })
                 .collect();
+            // Devices with a dial of their own: target temperature, volume, position.
+            state.ha_entities.extend([
+                smart_home::Entity {
+                    id: "climate.living".into(),
+                    name: "Thermostat".into(),
+                    state: "heat".into(),
+                    domain: "climate".into(),
+                    area: "Living Room".into(),
+                    level: Some(21.5),
+                    level_min: Some(7.),
+                    level_max: Some(30.),
+                    level_step: Some(0.5),
+                    adjustable: true,
+                    current: Some(20.3),
+                    ..Default::default()
+                },
+                smart_home::Entity {
+                    id: "media_player.speaker".into(),
+                    name: "Kitchen Speaker".into(),
+                    state: "playing".into(),
+                    domain: "media_player".into(),
+                    area: "Kitchen".into(),
+                    level: Some(35.),
+                    adjustable: true,
+                    media: "Lo-fi Radio".into(),
+                    ..Default::default()
+                },
+                smart_home::Entity {
+                    id: "cover.blinds".into(),
+                    name: "Blinds".into(),
+                    state: "open".into(),
+                    domain: "cover".into(),
+                    area: "Living Room".into(),
+                    level: Some(70.),
+                    adjustable: true,
+                    ..Default::default()
+                },
+            ]);
             state.ha_online = true;
             match action {
                 "smart-demo" => {
@@ -618,6 +668,16 @@ fn script(
                 "smart-detail" => {
                     state.open(2);
                     state.ha_detail = Some("light.ceiling".into());
+                    state.focus = Target::SmartBrightness(0);
+                }
+                "smart-thermostat" => {
+                    state.open(2);
+                    state.ha_detail = Some("climate.living".into());
+                    state.focus = Target::SmartBrightness(0);
+                }
+                "smart-lock" => {
+                    state.open(2);
+                    state.ha_detail = Some("lock.front".into());
                     state.focus = Target::SmartBrightness(0);
                 }
                 "smart-camera" => {

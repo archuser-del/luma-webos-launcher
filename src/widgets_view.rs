@@ -761,15 +761,7 @@ fn hdmi_block(
 // -------------------------------------------------------------- Smart Home
 
 fn entity_icon(e: &Entity) -> &'static str {
-    match e.domain.as_str() {
-        "light" => "smart-light",
-        "lock" => "smart-lock",
-        "fan" => "smart-fan",
-        "cover" => "smart-door",
-        "sensor" | "climate" => "thermometer",
-        "binary_sensor" => "eye",
-        _ => "power",
-    }
+    crate::view::smart_icon(e)
 }
 fn camera_picture(
     out: &mut Scene,

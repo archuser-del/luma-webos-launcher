@@ -4370,7 +4370,72 @@ fn smart_label(
         false,
     );
 }
+pub(crate) fn smart_icon(e: &crate::smart_home::Entity) -> &'static str {
+    match e.domain.as_str() {
+        "light" => "smart-light",
+        "lock" => "smart-lock",
+        "fan" => "smart-fan",
+        "cover" => "smart-door",
+        "sensor" | "climate" => "thermometer",
+        "humidifier" => "weather-drizzle",
+        "binary_sensor" => "eye",
+        "media_player" => {
+            if e.state == "playing" {
+                "pause"
+            } else {
+                "play"
+            }
+        }
+        "vacuum" => "refresh",
+        "input_number" => "list",
+        "button" | "input_button" => "sparkles",
+        "siren" => "alert",
+        _ => "power",
+    }
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default()
+        .replace('_', " ")
+}
+
 fn smart_value(e: &crate::smart_home::Entity) -> String {
+    if matches!(e.state.as_str(), "unavailable" | "unknown")
+        && !matches!(e.domain.as_str(), "button" | "input_button")
+    {
+        return "Unavailable".into();
+    }
+    match e.domain.as_str() {
+        // "Heat · 21.5° → 22°": mode, the room, then the target.
+        "climate" => {
+            let mut line = capitalized(&e.state);
+            match (e.current, e.level.filter(|_| e.on())) {
+                (Some(now), Some(target)) => line.push_str(&format!(" · {now:.1}° → {target:.1}°")),
+                (Some(now), None) => line.push_str(&format!(" · {now:.1}°")),
+                (None, Some(target)) => line.push_str(&format!(" · {target:.1}°")),
+                _ => {}
+            }
+            return line;
+        }
+        "media_player" => {
+            return if e.media.is_empty() || !e.on() {
+                capitalized(&e.state)
+            } else {
+                format!("{} · {}", capitalized(&e.state), e.media)
+            };
+        }
+        "fan" | "cover" | "humidifier" => {
+            if let (Some(n), true) = (e.level, e.on()) {
+                return format!("{} · {n:.0}%", capitalized(&e.state));
+            }
+        }
+        "button" | "input_button" => return "Press".into(),
+        _ => {}
+    }
     if let (Some(n), true) = (e.brightness, e.on()) {
         return format!("{n}%");
     }
@@ -4559,10 +4624,39 @@ fn smart_home_view(out: &mut Scene, state: &State, assets: &Assets) {
     }
     let mut y = chip_y + 84. + 40.;
 
-    // Scenes: one row of buttons in the two Luma states (grey, accent when focused).
-    if !scenes.is_empty() {
+    // One row of buttons in the two Luma states (grey, accent when focused):
+    // the door to the full Home Assistant interface, then the scenes.
+    {
         let mut x = SMART_X;
         let style = text(25., 600, -0.01);
+        {
+            let target = Target::SmartWebUi;
+            let label = "Open Home Assistant";
+            let label_w = assets.width(label, style).ceil();
+            let w = label_w + 104.;
+            let r = Rect::new(x, y, w, 76.);
+            out.control(target.clone(), r, true);
+            if smart_onscreen(r) {
+                let start = out.draw.len();
+                let ink = smart_button(out, state, r, state.focus_level(&target));
+                out.icon(
+                    assets,
+                    "globe",
+                    Rect::new(r.x + 30., r.y + 26., 24., 24.),
+                    ink,
+                );
+                smart_label(
+                    out,
+                    assets,
+                    label,
+                    Rect::new(r.x + 72., r.y + 20., label_w + 4., 36.),
+                    style,
+                    ink,
+                );
+                smart_enter(out, state, start, r);
+            }
+            x += w + 16.;
+        }
         for e in &scenes {
             let target = Target::SmartScene(e.id.clone());
             let label_w = assets.width(&e.name, style).ceil().min(360.);
@@ -4702,15 +4796,7 @@ fn smart_home_view(out: &mut Scene, state: &State, assets: &Assets) {
                 motion::transform_group(&mut out.draw[at..], 0., 0., level);
             }
             let ink = movie_view::mix(WHITE, accent_ink(state), level);
-            let icon = match e.domain.as_str() {
-                "light" => "smart-light",
-                "lock" => "smart-lock",
-                "fan" => "smart-fan",
-                "cover" => "smart-door",
-                "sensor" | "climate" => "thermometer",
-                "binary_sensor" => "eye",
-                _ => "power",
-            };
+            let icon = smart_icon(e);
             out.shape(
                 Rect::new(r.x + 24., r.y + (r.h - 60.) / 2., 60., 60.),
                 30.,
@@ -4760,11 +4846,27 @@ fn smart_home_detail(out: &mut Scene, state: &State, assets: &Assets) {
     out.controls.clear();
     out.draw.push(Draw::Clip(None));
     out.shape(Rect::new(0., 0., 1920., 1080.), 0., c(0x000000, 0.6));
-    let slider = e.domain == "light" && e.brightness.is_some();
+    // The dial is whatever this device adjusts: brightness, speed, position,
+    // target temperature, volume, humidity or a number.
+    let dial = e.dial().filter(|_| state.ha_online);
+    let action = e.primary().filter(|_| state.ha_online).map(|(service, _)| {
+        match (e.domain.as_str(), service) {
+            ("lock", "unlock") => "Unlock",
+            ("lock", _) => "Lock",
+            ("cover", "open_cover") => "Open",
+            ("cover", _) => "Close",
+            ("media_player", "turn_on") => "On",
+            ("media_player", _) => "Play/Pause",
+            ("vacuum", "start") => "Start",
+            ("vacuum", _) => "Dock",
+            ("button" | "input_button", _) => "Press",
+            _ => "On/Off",
+        }
+    });
     let lit = e.actionable() && e.on() && state.ha_online;
     let area_h = if e.area.is_empty() { 0. } else { 38. };
-    let body_h = if slider {
-        40. + 320. + 20. + 68.
+    let body_h = if dial.is_some() {
+        40. + 320. + 20. + 68. + 34.
     } else {
         32. + 56.
     };
@@ -4785,16 +4887,12 @@ fn smart_home_detail(out: &mut Scene, state: &State, assets: &Assets) {
         out.shape(badge, 56., c(0xffffff, 0.14));
         WHITE
     };
-    let icon = match e.domain.as_str() {
-        "light" => "smart-light",
-        "lock" => "smart-lock",
-        "fan" => "smart-fan",
-        "cover" => "smart-door",
-        "sensor" | "climate" => "thermometer",
-        "binary_sensor" => "eye",
-        _ => "power",
-    };
-    out.icon(assets, icon, Rect::new(cx - 28., y + 28., 56., 56.), ink);
+    out.icon(
+        assets,
+        smart_icon(e),
+        Rect::new(cx - 28., y + 28., 56., 56.),
+        ink,
+    );
     y += 112. + 28.;
     let name_style = text(40., 600, -0.02);
     out.text(
@@ -4815,16 +4913,12 @@ fn smart_home_detail(out: &mut Scene, state: &State, assets: &Assets) {
         );
         y += area_h;
     }
-    let hint = if slider {
+    let mut hint = String::new();
+    if let Some(dial) = &dial {
         y += 40.;
         let track = Rect::new(cx - 75., y, 150., 320.);
         out.shape(track, 40., c(0xffffff, 0.14));
-        let amount = if e.on() {
-            e.brightness.unwrap_or(0) as f32 / 100.
-        } else {
-            0.
-        };
-        let fill = (track.h * amount).round();
+        let fill = (track.h * dial.fraction()).round();
         if fill > 0. {
             out.draw.push(Draw::Clip(Some(Rect::new(
                 track.x,
@@ -4840,11 +4934,13 @@ fn smart_home_detail(out: &mut Scene, state: &State, assets: &Assets) {
         }
         out.control(Target::SmartBrightness(0), track, false);
         y += 320. + 20.;
+        // A light, fan or closed cover that is off says so instead of "0%".
+        let off = matches!(e.domain.as_str(), "light" | "fan") && !e.on();
         out.text(
-            if e.on() {
-                format!("{}%", e.brightness.unwrap_or(0))
-            } else {
+            if off {
                 "Off".into()
+            } else {
+                dial.text(dial.value)
             },
             Rect::new(panel.x, y, pw, 68.),
             text(56., 700, -0.02),
@@ -4852,24 +4948,45 @@ fn smart_home_detail(out: &mut Scene, state: &State, assets: &Assets) {
             true,
         );
         y += 68.;
-        "▲▼ Brightness · OK On/Off · Back Close"
+        // What the number is, and the device's own words for its state.
+        out.text(
+            tvos_settings_view::ellipsis_for_smart(
+                assets,
+                &format!("{} · {}", dial.label, smart_value(e)),
+                text(24., 500, 0.),
+                pw - 160.,
+            ),
+            Rect::new(panel.x + 80., y, pw - 160., 34.),
+            text(24., 500, 0.),
+            c(0xffffff, 0.7),
+            true,
+        );
+        y += 34.;
+        hint.push_str(&format!("▲▼ {} · ", dial.label));
     } else {
         y += 32.;
         out.text(
-            smart_value(e),
+            tvos_settings_view::ellipsis_for_smart(
+                assets,
+                &smart_value(e),
+                text(44., 600, -0.02),
+                pw - 160.,
+            ),
             Rect::new(panel.x + 80., y, pw - 160., 56.),
             text(44., 600, -0.02),
             WHITE,
             true,
         );
+        if state.focus == Target::SmartBrightness(0) && action.is_some() {
+            out.accent_ring(badge, 56., state);
+        }
         out.control(Target::SmartBrightness(0), badge, false);
         y += 56.;
-        if e.domain == "light" {
-            "OK On/Off · Back Close"
-        } else {
-            "Back Close"
-        }
-    };
+    }
+    if let Some(action) = action {
+        hint.push_str(&format!("OK {action} · "));
+    }
+    hint.push_str("Back Close");
     out.text(
         hint,
         Rect::new(panel.x + 40., y + 36., pw - 80., 28.),
