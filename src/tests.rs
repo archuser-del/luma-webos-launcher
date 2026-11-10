@@ -1879,6 +1879,8 @@ fn smart_home_tvos_push_pop_and_selection() {
             unit: String::new(),
             hidden: false,
             device_class: String::new(),
+            adjustable: true,
+            ..Default::default()
         },
         crate::smart_home::Entity {
             id: "light.living".into(),
@@ -1890,6 +1892,8 @@ fn smart_home_tvos_push_pop_and_selection() {
             unit: String::new(),
             hidden: false,
             device_class: String::new(),
+            adjustable: true,
+            ..Default::default()
         },
     ];
     state.open_settings();
@@ -1924,6 +1928,7 @@ fn smart_home_selection_explicitly_none_is_not_default_all() {
         unit: String::new(),
         hidden: false,
         device_class: String::new(),
+        ..Default::default()
     }];
     state.focus = Target::SmartPick(1, "camera.front".into());
     state.activate();
@@ -2865,6 +2870,11 @@ fn typography_all_pages_use_semantic_tv_scale() {
                     assert!(style.size >= 21.);
                     continue;
                 }
+                // The Home headline (greeting or weather phrase) is display type
+                // that shrinks from 78 px until it fits two lines.
+                if page == 0 && style.display == Some(true) && (42. ..=78.).contains(&style.size) {
+                    continue;
+                }
                 if weather {
                     assert!(
                         (18. ..=84.).contains(&style.size),
@@ -3403,6 +3413,212 @@ fn ha_entity(id: &str, name: &str, state: &str) -> crate::smart_home::Entity {
         domain: id.split_once('.').unwrap().0.into(),
         ..Default::default()
     }
+}
+
+#[test]
+fn jellyfin_libraries_row_opens_each_library_as_a_tab() {
+    use crate::stacks::{CardShape, StackConfig, StackItem};
+    let mut state = ready();
+    state.preferences.stacks = vec![StackConfig {
+        name: "Libraries".into(),
+        source: "jellyfin".into(),
+        collection: crate::jellyfin::LIBRARIES.into(),
+        shape: CardShape::Wide,
+        ..Default::default()
+    }];
+    state.jellyfin_libraries = [
+        ("view:a", "Movies"),
+        ("view:b", "Shows"),
+        ("music:c", "Music"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (collection, name))| crate::jellyfin::LibraryInfo {
+        card: 10 + i as i64,
+        collection: (*collection).into(),
+        name: (*name).into(),
+        detail: String::new(),
+    })
+    .collect();
+    state.stack_items = vec![
+        (0..3)
+            .map(|i| StackItem {
+                title: format!("Library {i}"),
+                poster: None,
+                id: 10 + i,
+            })
+            .collect(),
+    ];
+    // Every card is a library: no View Library card at the end.
+    assert!(crate::stacks::is_hub(&state.preferences.stacks[0]));
+    assert_eq!(crate::stacks::row_len(&state, 0), 3);
+    assert_eq!(
+        crate::stacks::row_title(&state.preferences.stacks[0]),
+        "Libraries"
+    );
+    // The second card opens the page on the second library.
+    state.focus = Target::StackCard(0, 1);
+    assert!(state.activate().is_empty());
+    let library = state.library.as_ref().expect("library page");
+    assert_eq!(library.tabs.len(), 3);
+    assert_eq!(library.tab_id(), "view:b");
+    assert_eq!(library.source, "jellyfin");
+    assert!(!library.square);
+    assert_eq!(library.restore, Target::StackCard(0, 1));
+    // The music card opens square album covers.
+    state.close_library();
+    state.focus = Target::StackCard(0, 2);
+    state.activate();
+    let library = state.library.as_ref().unwrap();
+    assert_eq!(library.tab_id(), "music:c");
+    assert!(library.square);
+    // An ordinary Jellyfin row still ends with View Library.
+    let ordinary = StackConfig {
+        source: "jellyfin".into(),
+        collection: "latest".into(),
+        ..Default::default()
+    };
+    assert!(crate::stacks::ends_with_library(&ordinary));
+    assert!(!crate::stacks::ends_with_library(
+        &state.preferences.stacks[0]
+    ));
+}
+
+#[test]
+fn home_assistant_devices_are_parsed_with_their_dials() {
+    let entities = crate::smart_home::parse_states(
+        r#"[
+        {"entity_id":"climate.hall","state":"heat","attributes":{"friendly_name":"Hall","temperature":21.5,
+          "current_temperature":20.3,"min_temp":7,"max_temp":30,"target_temp_step":0.5}},
+        {"entity_id":"media_player.sonos","state":"playing","attributes":{"volume_level":0.35,"media_title":"Song"}},
+        {"entity_id":"cover.blinds","state":"open","attributes":{"current_position":70,"supported_features":15}},
+        {"entity_id":"cover.garage","state":"closed","attributes":{"supported_features":3}},
+        {"entity_id":"light.plug","state":"on","attributes":{"supported_color_modes":["onoff"]}},
+        {"entity_id":"light.lamp","state":"on","attributes":{"supported_color_modes":["brightness"],"brightness":128}},
+        {"entity_id":"fan.air","state":"on","attributes":{"percentage":40,"percentage_step":20,"supported_features":1}},
+        {"entity_id":"lock.front","state":"locked","attributes":{}},
+        {"entity_id":"input_number.offset","state":"3.0","attributes":{"min":0,"max":10,"step":0.5}}
+        ]"#,
+    )
+    .unwrap();
+    let get = |id: &str| entities.iter().find(|e| e.id == id).unwrap().clone();
+    let hall = get("climate.hall");
+    let dial = hall.dial().unwrap();
+    assert_eq!(
+        (dial.value, dial.min, dial.max, dial.step),
+        (21.5, 7., 30., 0.5)
+    );
+    assert_eq!(dial.stepped(true), 22.);
+    assert_eq!(dial.text(22.), "22.0°");
+    assert_eq!(hall.current, Some(20.3));
+    let (service, data) = hall.dial_call(22.).unwrap();
+    assert_eq!(service, "set_temperature");
+    assert_eq!(data["temperature"], 22.);
+    assert_eq!(hall.primary(), Some(("turn_off", Some("off"))));
+
+    let sonos = get("media_player.sonos");
+    assert_eq!(sonos.dial().unwrap().value, 35.);
+    assert_eq!(sonos.primary(), Some(("media_play_pause", Some("paused"))));
+    let (service, data) = sonos.dial_call(40.).unwrap();
+    assert_eq!(service, "volume_set");
+    assert!((data["volume_level"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+
+    assert_eq!(get("cover.blinds").dial().unwrap().value, 70.);
+    // No position support: open and close only.
+    assert!(get("cover.garage").dial().is_none());
+    assert_eq!(
+        get("cover.garage").primary(),
+        Some(("open_cover", Some("open")))
+    );
+    // An on/off plug shown as a light has no brightness dial.
+    assert!(get("light.plug").dial().is_none());
+    assert_eq!(get("light.lamp").dial().unwrap().value, 50.);
+    let fan = get("fan.air").dial().unwrap();
+    assert_eq!((fan.value, fan.step), (40., 20.));
+    assert_eq!(fan.stepped(false), 20.);
+    let lock = get("lock.front");
+    assert!(lock.confirm_first());
+    assert_eq!(lock.primary(), Some(("unlock", Some("unlocked"))));
+    let offset = get("input_number.offset").dial().unwrap();
+    assert_eq!(offset.stepped(true), 3.5);
+    // The dial never leaves its range.
+    let mut top = offset.clone();
+    top.value = 10.;
+    assert_eq!(top.stepped(true), 10.);
+}
+
+#[test]
+fn only_known_home_assistant_services_are_called() {
+    use crate::smart_home::service_allowed;
+    for (domain, service) in [
+        ("light", "turn_on"),
+        ("lock", "unlock"),
+        ("climate", "set_temperature"),
+        ("media_player", "volume_set"),
+        ("cover", "set_cover_position"),
+        ("vacuum", "return_to_base"),
+        ("input_button", "press"),
+        ("scene", "turn_on"),
+    ] {
+        assert!(service_allowed(domain, service), "{domain}.{service}");
+    }
+    for (domain, service) in [
+        ("alarm_control_panel", "alarm_disarm"),
+        ("lock", "open"),
+        ("light", "toggle"),
+        ("homeassistant", "restart"),
+        ("camera", "turn_off"),
+    ] {
+        assert!(!service_allowed(domain, service), "{domain}.{service}");
+    }
+}
+
+#[test]
+fn ok_controls_devices_and_a_lock_asks_twice() {
+    let mut state = ready();
+    state.preferences.smart_home.show_tab = true;
+    state.ha_online = true;
+    let mut lamp = ha_entity("light.lamp", "Lamp", "off");
+    lamp.adjustable = true;
+    let lock = ha_entity("lock.front", "Front door", "locked");
+    let mut thermostat = ha_entity("climate.hall", "Hall", "heat");
+    thermostat.adjustable = true;
+    thermostat.level = Some(21.);
+    state.ha_entities = vec![lamp, lock, thermostat];
+    let call = |effects: &[Effect]| match effects {
+        [Effect::HomeAssistant(crate::smart_home::Command::Call { service, data, .. })] => {
+            (service.clone(), data.clone())
+        }
+        other => panic!("expected one service call, got {other:?}"),
+    };
+    // A light toggles at once and shows the new state.
+    state.focus = Target::SmartEntity("light.lamp".into());
+    assert_eq!(call(&state.activate()).0, "turn_on");
+    assert_eq!(state.ha_entities[0].state, "on");
+    // A lock opens its panel first; OK there unlocks.
+    state.focus = Target::SmartEntity("lock.front".into());
+    assert!(state.activate().is_empty());
+    assert_eq!(state.ha_detail.as_deref(), Some("lock.front"));
+    assert_eq!(call(&state.activate()).0, "unlock");
+    assert_eq!(state.ha_entities[1].state, "unlocked");
+    // Up in a thermostat's panel raises the target by its step.
+    state.ha_detail = Some("climate.hall".into());
+    state.focus = Target::SmartBrightness(0);
+    let (service, data) = call(&state.direction(Direction::Up, &[]));
+    assert_eq!(service, "set_temperature");
+    assert_eq!(data["temperature"], 21.5);
+    assert_eq!(state.ha_entities[2].level, Some(21.5));
+    // Offline: nothing is sent.
+    state.ha_online = false;
+    assert!(state.direction(Direction::Up, &[]).is_empty());
+    // The web interface opens in the TV browser.
+    state.ha_detail = None;
+    state.preferences.smart_home.server_url = "http://ha.local:8123".into();
+    state.focus = Target::SmartWebUi;
+    assert_eq!(
+        state.activate(),
+        vec![Effect::OpenUrl("http://ha.local:8123".into())]
+    );
 }
 
 #[test]

@@ -130,6 +130,9 @@ pub enum Target {
     /// Settings › Wallpaper › Upload Videos: rotate only uploaded clips.
     VideoUploadOnlyMine,
     VideoUploadDone,
+    /// Settings › Wallpaper › ImmichFrame: photo interval, use or stop using.
+    ImmichInterval,
+    ImmichUse,
     GameClose,
     GamePlay,
     GameWake,
@@ -206,6 +209,8 @@ pub enum Target {
     /// The Hide/Show button of a camera's long-press menu.
     SmartCameraHide,
     SmartBrightness(i8),
+    /// Smart Home tab: open the Home Assistant web interface.
+    SmartWebUi,
     /// Title card (movie popup).
     MovieClose,
     MoviePlay,
@@ -243,6 +248,8 @@ pub enum SettingsLevel {
     WallpaperCategory(usize),
     /// Upload video wallpapers from a phone or computer.
     WallpaperUpload,
+    /// Connect an ImmichFrame server for the photo wallpaper.
+    WallpaperImmich,
     HeadingFonts,
     TextFonts,
     UiResolution,
@@ -364,6 +371,13 @@ pub enum Effect {
     /// Serve the video upload page on the LAN, or stop serving it.
     VideoUploadStart,
     VideoUploadStop,
+    /// Serve the phone form for an ImmichFrame address, or stop serving it.
+    ImmichFormStart,
+    ImmichFormStop,
+    /// Load another ImmichFrame photo now.
+    ImmichSkip,
+    /// Open a web page in the TV's browser.
+    OpenUrl(String),
     /// Fetch the Plex libraries offered as row contents.
     PlexViews,
     MoonlightProbe(String),
@@ -466,6 +480,8 @@ pub struct State {
     pub jellyfin_phone: bool,
     /// Libraries of the signed-in user: ("view:<id>", name).
     pub jellyfin_views: Vec<(String, String)>,
+    /// The server's libraries, as the Libraries row and its page show them.
+    pub jellyfin_libraries: Vec<crate::jellyfin::LibraryInfo>,
     pub plex_code: Option<String>,
     pub plex_status: Option<String>,
     pub plex_error: bool,
@@ -475,6 +491,12 @@ pub struct State {
     pub video_upload_qr: Vec<Vec<bool>>,
     pub video_upload_link: Option<String>,
     pub video_upload_status: Option<(String, bool)>,
+    /// ImmichFrame wallpaper: the photo on screen, the one fading out, the
+    /// setup page's QR and last result.
+    pub immich_frame: Option<crate::immich_frame::Frame>,
+    pub immich_previous: Option<(String, Instant)>,
+    pub immich_qr: Vec<Vec<bool>>,
+    pub immich_status: Option<(String, bool)>,
     /// Libraries of the Plex server: ("section:<key>", title).
     pub plex_views: Vec<(String, String)>,
     /// Typed media X site before it is saved.
@@ -649,7 +671,7 @@ impl State {
             home.selection_version = 1;
         }
         let video_gallery = preferences.background == "video";
-        let photo_backup = if video_gallery {
+        let photo_backup = if matches!(preferences.background.as_str(), "video" | "immich") {
             "yosemite".into()
         } else {
             preferences.background.clone()
@@ -680,6 +702,7 @@ impl State {
             jellyfin_qr_caption: (String::new(), String::new()),
             jellyfin_phone: false,
             jellyfin_views: vec![],
+            jellyfin_libraries: vec![],
             plex_code: None,
             plex_status: None,
             plex_error: false,
@@ -687,6 +710,10 @@ impl State {
             video_upload_qr: vec![],
             video_upload_link: None,
             video_upload_status: None,
+            immich_frame: None,
+            immich_previous: None,
+            immich_qr: vec![],
+            immich_status: None,
             plex_views: vec![],
             moonlight_hosts: Vec::new(),
             moonlight_retry_host: None,
@@ -823,6 +850,77 @@ impl State {
         self.video_selected_count_cache.get()
     }
 
+    /// OK on a Home Assistant device: toggle, lock, play or pause, start.
+    /// The tile shows the expected state until Home Assistant confirms it.
+    pub fn ha_primary(&mut self, id: &str) -> Vec<Effect> {
+        if !self.ha_online {
+            return vec![];
+        }
+        let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id) else {
+            return vec![];
+        };
+        let Some((service, expected)) = entity.primary() else {
+            return vec![];
+        };
+        if let Some(state) = expected {
+            entity.state = state.into();
+        }
+        self.dirty = true;
+        vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
+            entity_id: id.to_owned(),
+            service: service.into(),
+            data: serde_json::json!({ "entity_id": id }),
+        })]
+    }
+
+    /// Wallpaper type: 0 photo, 1 video, 2 ImmichFrame.
+    pub fn wallpaper_kind(&self) -> usize {
+        match self.preferences.background.as_str() {
+            "video" => 1,
+            "immich" => 2,
+            _ => 0,
+        }
+    }
+
+    /// Keep the current photo wallpaper as the one Type › Photo returns to.
+    /// Video and ImmichFrame are not photos from the gallery.
+    fn remember_photo(&mut self) {
+        if !matches!(self.preferences.background.as_str(), "video" | "immich") {
+            self.photo_background_backup = self.preferences.background.clone();
+        }
+    }
+
+    /// A photo arrived from ImmichFrame; the one on screen fades into it.
+    pub fn immich_show(&mut self, frame: crate::immich_frame::Frame) {
+        if let Some(old) = self.immich_frame.take() {
+            self.immich_previous = Some((old.path, Instant::now()));
+        }
+        self.immich_frame = Some(frame);
+        self.immich_status = None;
+        self.dirty = true;
+    }
+
+    /// The phone form accepted a server: use it as the wallpaper.
+    pub fn immich_linked(
+        &mut self,
+        mut link: crate::immich_frame::ImmichFrameLink,
+        frame: crate::immich_frame::Frame,
+    ) -> Vec<Effect> {
+        link.interval_seconds = self.preferences.immich.interval_seconds;
+        link.show_info = self.preferences.immich.show_info;
+        self.immich_status = Some((format!("Connected to {}.", link.host()), false));
+        self.preferences.immich = link;
+        self.remember_photo();
+        self.preferences.background = "immich".into();
+        self.previous_background = None;
+        self.immich_show(frame);
+        self.immich_status = Some((
+            format!("Connected to {}.", self.preferences.immich.host()),
+            false,
+        ));
+        vec![Effect::Save]
+    }
+
     /// Rebuild the cached video lists after uploaded clips changed.
     pub fn refresh_video_catalog(&mut self) {
         let catalog = crate::video_catalog::all();
@@ -863,7 +961,7 @@ impl State {
             self.preferences.video_excluded.remove(&video.id);
         }
         if self.preferences.background != "video" {
-            self.photo_background_backup = self.preferences.background.clone();
+            self.remember_photo();
             self.preferences.background = "video".into();
         }
         self.preferences.video_index = index;
@@ -893,7 +991,7 @@ impl State {
             self.preferences.video_index = first;
         }
         if self.preferences.background != "video" {
-            self.photo_background_backup = self.preferences.background.clone();
+            self.remember_photo();
             self.preferences.background = "video".into();
         }
         self.video_upload_status = Some((
@@ -1841,9 +1939,7 @@ impl State {
                         .position(|&f| f == self.preferences.text_font)
                         .unwrap_or(0),
                 ),
-                SettingsLevel::WallpaperType => {
-                    Target::WallpaperTab(usize::from(self.preferences.background == "video"))
-                }
+                SettingsLevel::WallpaperType => Target::WallpaperTab(self.wallpaper_kind()),
                 SettingsLevel::WallpaperPhotos => Target::Background(0),
                 SettingsLevel::StackAdd => Target::StackSource(0),
                 SettingsLevel::MoonlightHosts => Target::MoonlightHost(0),
@@ -1851,6 +1947,7 @@ impl State {
                 SettingsLevel::JellyfinLink => Target::JellyfinServer(0),
                 SettingsLevel::PlexLink => Target::PlexCancel,
                 SettingsLevel::WallpaperUpload => Target::VideoUploadDone,
+                SettingsLevel::WallpaperImmich => Target::ImmichUse,
                 SettingsLevel::StackConfig(_) => Target::StackOpt(0),
                 SettingsLevel::StackCollection(i) => Target::StackPick(
                     self.preferences
@@ -2435,6 +2532,7 @@ impl State {
                     Target::WallpaperMenu(0)
                         | Target::WallpaperTab(0)
                         | Target::WallpaperTab(1)
+                        | Target::WallpaperTab(2)
                         | Target::VideoGroup(0)
                         | Target::VideoPick(_)
                         | Target::Setting(0)
@@ -3093,20 +3191,22 @@ impl State {
                         -10i8
                     };
                     let id = self.ha_detail.as_deref().unwrap_or("").to_owned();
+                    // Brightness, speed, position, target temperature, volume:
+                    // whatever this device's dial is, one step per press.
                     if let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id)
-                        && entity.domain == "light"
                         && self.ha_online
+                        && let Some(dial) = entity.dial()
                     {
-                        let value = (entity.brightness.unwrap_or(50) as i16 + delta as i16)
-                            .clamp(1, 100) as u8;
-                        entity.brightness = Some(value);
-                        return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                            entity_id: id.clone(),
-                            service: "turn_on".into(),
-                            data: serde_json::json!({
-                                "entity_id": id, "brightness_pct": value
-                            }),
-                        })];
+                        let value = dial.stepped(delta > 0);
+                        if let Some((service, data)) = entity.dial_call(value) {
+                            entity.set_dial(value);
+                            self.dirty = true;
+                            return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
+                                entity_id: id,
+                                service: service.into(),
+                                data,
+                            })];
+                        }
                     }
                 }
                 return vec![];
@@ -3326,7 +3426,7 @@ impl State {
             self.preferences.video_excluded.remove(id);
             self.preferences.video_index = index;
             if self.preferences.background != "video" {
-                self.photo_background_backup = self.preferences.background.clone();
+                self.remember_photo();
             }
             self.preferences.background = "video".into();
             self.video_frame_ready = false;
@@ -3756,8 +3856,11 @@ impl State {
                 let Some(stack) = crate::stacks::row_stack(self, row) else {
                     return vec![];
                 };
+                if crate::stacks::is_hub(&self.preferences.stacks[stack]) {
+                    return self.open_library_hub(row, index);
+                }
                 if index >= crate::stacks::row_shown(self, row)
-                    && crate::stacks::has_library(&self.preferences.stacks[stack].source)
+                    && crate::stacks::ends_with_library(&self.preferences.stacks[stack])
                 {
                     return self.open_library(row, index);
                 }
@@ -3857,6 +3960,31 @@ impl State {
                 return self.back();
             }
             Target::VideoUploadOnlyMine => return self.only_uploaded_videos(),
+            Target::ImmichInterval => {
+                self.preferences.immich.interval_seconds = self.preferences.immich.next_interval();
+                self.dirty = true;
+                return vec![Effect::Save];
+            }
+            Target::ImmichUse => {
+                if !self.preferences.immich.linked() {
+                    self.immich_status = Some((
+                        "Scan the code and enter your ImmichFrame address first.".into(),
+                        true,
+                    ));
+                    self.dirty = true;
+                    return vec![];
+                }
+                if self.preferences.background == "immich" {
+                    self.preferences.background = "video".into();
+                    self.video_frame_ready = false;
+                } else {
+                    self.remember_photo();
+                    self.preferences.background = "immich".into();
+                }
+                self.previous_background = None;
+                self.dirty = true;
+                return vec![Effect::Save];
+            }
             Target::PlexNewCode => {
                 self.plex_code = None;
                 self.plex_error = false;
@@ -4105,13 +4233,17 @@ impl State {
                             stack.collection = id.clone();
                             stack.list_title = label.clone();
                             stack.name = crate::stacks::row_title(stack);
-                            // Albums are square; leaving music goes back to posters.
+                            // Libraries are wide banners and albums are square;
+                            // leaving either goes back to posters.
                             if stack.source == "jellyfin" {
+                                use crate::stacks::CardShape;
                                 let music = crate::jellyfin::music_collection(&stack.collection);
-                                if music {
-                                    stack.shape = crate::stacks::CardShape::Square;
-                                } else if stack.shape == crate::stacks::CardShape::Square {
-                                    stack.shape = crate::stacks::CardShape::Poster;
+                                if crate::stacks::is_hub(stack) {
+                                    stack.shape = CardShape::Wide;
+                                } else if music {
+                                    stack.shape = CardShape::Square;
+                                } else if stack.shape != CardShape::Poster {
+                                    stack.shape = CardShape::Poster;
                                 }
                             }
                             if let Some(items) = self.stack_items.get_mut(i) {
@@ -4356,24 +4488,25 @@ impl State {
                 self.focus = Target::SmartClose;
             }
             Target::SmartEntity(id) => {
-                if let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id)
-                    && entity.actionable()
-                    && self.ha_online
-                {
-                    let turn_on = !entity.on();
-                    let service = if entity.domain == "cover" {
-                        if turn_on { "open_cover" } else { "close_cover" }
-                    } else if turn_on {
-                        "turn_on"
-                    } else {
-                        "turn_off"
-                    };
-                    entity.state = if turn_on { "on".into() } else { "off".into() };
-                    return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                        entity_id: id.clone(),
-                        service: service.into(),
-                        data: serde_json::json!({ "entity_id": id }),
-                    })];
+                // A lock asks twice, and a device with only a dial (a number)
+                // has nothing to toggle: both open their panel instead.
+                let panel = self
+                    .ha_entities
+                    .iter()
+                    .find(|e| e.id == id)
+                    .is_some_and(|e| e.confirm_first() || (!e.actionable() && e.dial().is_some()));
+                if panel {
+                    self.ha_detail = Some(id);
+                    self.focus = Target::SmartBrightness(0);
+                    self.dirty = true;
+                    return vec![];
+                }
+                return self.ha_primary(&id);
+            }
+            Target::SmartWebUi => {
+                let url = self.preferences.smart_home.server_url.clone();
+                if !url.is_empty() && !self.launching {
+                    return vec![Effect::OpenUrl(url)];
                 }
             }
             Target::SmartScene(id) => {
@@ -4388,16 +4521,8 @@ impl State {
                 }
             }
             Target::SmartBrightness(_) => {
-                if let Some(id) = &self.ha_detail
-                    && let Some(e) = self.ha_entities.iter().find(|e| &e.id == id)
-                    && e.domain == "light"
-                    && self.ha_online
-                {
-                    return vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-                        entity_id: id.clone(),
-                        service: if e.on() { "turn_off" } else { "turn_on" }.into(),
-                        data: serde_json::json!({ "entity_id": id }),
-                    })];
+                if let Some(id) = self.ha_detail.clone() {
+                    return self.ha_primary(&id);
                 }
             }
             Target::SmartSection(section) => {
@@ -4586,10 +4711,16 @@ impl State {
             Target::WallpaperMenu(index) => match index {
                 0 => self.settings_push(
                     SettingsLevel::WallpaperType,
-                    Target::WallpaperTab(usize::from(self.preferences.background == "video")),
+                    Target::WallpaperTab(self.wallpaper_kind()),
                 ),
                 1 => self.settings_push(SettingsLevel::WallpaperPhotos, Target::Background(0)),
                 2 => self.settings_push(SettingsLevel::WallpaperVideos, Target::VideoGroup(0)),
+                4 => {
+                    self.immich_qr.clear();
+                    self.immich_status = None;
+                    self.settings_push(SettingsLevel::WallpaperImmich, Target::ImmichUse);
+                    return vec![Effect::ImmichFormStart];
+                }
                 3 => {
                     self.video_upload_qr.clear();
                     self.video_upload_link = None;
@@ -4660,12 +4791,25 @@ impl State {
                 return vec![Effect::Save];
             }
             Target::WallpaperTab(tab) => {
+                // 0 Photo, 1 Video, 2 ImmichFrame.
+                if tab == 2 && !self.preferences.immich.linked() {
+                    // Not set up yet: straight to its page.
+                    self.immich_qr.clear();
+                    self.immich_status = None;
+                    self.settings_push(SettingsLevel::WallpaperImmich, Target::ImmichUse);
+                    return vec![Effect::ImmichFormStart];
+                }
                 let video = tab == 1;
-                if video && self.preferences.background != "video" {
-                    self.photo_background_backup = self.preferences.background.clone();
-                    self.preferences.background = "video".into();
-                } else if !video && self.preferences.background == "video" {
-                    self.preferences.background = self.photo_background_backup.clone();
+                self.remember_photo();
+                match tab {
+                    1 => {
+                        if self.preferences.background != "video" {
+                            self.video_frame_ready = false;
+                        }
+                        self.preferences.background = "video".into();
+                    }
+                    2 => self.preferences.background = "immich".into(),
+                    _ => self.preferences.background = self.photo_background_backup.clone(),
                 }
                 self.wallpaper_gallery_video = video;
                 self.previous_background = None;
@@ -4731,7 +4875,7 @@ impl State {
                     self.preferences.background = self.photo_background_backup.clone();
                     self.video_frame_ready = false;
                 } else {
-                    self.photo_background_backup = self.preferences.background.clone();
+                    self.remember_photo();
                     self.preferences.background = "video".into();
                 }
                 self.previous_background = None;
@@ -4766,6 +4910,9 @@ impl State {
                 self.preferences.background = selected.into();
                 self.photo_background_backup = selected.into();
                 return vec![Effect::Save];
+            }
+            Target::VideoNext if self.preferences.background == "immich" => {
+                return vec![Effect::ImmichSkip];
             }
             Target::VideoNext => {
                 self.preferences.video_index = crate::video_catalog::next_index(
@@ -5034,6 +5181,11 @@ impl State {
                 }
                 SettingsLevel::WallpaperPhotos => {
                     self.settings_pop(SettingsLevel::Section, Target::WallpaperMenu(1))
+                }
+                SettingsLevel::WallpaperImmich => {
+                    self.settings_pop(SettingsLevel::Section, Target::WallpaperMenu(4));
+                    self.immich_qr.clear();
+                    return vec![Effect::ImmichFormStop];
                 }
                 SettingsLevel::WallpaperUpload => {
                     self.settings_pop(SettingsLevel::Section, Target::WallpaperMenu(3));

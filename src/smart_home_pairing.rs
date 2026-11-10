@@ -125,6 +125,7 @@ fn token_form() -> Form {
         help: None,
         fields: vec![
             Field {
+                optional: false,
                 label: "Home Assistant address".into(),
                 name: "server".into(),
                 kind: FieldType::Text,
@@ -132,6 +133,7 @@ fn token_form() -> Form {
                 placeholder: "http://homeassistant.local:8123".into(),
             },
             Field {
+                optional: false,
                 label: "Long-lived access token".into(),
                 name: "token".into(),
                 kind: FieldType::Secret,

@@ -481,6 +481,48 @@ impl State {
         vec![]
     }
 
+    /// A card of the Libraries row: the whole server, one tab per library,
+    /// opened on the library that was chosen.
+    pub fn open_library_hub(&mut self, row: usize, index: usize) -> Vec<Effect> {
+        let Some(stack) = crate::stacks::row_stack(self, row) else {
+            return vec![];
+        };
+        let chosen = self
+            .stack_items
+            .get(stack)
+            .and_then(|items| items.get(index))
+            .map(|item| item.id);
+        let tabs: Vec<(String, String)> = self
+            .jellyfin_libraries
+            .iter()
+            .map(|l| (l.collection.clone(), l.name.clone()))
+            .collect();
+        if tabs.is_empty() {
+            return vec![];
+        }
+        let tab = self
+            .jellyfin_libraries
+            .iter()
+            .position(|l| Some(l.card) == chosen)
+            .unwrap_or(0);
+        let mut library = Library::new(
+            false,
+            "Jellyfin".to_owned(),
+            tabs,
+            tab,
+            Target::StackCard(row, index),
+        );
+        library.source = "jellyfin".to_owned();
+        library.square = crate::jellyfin::music_collection(library.tab_id());
+        self.library = Some(library);
+        self.library_closing = None;
+        self.focus_tweens.clear();
+        self.focus = Target::LibCard(0);
+        self.pointer = false;
+        self.dirty = true;
+        vec![]
+    }
+
     pub fn close_library(&mut self) {
         if let Some(library) = self.library.take() {
             self.focus = library.restore.clone();
@@ -552,6 +594,10 @@ impl State {
             }
             library.tab = tab;
             library.query.clear();
+            // Tabs of a server can mix films and music: albums are square.
+            if library.source == "jellyfin" {
+                library.square = crate::jellyfin::music_collection(library.tab_id());
+            }
             library.reset();
             library.games
         };

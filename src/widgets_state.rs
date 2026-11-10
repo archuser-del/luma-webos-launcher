@@ -461,30 +461,16 @@ impl State {
     }
 
     fn smart_toggle(&mut self, id: &str) -> Vec<Effect> {
-        if !self.ha_online {
+        // A lock is never one press away on Home; it is opened from its
+        // panel on the Smart Home tab.
+        if self
+            .ha_entities
+            .iter()
+            .any(|e| e.id == id && e.confirm_first())
+        {
             return vec![];
         }
-        let Some(entity) = self.ha_entities.iter_mut().find(|e| e.id == id) else {
-            return vec![];
-        };
-        if !entity.actionable() {
-            return vec![];
-        }
-        let turn_on = !entity.on();
-        let service = if entity.domain == "cover" {
-            if turn_on { "open_cover" } else { "close_cover" }
-        } else if turn_on {
-            "turn_on"
-        } else {
-            "turn_off"
-        };
-        entity.state = if turn_on { "on".into() } else { "off".into() };
-        self.dirty = true;
-        vec![Effect::HomeAssistant(crate::smart_home::Command::Call {
-            entity_id: id.to_owned(),
-            service: service.into(),
-            data: serde_json::json!({ "entity_id": id }),
-        })]
+        self.ha_primary(id)
     }
 
     fn open_widget(&mut self, kind: Kind, size: Size) -> Vec<Effect> {

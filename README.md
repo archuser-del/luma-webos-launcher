@@ -7,7 +7,7 @@ Luma replaces the cluttered LG Home with one calm screen: your favorite apps, li
 Free and open source (MIT). Fork it, change it, ship it.
 
 > [!NOTE]
-> **This is a fork.** It builds Luma **2.3.0** under its own app ID, **`com.archbtw.luma`**, so it
+> **This is a fork.** It builds Luma **2.4.0** under its own app ID, **`com.archbtw.luma`**, so it
 > installs beside the original Luma (`com.denisefremov.luma`) with its own settings. What differs
 > from the original:
 >
@@ -16,6 +16,10 @@ Free and open source (MIT). Fork it, change it, ship it.
 > - LG's own apps start hidden.
 > - The crypto widget is removed.
 > - A command-line autostart hook (`autostart.sh`) is included.
+> - Home Assistant devices can be controlled (thermostats, locks, media players, covers and more), and
+>   the Home Assistant web interface opens from the Smart Home tab.
+> - A Jellyfin **Libraries** row shows every library as a wide banner card.
+> - The wallpaper can be a photo frame fed by an ImmichFrame server.
 >
 > The promo video and most screenshots below show the original Luma, so headline text and widgets
 > look a little different from this build.
@@ -33,6 +37,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.
+- Photo-frame wallpaper from [Immich](https://immich.app): **Settings › Wallpaper › ImmichFrame Photos** connects an [ImmichFrame](https://immichframe.dev) server (scan the QR code, type its address and, if it has one, its authentication secret). Luma shows a new photo every 15 seconds to 15 minutes, with the place and date it was taken. Portrait photos are shown whole over a soft blur.
 - Frosted-glass UI with one accent gradient, adjustable colors, heading and text fonts, and UI resolution (Auto / 4K / 1440p / 1080p).
 - A tech-themed headline that comments on the weather ("Thermal throttling: off.", "Packet loss: rain."), plus a clock and date. Prefer a plain greeting? Switch **Settings › General › Greeting** from Tech to Classic (also tech themed: "System booted. Good morning.").
 - LG's own apps (Multi View, Gallery, Home Hub, Camera, Web Browser, LG Link, Sports, Memory Care and the like) start hidden. Live TV stays. Unhide any of them from **Apps › Hidden**.
@@ -46,6 +51,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 **Movies, series and music (Jellyfin, Plex)**
 
 - Sign in with a code or a QR code on your phone: no typing with the remote.
+- A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
 - Music: albums, songs and a now-playing screen.
@@ -59,7 +65,10 @@ Free and open source (MIT). Fork it, change it, ship it.
 **Smart Home (Home Assistant)**
 
 - Pair by scanning a QR code with your phone. Your token never has to be typed on the TV.
-- Status chips (climate, alarm, lights, doors), scenes, live cameras and device tiles you can toggle with the remote.
+- Status chips (climate, alarm, lights, doors), scenes, live cameras and device tiles.
+- Control with the remote: **OK** toggles lights, switches, fans, covers, humidifiers and helpers, plays or pauses a media player, starts or docks a vacuum, and presses buttons. **Hold OK** opens a device's panel, where **Up/Down** set its brightness, fan speed, cover position, target temperature, volume or humidity.
+- Locks are deliberate: OK opens the lock's panel, and OK there locks or unlocks. Alarm panels are shown but never controlled.
+- **Open Home Assistant** on the Smart Home tab opens your server's full web interface in the TV's browser, for everything the tiles don't cover.
 - Hide any camera or device from the TV.
 
 **Remote and pointer**
@@ -93,6 +102,9 @@ Free and open source (MIT). Fork it, change it, ship it.
     <td width="50%"><img src="docs/screenshots/music.jpg" alt="Now playing"></td>
     <td width="50%"><img src="docs/screenshots/album.jpg" alt="Album"></td>
   </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/jellyfin-libraries.jpg" alt="Jellyfin Libraries row on Home"></td>
+  </tr>
 </table>
 
 ### Games (Moonlight)
@@ -111,6 +123,9 @@ Free and open source (MIT). Fork it, change it, ship it.
     <td width="50%"><img src="docs/screenshots/smart-home.jpg" alt="Smart Home tab with cameras"></td>
     <td width="50%"><img src="docs/screenshots/settings-smart-home.jpg" alt="Home Assistant settings"></td>
   </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/smart-home-control.jpg" alt="Thermostat panel: Up and Down set the target temperature"></td>
+  </tr>
 </table>
 
 ### Widgets and your own videos
@@ -119,6 +134,9 @@ Free and open source (MIT). Fork it, change it, ship it.
   <tr>
     <td width="50%"><img src="docs/screenshots/weather.jpg" alt="Weather"></td>
     <td width="50%"><img src="docs/screenshots/upload-videos.jpg" alt="Upload Videos: QR code and address for sending your own video wallpapers"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/immich-wallpaper.jpg" alt="ImmichFrame photo wallpaper with place and date"></td>
   </tr>
 </table>
 
@@ -192,12 +210,12 @@ you only need one of the two.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.3.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.4.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
 `ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.0.11_all.ipk`.
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.3.0_arm.ipk
+ares-install --device tv com.archbtw.luma_2.4.0_arm.ipk
 ares-install --device tv com.archbtw.luma.player_0.0.11_all.ipk
 ```
 
@@ -230,7 +248,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.3.0_arm.ipk, player IPK, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.4.0_arm.ipk, player IPK, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):
@@ -256,7 +274,7 @@ Tests: `pnpm test`. Lint and format: `pnpm check`, `pnpm format`. More in [devel
 | Player              | Separate web app: HTML5 video, HLS, vanilla JS                                                   |
 | TV integration      | Luna service bus, Homebrew Channel elevated service                                              |
 | Build tooling       | pnpm, Node, `sharp`, `@webos-tools/cli`, Nix flake, oxlint / oxfmt, Changesets                   |
-| Data sources        | Open-Meteo, Jellyfin, Plex, Home Assistant, Steam store artwork                                  |
+| Data sources        | Open-Meteo, Jellyfin, Plex, Home Assistant, ImmichFrame, Steam store artwork                     |
 
 ## Privacy
 
@@ -264,6 +282,7 @@ Tests: `pnpm test`. Lint and format: `pnpm check`, `pnpm format`. More in [devel
 - Settings, favorites and tokens stay in a local JSON file on the TV.
 - No API keys are built in. Sign-ins go through Quick Connect, Plex link codes or a QR code on your phone.
 - Weather uses the location you choose, never IP geolocation.
+- The ImmichFrame wallpaper talks only to the ImmichFrame server you entered. Its address and secret stay in the settings file on the TV, and photos are kept only while they are on screen.
 - Uploaded videos stay on the TV. The upload page is only reachable on your local network, needs the
   one-time code in its address, and stops when you leave **Upload Videos** (or after 30 minutes).
 
@@ -282,8 +301,9 @@ Also thanks to [webOS Homebrew](https://www.webosbrew.org/), [Moonlight](https:/
 
 Most of the original Luma was written with AI coding assistants (Claude Code and OpenAI Codex), directed and tested on a real LG OLED C1 by its maintainer, who checked every change on the TV before release.
 
-The 2.3.0 changes in this fork were written with Claude Code and checked with the test suite, desktop
-rendering and a browser test of the upload page. They have not been tested on a TV yet.
+The changes in this fork (2.3.0 and later) were written with Claude Code and checked with the test
+suite, desktop rendering, a browser test of the upload page and stand-in ImmichFrame and Jellyfin
+servers. They have not been tested on a TV yet.
 
 ## License
 

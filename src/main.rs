@@ -7,6 +7,7 @@ mod font;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod hw_wallpaper;
 mod i18n;
+mod immich_frame;
 mod jellyfin;
 mod library;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -259,6 +260,16 @@ fn effects(
                     platform.send(Request::Refresh);
                 }
             }
+            Effect::OpenUrl(url) => {
+                if platform.webos {
+                    if !state.launching {
+                        state.launching = true;
+                        platform.send(Request::OpenUrl(url));
+                    }
+                } else {
+                    state.notify(format!("Would open {url} in the TV browser"));
+                }
+            }
             Effect::Launch(id) => {
                 if scroll_preview::is_placeholder(&id) {
                     state.notify(state.preferences.language.t("scrollTestOnly"));
@@ -409,6 +420,13 @@ fn effects(
             Effect::VideoUploadStop => {
                 VIDEO_UPLOAD.lock().unwrap().take();
             }
+            Effect::ImmichFormStart => immich_form_start(preferences),
+            Effect::ImmichFormStop => immich_form_stop(),
+            Effect::ImmichSkip => {
+                if let Some(service) = IMMICH.get() {
+                    service.send(immich_frame::Command::Skip);
+                }
+            }
             Effect::PlexLink => {
                 if state.preferences.plex.client_id.is_empty() {
                     state.preferences.plex.client_id = phone_link::random_hex()[..32].to_owned();
@@ -535,7 +553,7 @@ fn script(
 ) -> Result<Vec<Effect>, String> {
     Ok(match action {
         "smart-demo" | "smart-detail" | "smart-camera" | "smart-settings" | "smart-connect"
-        | "smart-devices" | "smart-signin" | "smart-hide" => {
+        | "smart-devices" | "smart-signin" | "smart-hide" | "smart-thermostat" | "smart-lock" => {
             state.preferences.smart_home.server_url = "http://demo.homeassistant.local:8123".into();
             state.preferences.smart_home.show_tab = true;
             let names = [
@@ -591,10 +609,50 @@ fn script(
                     }
                     .into(),
                     brightness,
+                    adjustable: brightness.is_some(),
                     hidden: false,
                     device_class: String::new(),
+                    ..Default::default()
                 })
                 .collect();
+            // Devices with a dial of their own: target temperature, volume, position.
+            state.ha_entities.extend([
+                smart_home::Entity {
+                    id: "climate.living".into(),
+                    name: "Thermostat".into(),
+                    state: "heat".into(),
+                    domain: "climate".into(),
+                    area: "Living Room".into(),
+                    level: Some(21.5),
+                    level_min: Some(7.),
+                    level_max: Some(30.),
+                    level_step: Some(0.5),
+                    adjustable: true,
+                    current: Some(20.3),
+                    ..Default::default()
+                },
+                smart_home::Entity {
+                    id: "media_player.speaker".into(),
+                    name: "Kitchen Speaker".into(),
+                    state: "playing".into(),
+                    domain: "media_player".into(),
+                    area: "Kitchen".into(),
+                    level: Some(35.),
+                    adjustable: true,
+                    media: "Lo-fi Radio".into(),
+                    ..Default::default()
+                },
+                smart_home::Entity {
+                    id: "cover.blinds".into(),
+                    name: "Blinds".into(),
+                    state: "open".into(),
+                    domain: "cover".into(),
+                    area: "Living Room".into(),
+                    level: Some(70.),
+                    adjustable: true,
+                    ..Default::default()
+                },
+            ]);
             state.ha_online = true;
             match action {
                 "smart-demo" => {
@@ -610,6 +668,16 @@ fn script(
                 "smart-detail" => {
                     state.open(2);
                     state.ha_detail = Some("light.ceiling".into());
+                    state.focus = Target::SmartBrightness(0);
+                }
+                "smart-thermostat" => {
+                    state.open(2);
+                    state.ha_detail = Some("climate.living".into());
+                    state.focus = Target::SmartBrightness(0);
+                }
+                "smart-lock" => {
+                    state.open(2);
+                    state.ha_detail = Some("lock.front".into());
                     state.focus = Target::SmartBrightness(0);
                 }
                 "smart-camera" => {
@@ -847,6 +915,158 @@ static JELLYFIN_FORM: std::sync::Mutex<Option<JellyfinForm>> = std::sync::Mutex:
 /// Settings › Wallpaper › Upload Videos page server, while the page is open.
 static VIDEO_UPLOAD: std::sync::Mutex<Option<custom_videos::Server>> = std::sync::Mutex::new(None);
 
+/// ImmichFrame wallpaper worker, created with the preferences folder at startup.
+static IMMICH: std::sync::OnceLock<immich_frame::Service> = std::sync::OnceLock::new();
+/// Server last told to the worker, so it hears only about changes.
+static IMMICH_SHOWN: std::sync::Mutex<Option<immich_frame::ImmichFrameLink>> =
+    std::sync::Mutex::new(None);
+type ImmichLinked = (immich_frame::ImmichFrameLink, immich_frame::Frame);
+/// The phone form that takes an ImmichFrame address and optional secret.
+struct ImmichForm {
+    ready: std::sync::mpsc::Receiver<Result<String, String>>,
+    linked: std::sync::mpsc::Receiver<ImmichLinked>,
+    errors: std::sync::mpsc::Receiver<String>,
+    canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    folder: std::path::PathBuf,
+}
+static IMMICH_FORM: std::sync::Mutex<Option<ImmichForm>> = std::sync::Mutex::new(None);
+
+fn immich_folder(preferences: &std::path::Path) -> std::path::PathBuf {
+    preferences
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .join("immich")
+}
+
+fn immich_form_stop() {
+    if let Some(form) = IMMICH_FORM.lock().unwrap().take() {
+        form.canceled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn immich_form_start(preferences: &std::path::Path) {
+    immich_form_stop();
+    let folder = immich_folder(preferences);
+    let form = phone_link::Form {
+        title: "ImmichFrame".into(),
+        hint: "Type the address you open ImmichFrame with, for example 192.168.1.20:8080".into(),
+        help: Some((
+            "What is ImmichFrame?".into(),
+            "https://immichframe.dev".into(),
+        )),
+        fields: vec![
+            phone_link::Field {
+                label: "ImmichFrame address".into(),
+                name: "address".into(),
+                kind: phone_link::FieldType::Text,
+                max_len: 300,
+                placeholder: "http://192.168.1.20:8080".into(),
+                optional: false,
+            },
+            phone_link::Field {
+                label: "Authentication secret (only if your server has one)".into(),
+                name: "secret".into(),
+                kind: phone_link::FieldType::Secret,
+                max_len: 512,
+                placeholder: "Leave empty if none".into(),
+                optional: true,
+            },
+        ],
+        submit_label: "Connect".into(),
+        success_title: "Connected".into(),
+        success_message: "Look at your TV: your photos are the wallpaper now.".into(),
+        route: "/immich".into(),
+    };
+    let (linked_tx, linked) = std::sync::mpsc::channel();
+    let (error_tx, errors) = std::sync::mpsc::channel();
+    let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let check_folder = folder.clone();
+    let ready = phone_link::spawn_form(
+        form,
+        move |fields| {
+            immich_frame::check(
+                &check_folder,
+                fields.get("address").map(String::as_str).unwrap_or(""),
+                fields.get("secret").map(String::as_str).unwrap_or(""),
+            )
+        },
+        linked_tx,
+        error_tx,
+        canceled.clone(),
+    );
+    *IMMICH_FORM.lock().unwrap() = Some(ImmichForm {
+        ready,
+        linked,
+        errors,
+        canceled,
+        folder,
+    });
+}
+
+/// Keep the ImmichFrame worker in step with the wallpaper, and apply its
+/// photos and the phone form's results.
+fn immich_tick(state: &mut State, preferences_path: &std::path::Path, visible: bool) {
+    let wanted =
+        (visible && state.preferences.background == "immich" && state.preferences.immich.linked())
+            .then(|| state.preferences.immich.clone());
+    {
+        let mut shown = IMMICH_SHOWN.lock().unwrap();
+        if *shown != wanted {
+            if let Some(service) = IMMICH.get() {
+                service.send(immich_frame::Command::Show(wanted.clone()));
+            }
+            *shown = wanted;
+        }
+    }
+    if let Some(service) = IMMICH.get()
+        && let Ok(updates) = service.updates.try_lock()
+    {
+        while let Ok(update) = updates.try_recv() {
+            match update {
+                immich_frame::Update::Frame(frame) => state.immich_show(frame),
+                immich_frame::Update::Failed(error) => {
+                    state.immich_status = Some((error, true));
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+    let mut linked = vec![];
+    let mut restart = None;
+    if let Some(form) = IMMICH_FORM.lock().unwrap().as_ref() {
+        while let Ok(ready) = form.ready.try_recv() {
+            state.dirty = true;
+            match ready {
+                Ok(link) => state.immich_qr = phone_link::qr_matrix(&link),
+                Err(error) => state.immich_status = Some((error, true)),
+            }
+        }
+        while let Ok(error) = form.errors.try_recv() {
+            state.immich_status = Some((error, true));
+            state.dirty = true;
+        }
+        while let Ok(result) = form.linked.try_recv() {
+            linked.push(result);
+            restart = Some(form.folder.clone());
+        }
+    }
+    for (link, frame) in linked {
+        state.immich_linked(link, frame);
+        let _ = storage::save(preferences_path, &state.preferences);
+    }
+    // The form's code is used up; show a fresh one while the page stays open.
+    if restart.is_some() {
+        state.immich_qr.clear();
+        if state.settings_level == state::SettingsLevel::WallpaperImmich {
+            immich_form_start(preferences_path);
+        } else {
+            immich_form_stop();
+        }
+    }
+}
+
 /// Apply what the video upload page did: its address, new and deleted clips.
 fn video_upload_tick(state: &mut State, preferences_path: &std::path::Path) {
     let mut events = vec![];
@@ -897,6 +1117,7 @@ fn jellyfin_form_start() {
         hint: "Type the address you open Jellyfin with, for example 192.168.1.20:8096".into(),
         help: None,
         fields: vec![phone_link::Field {
+            optional: false,
             label: "Server address".into(),
             name: "address".into(),
             kind: phone_link::FieldType::Text,
@@ -1028,11 +1249,17 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
             jellyfin::Response::Linked(link) => {
                 state.preferences.jellyfin = link;
                 state.jellyfin_reset();
-                // Two rows to start with; more from Settings › Stacks.
-                for collection in ["resume", "latest"] {
+                // Three rows to start with: the libraries themselves, then what
+                // to watch next; more from Settings › Stacks.
+                for collection in [jellyfin::LIBRARIES, "resume", "latest"] {
                     let mut stack = stacks::StackConfig {
                         source: "jellyfin".into(),
                         collection: collection.into(),
+                        shape: if collection == jellyfin::LIBRARIES {
+                            stacks::CardShape::Wide
+                        } else {
+                            stacks::CardShape::Poster
+                        },
                         ..Default::default()
                     };
                     stack.name = stacks::row_title(&stack);
@@ -1041,7 +1268,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 }
                 let _ = storage::save(preferences_path, &state.preferences);
                 if linking {
-                    let i = state.preferences.stacks.len() - 2;
+                    let i = state.preferences.stacks.len() - 3;
                     state.server_linked(i);
                 }
                 state.notify(format!(
@@ -1059,6 +1286,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 state.stack_items[index] = items;
             }
             jellyfin::Response::Views(views) => state.jellyfin_views = views,
+            jellyfin::Response::Libraries(libraries) => state.jellyfin_libraries = libraries,
             jellyfin::Response::Details(detail) => state.media_detail(*detail),
             jellyfin::Response::Album(album) => state.album_details(*album),
             jellyfin::Response::Play(mut request) => {
@@ -1849,6 +2077,7 @@ fn run() -> Result<(), String> {
     // Uploaded video wallpapers join the catalog before preferences load, so
     // their saved selection survives normalization.
     custom_videos::init(&preferences_path);
+    let _ = IMMICH.set(immich_frame::Service::new(immich_folder(&preferences_path)));
     // Start the preview with the user's current choices, but keep test favorites
     // and hidden placeholders out of their normal preferences file.
     let initial_preferences = if options.test_extra_apps > 0
@@ -2184,6 +2413,52 @@ fn run() -> Result<(), String> {
             Ok(tab) if tab.starts_with("tab") => Target::LibTab(tab[3..].parse().unwrap_or(0)),
             _ => Target::LibCard(focus),
         };
+        state.dirty = true;
+    }
+    // Desktop QA of the Jellyfin Libraries row and its page: LUMA_HUB_PREVIEW=1.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("LUMA_HUB_PREVIEW").is_some() {
+        let libraries = [
+            ("Movies", "412 movies", Some("forest.jpg")),
+            ("TV Shows", "87 shows", Some("northern-lights.jpg")),
+            ("Music", "1 album", Some("prism.jpg")),
+            ("Home Videos", "", None),
+        ];
+        state.preferences.stacks = vec![crate::stacks::StackConfig {
+            name: "Libraries".into(),
+            source: "jellyfin".into(),
+            collection: jellyfin::LIBRARIES.into(),
+            shape: crate::stacks::CardShape::Wide,
+            ..Default::default()
+        }];
+        state.jellyfin_libraries = libraries
+            .iter()
+            .enumerate()
+            .map(|(i, (name, detail, _))| jellyfin::LibraryInfo {
+                card: i as i64 + 1,
+                collection: format!("{}:{i}", if *name == "Music" { "music" } else { "view" }),
+                name: (*name).into(),
+                detail: (*detail).into(),
+            })
+            .collect();
+        state.stack_items = vec![
+            libraries
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _, image))| crate::stacks::StackItem {
+                    title: (*name).into(),
+                    poster: image.map(|file| {
+                        assets
+                            .root
+                            .join("wallpapers")
+                            .join(file)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    id: i as i64 + 1,
+                })
+                .collect(),
+        ];
         state.dirty = true;
     }
     #[cfg(debug_assertions)]
@@ -2839,6 +3114,7 @@ fn run() -> Result<(), String> {
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
         video_upload_tick(&mut state, &preferences_path);
+        immich_tick(&mut state, &preferences_path, visible);
         plex_tick(&mut state, &preferences_path, &platform);
         // Poll a native worker rather than doing any media I/O in the render loop.
         while let Some(update) = player_backend::poll() {
@@ -3674,6 +3950,7 @@ fn run() -> Result<(), String> {
         }
         jellyfin_tick(&mut state, &preferences_path, &platform);
         video_upload_tick(&mut state, &preferences_path);
+        immich_tick(&mut state, &preferences_path, visible);
         plex_tick(&mut state, &preferences_path, &platform);
         moonlight_tick(&mut state, &preferences_path, &platform);
         library_tick(&mut state, &preferences_path);
