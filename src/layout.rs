@@ -140,6 +140,56 @@ impl Layout {
     }
 }
 
+/// The parts of Home the remote steps between with Up and Down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomeBand {
+    /// The music mini-player, while an album plays.
+    Mini,
+    /// The headline's video caption and the widgets.
+    Info,
+    /// The Switch to … HDMI buttons.
+    Live,
+    /// Favorite apps.
+    Apps,
+    /// Content rows (Jellyfin, Plex, Moonlight …).
+    Stacks,
+}
+
+pub fn home_band(target: &Target) -> Option<HomeBand> {
+    match target {
+        Target::MiniCover
+        | Target::MiniShuffle
+        | Target::MiniPrev
+        | Target::MiniPlay
+        | Target::MiniNext
+        | Target::MiniRepeat => Some(HomeBand::Mini),
+        Target::VideoTitle | Target::Widget(_) | Target::WidgetText(_) | Target::WidgetTile(..) => {
+            Some(HomeBand::Info)
+        }
+        Target::LiveInput(_) => Some(HomeBand::Live),
+        Target::App(_) => Some(HomeBand::Apps),
+        Target::StackCard(..) => Some(HomeBand::Stacks),
+        _ => None,
+    }
+}
+
+/// Home, top to bottom: Favorites at the top under the rail; the stage
+/// keeps everything low, above the dock; the mirror keeps the classic order.
+pub const RAIL_FAVORITES_TOP: f32 = 150.;
+pub const DOCK_FAVORITES_TOP: f32 = 776.;
+pub const DOCK_WIDGETS_TOP: f32 = 240.;
+
+impl Layout {
+    /// Home's parts in the order the remote meets them going down.
+    pub fn home_bands(self) -> [HomeBand; 5] {
+        use HomeBand::*;
+        match self {
+            Self::Rail => [Mini, Live, Apps, Info, Stacks],
+            Self::Classic | Self::Dock | Self::Flip => [Mini, Info, Live, Apps, Stacks],
+        }
+    }
+}
+
 /// Tabs, input circles and the TV settings circle.
 pub fn is_chrome(target: &Target) -> bool {
     matches!(
