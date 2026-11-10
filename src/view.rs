@@ -198,7 +198,7 @@ impl Assets {
             .map(|c| self.glyph_advance(c, style))
             .fold(0., f32::max)
     }
-    fn width(&self, value: &str, style: TextStyle) -> f32 {
+    pub(crate) fn width(&self, value: &str, style: TextStyle) -> f32 {
         let digit_max = self.max_digit(style);
         value
             .chars()
@@ -920,8 +920,14 @@ pub fn scene_with_pill(
     if state.page == Page::Home {
         // Scrolled Home content dissolves before it reaches the clock and date;
         // the bottom stays open, posters run to the screen edge unmasked.
+        // The shelf starts higher, the stage has nothing at the top to clear.
+        let [top, solid] = match state.preferences.layout {
+            Layout::Rail => [96., 146.],
+            Layout::Dock => [100., 150.],
+            Layout::Classic | Layout::Flip => [150., 206.],
+        };
         out.draw
-            .push(Draw::EdgeFade(Some([150., 206., 2000., 2001.])));
+            .push(Draw::EdgeFade(Some([top, solid, 2000., 2001.])));
     }
     if state.page == Page::SmartHome {
         // Like Home: scrolled tiles are gone before they reach the clock and date.
@@ -1430,15 +1436,7 @@ fn header(
     }
     header_circles(out, state, assets);
     if state.page == Page::Home && state.music.now.is_some() {
-        // The mini-player belongs to the page: it moves with the content.
-        let (from, controls) = (out.draw.len(), out.controls.len());
         mini_view::mini_player(out, state, assets);
-        let (dx, dy) = layout.body_offset();
-        motion::transform_group(&mut out.draw[from..], dx, dy, 1.);
-        for control in &mut out.controls[controls..] {
-            control.rect.x += dx;
-            control.rect.y += dy;
-        }
     }
 }
 
@@ -2487,7 +2485,11 @@ fn classic_greeting(
 
 fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let language = state.preferences.language;
+    let layout = state.preferences.layout;
     let s = state.scroll + state.bounce_at(crate::state::BounceAxis::Page) - HOME_DROP;
+    // A place on the page at rest, where it is drawn at the current scroll.
+    let at = |y: f32| y - s - HOME_DROP;
+    let info_controls = out.controls.len();
     // Weather gets a distinct TV-sized widget instead of reducing the greeting.
     let shift = 0.0f32;
     let greeting_start = out.draw.len();
@@ -2502,6 +2504,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 && !state.preferences.reduced_motion
                 && let Some(previous) = &state.rude_weather.previous
             {
+                let from = out.draw.len();
                 let _ = draw_rude_phrase(
                     out,
                     assets,
@@ -2521,7 +2524,11 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                         wrap: widgets_view::phrase_width(state),
                     },
                 );
+                if layout == Layout::Flip {
+                    align_lines_right(out, assets, from, crate::state::HOME_STRIP_RIGHT);
+                }
             }
+            let from = out.draw.len();
             (greeting_bottom, greeting_width) = draw_rude_phrase(
                 out,
                 assets,
@@ -2545,12 +2552,23 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                     wrap: widgets_view::phrase_width(state),
                 },
             );
+            if layout == Layout::Flip {
+                align_lines_right(out, assets, from, crate::state::HOME_STRIP_RIGHT);
+            }
         } else {
             (greeting_bottom, greeting_width) =
                 classic_greeting(out, state, assets, now, s + shift);
         }
     } else {
         (greeting_bottom, greeting_width) = classic_greeting(out, state, assets, now, s + shift);
+    }
+    // The mirror sets every headline line against the right edge (the
+    // weather headline above did it phrase by phrase).
+    let weather_headline = state.preferences.greeting_style
+        == crate::weather_phrases::GreetingStyle::Rude
+        && state.rude_weather.current.is_some();
+    if layout == Layout::Flip && !weather_headline {
+        align_lines_right(out, assets, greeting_start, crate::state::HOME_STRIP_RIGHT);
     }
     if greeting_bottom <= 0. {
         greeting_bottom = PHRASE_TOP + 110. - s;
@@ -2560,6 +2578,18 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let caption_y = greeting_bottom + 34.;
     let caption_start = out.draw.len();
     video_caption(out, state, assets, caption_y, greeting_width.max(420.));
+    if layout == Layout::Flip {
+        let right = bounds(assets, &out.draw[caption_start..]).map_or(0., |b| b.x + b.w);
+        if right > 0. {
+            move_block(
+                out,
+                caption_start..out.draw.len(),
+                info_controls..out.controls.len(),
+                crate::state::HOME_STRIP_RIGHT - right,
+                0.,
+            );
+        }
+    }
     out.enter(caption_start, state, 0.18, 22.);
     let press = state.ambient_press();
     if press > 0. {
@@ -2582,9 +2612,34 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let home_content_offset = (caption_y + 48. + 36. + s - FAVORITES_TOP)
         .max(widgets_view::bottom() + 40. - FAVORITES_TOP)
         .max(0.);
+    let caption_end = (out.draw.len(), out.controls.len());
+    // Where the widgets go: the classic top right, the mirror's top left, or
+    // the stage's corner high above the headline. The shelf moves them with
+    // the headline, below Favorites.
+    let zone = widgets_view::zone(state);
+    let widgets_move = match layout {
+        Layout::Flip => (crate::state::HOME_STRIP_LEFT - zone.left, 0.),
+        Layout::Dock => (0., at(crate::layout::DOCK_WIDGETS_TOP) - zone.top),
+        Layout::Classic | Layout::Rail => (0., 0.),
+    };
+    // The widgets' text line ("Weather") sits above the blocks.
+    let widgets_top = zone.top
+        - if zone.text.is_empty() {
+            0.
+        } else {
+            WIDGET_TEXT_ABOVE
+        };
+    let widgets_at = (out.draw.len(), out.controls.len());
     if state.widget_edit.is_none() {
         let start = out.draw.len();
         widgets_view::home(out, state, assets);
+        move_block(
+            out,
+            start..out.draw.len(),
+            widgets_at.1..out.controls.len(),
+            widgets_move.0,
+            widgets_move.1,
+        );
         out.enter(start, state, 0.21, 29.);
         // One widget after another, the rightmost first.
         let blocks: Vec<Rect> = widgets_view::zone(state)
@@ -2601,38 +2656,55 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 .map_or(1., |i| 1. + (count - 1. - i as f32))
         });
     }
+    let widgets_end = (out.draw.len(), out.controls.len());
+    let favorites_top = match layout {
+        Layout::Rail => at(crate::layout::RAIL_FAVORITES_TOP),
+        Layout::Dock => at(crate::layout::DOCK_FAVORITES_TOP),
+        Layout::Classic | Layout::Flip => FAVORITES_TOP + home_content_offset - s,
+    };
+    let favorites_row = favorites_top + FAVORITES_ROW - FAVORITES_TOP;
     let fav_label_start = out.draw.len();
-    section_title(
-        out,
-        assets,
+    let title_w = assets.width(
         language.t("favoriteApps"),
-        FAVORITES_TOP + home_content_offset - s,
+        heading_fixed(assets, 31., 700).tracking(-0.01),
+    );
+    section_title(out, assets, language.t("favoriteApps"), favorites_top);
+    // The mirror's title ends at the right edge, its buttons before it.
+    let title_shift = if layout == Layout::Flip {
+        crate::state::HOME_STRIP_RIGHT - crate::state::HOME_STRIP_LEFT - title_w
+    } else {
+        0.
+    };
+    let controls_at = out.controls.len();
+    move_block(
+        out,
+        fav_label_start..out.draw.len(),
+        controls_at..controls_at,
+        title_shift,
+        0.,
     );
     out.enter(fav_label_start, state, 0.3, 22.);
     if state.moving.is_none() {
         let start = out.draw.len();
-        let title_w = assets.width(
-            language.t("favoriteApps"),
-            heading_fixed(assets, 31., 700).tracking(-0.01),
-        );
-        live_input_buttons(
-            out,
-            state,
-            assets,
-            84. + title_w + 36.,
-            FAVORITES_TOP + home_content_offset - s,
-        );
+        let controls_at = out.controls.len();
+        live_input_buttons(out, state, assets, 84. + title_w + 36., favorites_top);
+        if layout == Layout::Flip
+            && let Some(b) = bounds(assets, &out.draw[start..])
+        {
+            move_block(
+                out,
+                start..out.draw.len(),
+                controls_at..out.controls.len(),
+                crate::state::HOME_STRIP_RIGHT - title_w - 36. - (b.x + b.w),
+                0.,
+            );
+        }
         out.enter(start, state, 0.33, 22.);
     }
     if state.moving.is_some() {
         out.text(
             language.t("moveApps"),
-            Rect::new(
-                1686.,
-                FAVORITES_TOP + 7. + home_content_offset - s,
-                150.,
-                24.,
-            ),
+            Rect::new(1686., favorites_top + 7., 150., 24.),
             text(14.4, 400, 0.),
             c(0xdedede, 1.),
             true,
@@ -2646,7 +2718,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             out.shape(
                 Rect::new(
                     84. + index as f32 * GRID_PITCH,
-                    FAVORITES_ROW + home_content_offset - s,
+                    favorites_row,
                     270.,
                     FACE_HEIGHT,
                 ),
@@ -2661,12 +2733,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             state,
             assets,
             EmptyState {
-                rect: Rect::new(
-                    84.,
-                    FAVORITES_ROW - 11. + home_content_offset - s,
-                    1752.,
-                    258.7,
-                ),
+                rect: Rect::new(84., favorites_row - 11., 1752., 258.7),
                 icon: "heart",
                 title: if error {
                     language.t("aLittleHelp")
@@ -2700,7 +2767,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             84. + index as f32 * HOME_TILE_PITCH
                 - state.home_scroll
                 - state.bounce_at(crate::state::BounceAxis::Favorites),
-            FAVORITES_ROW + home_content_offset - s,
+            favorites_row,
             HOME_TILE_WIDTH,
             FACE_HEIGHT,
         );
@@ -2728,11 +2795,151 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     ambient_move(&mut out.draw[fav_label_start..], state, 0., 900., |r| {
         4. + 3. * (r.x / 1920.).clamp(0., 1.)
     });
-    let stacks_y = FAVORITES_ROW + grid_height + 47. + home_content_offset - s;
+    let favorites_bottom = favorites_row + grid_height;
+    let mut stacks_y = favorites_bottom + 47.;
+    match layout {
+        // The shelf: the headline, its caption and the widgets follow the apps.
+        Layout::Rail => {
+            let top = (PHRASE_TOP - s).min(widgets_top);
+            let bottom = (caption_y + 48.).max(
+                zone.blocks
+                    .iter()
+                    .map(|b| b.2.y + b.2.h)
+                    .fold(zone.top, f32::max),
+            );
+            let dy = favorites_bottom + 64. - top;
+            move_block(
+                out,
+                greeting_start..caption_end.0,
+                info_controls..caption_end.1,
+                0.,
+                dy,
+            );
+            move_block(
+                out,
+                widgets_at.0..widgets_end.0,
+                widgets_at.1..widgets_end.1,
+                0.,
+                dy,
+            );
+            stacks_y = bottom + dy + 56.;
+        }
+        // The stage: the headline sits right above Favorites, low on the
+        // screen; the wallpaper keeps the top.
+        Layout::Dock => {
+            let dy = favorites_top - 40. - (caption_y + 48.);
+            move_block(
+                out,
+                greeting_start..caption_end.0,
+                info_controls..caption_end.1,
+                0.,
+                dy,
+            );
+        }
+        Layout::Classic | Layout::Flip => {}
+    }
     stacks_view::home_stacks(out, state, assets, stacks_y);
     // Edit mode dims the page, so the widgets draw over everything else.
     if state.widget_edit.is_some() {
+        let at = (out.draw.len(), out.controls.len());
         widgets_view::home(out, state, assets);
+        let dy = if layout == Layout::Rail {
+            favorites_bottom + 64. - (PHRASE_TOP - s).min(widgets_top)
+        } else {
+            widgets_move.1
+        };
+        move_block(
+            out,
+            at.0..out.draw.len(),
+            at.1..out.controls.len(),
+            widgets_move.0,
+            dy,
+        );
+    }
+}
+
+/// How far the widgets' text line reaches above their blocks.
+const WIDGET_TEXT_ABOVE: f32 = 70.;
+
+/// Moves a finished block of Home: its paint and the controls it registered.
+fn move_block(out: &mut Scene, draws: Range<usize>, controls: Range<usize>, dx: f32, dy: f32) {
+    if dx == 0. && dy == 0. {
+        return;
+    }
+    for draw in &mut out.draw[draws] {
+        match draw {
+            Draw::Clip(Some(r)) | Draw::RoundClip(Some((r, _))) => {
+                r.x += dx;
+                r.y += dy;
+            }
+            _ => motion::transform(draw, dx, dy, 1.),
+        }
+    }
+    for control in &mut out.controls[controls] {
+        control.rect.x += dx;
+        control.rect.y += dy;
+    }
+}
+
+/// The box around everything painted, shadows aside; text by its ink.
+fn bounds(assets: &Assets, draws: &[Draw]) -> Option<Rect> {
+    let mut found: Option<Rect> = None;
+    for draw in draws {
+        let r = match draw {
+            Draw::Shadow(..) => continue,
+            Draw::Text(value, r, style, _, centered) => {
+                let ink = assets.width(value, *style).min(r.w);
+                let x = if *centered {
+                    r.x + (r.w - ink) / 2.
+                } else {
+                    r.x
+                };
+                Rect::new(x, r.y, ink, r.h)
+            }
+            _ => {
+                let mut copy = draw.clone();
+                let Some(r) = rect_mut(&mut copy).map(|r| *r) else {
+                    continue;
+                };
+                r
+            }
+        };
+        found = Some(match found {
+            None => r,
+            Some(b) => {
+                let x = b.x.min(r.x);
+                let y = b.y.min(r.y);
+                Rect::new(
+                    x,
+                    y,
+                    (b.x + b.w).max(r.x + r.w) - x,
+                    (b.y + b.h).max(r.y + r.h) - y,
+                )
+            }
+        });
+    }
+    found
+}
+
+/// Sets each line of text painted since `from` against `right`: words on
+/// one line share their top.
+fn align_lines_right(out: &mut Scene, assets: &Assets, from: usize, right: f32) {
+    let mut lines: Vec<(f32, f32)> = Vec::new();
+    for draw in &out.draw[from..] {
+        if let Draw::Text(value, r, style, _, _) = draw {
+            let end = r.x + assets.width(value, *style);
+            match lines.iter_mut().find(|l| (l.0 - r.y).abs() < 0.5) {
+                Some(line) => line.1 = line.1.max(end),
+                None => lines.push((r.y, end)),
+            }
+        }
+    }
+    for draw in &mut out.draw[from..] {
+        if let Some(r) = rect_mut(draw)
+            && let Some(line) = lines.iter().find(|l| (l.0 - r.y).abs() < 0.5)
+        {
+            r.x += right - line.1;
+        }
     }
 }
 
