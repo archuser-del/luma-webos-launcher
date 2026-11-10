@@ -2404,6 +2404,9 @@ impl State {
         {
             return effects;
         }
+        if has_tabs && let Some(effects) = self.home_band_direction(direction, controls) {
+            return effects;
+        }
         let before = self.focus.clone();
         // Left of the first favourite is the rail, not the last favourite.
         if layout == Layout::Rail
@@ -2521,7 +2524,15 @@ impl State {
                 .chrome_return
                 .take()
                 .filter(|target| controls.iter().any(|c| &c.target == target));
-            if let Some(target) = back {
+            let x = controls
+                .iter()
+                .find(|c| c.target == self.focus)
+                .map_or(960., |c| c.rect.center().0);
+            // Below the mirrored bar, Home starts with its top band.
+            let top_band = (self.page == Page::Home && layout == crate::layout::Layout::Flip)
+                .then(|| home_band_entry(controls, &layout.home_bands(), x, 0.))
+                .flatten();
+            if let Some(target) = back.or(top_band) {
                 self.focus(target, controls);
             } else if !matches!(self.focus, Target::Nav(_))
                 && controls.iter().any(|c| c.target == Target::MiniCover)
@@ -2536,6 +2547,91 @@ impl State {
             }
         }
         // Away from the page there is only the screen edge.
+        Some(vec![])
+    }
+
+    /// Up and Down between Home's parts in the order the layout stacks
+    /// them. None leaves the press to the classic rules.
+    fn home_band_direction(
+        &mut self,
+        direction: Direction,
+        controls: &[Control],
+    ) -> Option<Vec<Effect>> {
+        use crate::layout::{HomeBand, home_band};
+        if self.page != Page::Home
+            || !matches!(direction, Direction::Up | Direction::Down)
+            || self.overlay.is_some()
+            || self.moving.is_some()
+            || self.widget_edit.is_some()
+            || self.widget_detail.is_some()
+            || self.movie.is_some()
+            || self.game.is_some()
+            || self.album.is_some()
+            || self.library.is_some()
+            || self.playback.is_some()
+            || self.ha_detail.is_some()
+            || self.ha_camera.is_some()
+        {
+            return None;
+        }
+        let band = home_band(&self.focus)?;
+        let current = controls.iter().find(|c| c.target == self.focus)?.rect;
+        let down = direction == Direction::Down;
+        match (band, &self.focus) {
+            // Between content rows the classic rules apply.
+            (HomeBand::Stacks, Target::StackCard(row, _)) => {
+                let below = crate::stacks::row_len(self, row + 1) > 0
+                    || controls
+                        .iter()
+                        .any(|c| matches!(c.target, Target::StackCard(r, _) if r == row + 1));
+                if (!down && *row > 0) || (down && below) {
+                    return None;
+                }
+            }
+            // A widget straight above or below in the same band.
+            (HomeBand::Info, _) => {
+                let next = controls
+                    .iter()
+                    .filter(|c| c.target != self.focus && home_band(&c.target) == Some(band))
+                    .filter(|c| c.rect.x < current.x + current.w && current.x < c.rect.x + c.rect.w)
+                    .filter(|c| {
+                        if down {
+                            c.rect.y >= current.y + current.h - 1.
+                        } else {
+                            c.rect.y + c.rect.h <= current.y + 1.
+                        }
+                    })
+                    .min_by(|a, b| {
+                        (a.rect.y - current.y)
+                            .abs()
+                            .total_cmp(&(b.rect.y - current.y).abs())
+                    })
+                    .map(|c| c.target.clone());
+                if let Some(next) = next {
+                    self.focus(next, controls);
+                    return Some(vec![]);
+                }
+            }
+            _ => {}
+        }
+        let order = self.preferences.layout.home_bands();
+        let at = order.iter().position(|b| *b == band)?;
+        let further: Vec<HomeBand> = if down {
+            order[at + 1..].to_vec()
+        } else {
+            order[..at].iter().rev().copied().collect()
+        };
+        let from_y = if down {
+            current.y + current.h
+        } else {
+            current.y
+        };
+        if let Some(next) = home_band_entry(controls, &further, current.center().0, from_y) {
+            self.focus(next, controls);
+        } else if direction == self.preferences.layout.outward() {
+            // The page ends here; the chrome is next.
+            self.enter_chrome(self.focus.clone(), controls);
+        }
         Some(vec![])
     }
 
@@ -5735,4 +5831,31 @@ impl State {
             1. - back_out(t, 1.)
         }
     }
+}
+
+/// The first of `bands` with anything on screen, at its control nearest to
+/// `x` (and, among those, nearest to the line `y` the remote comes from).
+fn home_band_entry(
+    controls: &[Control],
+    bands: &[crate::layout::HomeBand],
+    x: f32,
+    y: f32,
+) -> Option<Target> {
+    bands.iter().find_map(|band| {
+        controls
+            .iter()
+            .filter(|c| crate::layout::home_band(&c.target) == Some(*band))
+            .filter(|c| c.rect.x + c.rect.w > HOME_VIEWPORT_LEFT && c.rect.x < HOME_VIEWPORT_RIGHT)
+            .min_by(|a, b| {
+                // Straight across first (0 when the control spans `x`),
+                // then the nearer row, then the nearer centre.
+                let score = |c: &Control| {
+                    let (cx, cy) = c.rect.center();
+                    let across = (c.rect.x - x).max(x - (c.rect.x + c.rect.w)).max(0.);
+                    across + 0.25 * (cy - y).abs() + 0.01 * (cx - x).abs()
+                };
+                score(a).total_cmp(&score(b))
+            })
+            .map(|c| c.target.clone())
+    })
 }

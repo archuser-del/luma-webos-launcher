@@ -37,6 +37,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 
 **Home**
 
+- Each layout arranges Home its own way. **Classic**: headline and weather on top, Favorites, then the content rows. **Shelf** (Rail): Favorites and the HDMI switch buttons first, then the headline beside the weather, with a content row already in view. **Stage** (Dock): the wallpaper keeps the top of the screen, the widgets sit in its corner, and the headline, switch buttons and Favorites rest low above the dock. **Mirror**: widgets on the left, the headline and the Favorites title set against the right edge. Up and Down follow each arrangement from top to bottom.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.

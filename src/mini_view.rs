@@ -18,11 +18,22 @@ const GAP: f32 = 8.;
 const SPEED: f32 = 60.;
 const LOOP_GAP: f32 = 80.;
 
+/// Where the pill sits: under the circles on the classic and mirrored bars,
+/// beside the clock on the shelf, and in the stage's empty top-left corner.
+pub(crate) fn pill_rect(layout: crate::layout::Layout) -> Rect {
+    use crate::layout::Layout;
+    match layout {
+        Layout::Classic | Layout::Flip => Rect::new(crate::state::HOME_STRIP_RIGHT - W, TOP, W, H),
+        Layout::Rail => Rect::new(1500. - W, 44., W, H),
+        Layout::Dock => Rect::new(crate::state::HOME_STRIP_LEFT, 60., W, H),
+    }
+}
+
 pub(super) fn mini_player(out: &mut Scene, state: &State, assets: &Assets) {
     let Some(now) = state.music.now.as_ref() else {
         return;
     };
-    let pill = Rect::new(crate::state::HOME_STRIP_RIGHT - W, TOP, W, H);
+    let pill = pill_rect(state.preferences.layout);
     out.shadow(pill, H / 2., 24., 8., 0.25);
     out.glass(pill, H / 2.);
 

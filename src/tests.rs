@@ -4216,3 +4216,275 @@ fn every_layout_reaches_every_tab_and_gets_back_into_each_page() {
         }
     }
 }
+
+// Home arrangements: each layout stacks Home's parts its own way, and the
+// remote walks them in that order.
+
+fn home_in(layout: crate::layout::Layout) -> State {
+    let mut state = laid_out(layout);
+    state.preferences.background = "video".into();
+    state.preferences.show_weather = true;
+    // One content row of films under Favorites.
+    state.preferences.stacks = vec![crate::stacks::StackConfig {
+        source: "jellyfin".into(),
+        ..Default::default()
+    }];
+    state.stack_items = vec![
+        (1..=8)
+            .map(|id| crate::stacks::StackItem {
+                title: format!("Film {id}"),
+                poster: None,
+                id,
+            })
+            .collect(),
+    ];
+    state
+}
+
+fn first_of(state: &State, band: crate::layout::HomeBand) -> crate::state::Rect {
+    controls(state)
+        .into_iter()
+        .filter(|c| crate::layout::home_band(&c.target) == Some(band))
+        .map(|c| c.rect)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap_or_else(|| panic!("no {band:?} on Home"))
+}
+
+#[test]
+fn every_home_has_its_parts_where_its_layout_puts_them() {
+    use crate::layout::{DOCK_FADE, HomeBand, Layout};
+    let classic = home_in(Layout::Classic);
+    let classic_apps = first_of(&classic, HomeBand::Apps);
+    let classic_info = first_of(&classic, HomeBand::Info);
+    assert!(classic_info.y < classic_apps.y);
+
+    // The shelf: apps first, then the headline and widgets, then the rows.
+    let shelf = home_in(Layout::Rail);
+    let apps = first_of(&shelf, HomeBand::Apps);
+    let info = first_of(&shelf, HomeBand::Info);
+    let rows = first_of(&shelf, HomeBand::Stacks);
+    assert!(apps.y < 260., "favorites sit at the top: {}", apps.y);
+    assert!(first_of(&shelf, HomeBand::Live).y < apps.y);
+    assert!(apps.y + apps.h < info.y, "the headline follows the apps");
+    assert!(info.y < rows.y);
+    assert!(rows.y < 1000., "a content row shows without scrolling");
+
+    // The stage: widgets high in the corner, the rest low above the dock.
+    let stage = home_in(Layout::Dock);
+    let widget = controls(&stage)
+        .into_iter()
+        .find(|c| matches!(c.target, Target::Widget(_)))
+        .expect("the weather widget")
+        .rect;
+    let caption = rect_of(&stage, &Target::VideoTitle);
+    let apps = first_of(&stage, HomeBand::Apps);
+    assert!(widget.y < 200., "widgets keep the top: {}", widget.y);
+    assert!(widget.x > 960.);
+    assert!(caption.y > widget.y + widget.h);
+    assert!(
+        apps.y > classic_apps.y,
+        "favorites sit lower than on the classic Home"
+    );
+    assert!(apps.y + apps.h <= DOCK_FADE[0], "and clear of the dock");
+
+    // The mirror: widgets left, headline and the Favorites title right.
+    let mirror = home_in(Layout::Flip);
+    let widget = controls(&mirror)
+        .into_iter()
+        .find(|c| matches!(c.target, Target::Widget(_)))
+        .unwrap()
+        .rect;
+    assert_eq!(widget.x, crate::state::HOME_STRIP_LEFT);
+    let caption = rect_of(&mirror, &Target::VideoTitle);
+    assert!(caption.x > 960., "the caption sits on the right");
+    let live = first_of(&mirror, HomeBand::Live);
+    assert!(live.x > first_of(&classic, HomeBand::Live).x);
+    assert_eq!(
+        first_of(&mirror, HomeBand::Apps).y,
+        classic_apps.y,
+        "the rows keep their place"
+    );
+}
+
+#[test]
+fn the_mirror_sets_the_headline_against_the_right_edge() {
+    use crate::layout::Layout;
+    let state = home_in(Layout::Flip);
+    let scene = scene(&state);
+    let assets = view::Assets {
+        root: PathBuf::new(),
+        version: "test".into(),
+        metrics: BTreeMap::new(),
+        catalog_metrics: BTreeMap::new(),
+        active_heading: std::cell::Cell::new(crate::typography::HeadingFont::default()),
+        active_text: std::cell::Cell::new(crate::typography::TextFont::default()),
+        heading_pct: std::cell::Cell::new(state.preferences.heading_size_pct),
+        text_pct: std::cell::Cell::new(state.preferences.text_size_pct),
+        artwork: crate::app_artwork::Service::new(false),
+    };
+    // The biggest type on Home is the headline; every line of it ends at
+    // the right edge of the page.
+    let size = scene
+        .draw
+        .iter()
+        .filter_map(|d| match d {
+            crate::renderer::Draw::Text(_, _, style, _, _) => Some(style.size),
+            _ => None,
+        })
+        .fold(0., f32::max);
+    let mut ends: BTreeMap<i32, f32> = BTreeMap::new();
+    for d in &scene.draw {
+        if let crate::renderer::Draw::Text(value, r, style, _, _) = d
+            && style.size == size
+        {
+            let end = r.x + assets.width(value, *style);
+            let line = ends.entry(r.y.round() as i32).or_insert(0.);
+            *line = line.max(end);
+        }
+    }
+    assert!(!ends.is_empty());
+    for end in ends.values() {
+        assert!(
+            (end - crate::state::HOME_STRIP_RIGHT).abs() < 1.,
+            "a headline line ends at {end}"
+        );
+    }
+}
+
+#[test]
+fn the_shelf_walks_down_from_the_apps_to_the_headline_to_the_rows() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Rail);
+    state.focus = first_app(&state);
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "the switch buttons sit above"
+    );
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "nothing above them"
+    );
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "then the headline band"
+    );
+    // The rightmost app leads down to the widget under it.
+    state.focus = Target::App(state.apps()[5].id.clone());
+    press(&mut state, Direction::Down);
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Down);
+    assert!(
+        matches!(state.focus, Target::StackCard(0, _)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Up);
+    assert_eq!(home_band(&state.focus), Some(HomeBand::Info));
+    // Up through the widget and its label, then the apps.
+    for _ in 0..3 {
+        if matches!(state.focus, Target::App(_)) {
+            break;
+        }
+        press(&mut state, Direction::Up);
+    }
+    assert!(matches!(state.focus, Target::App(_)), "{:?}", state.focus);
+}
+
+#[test]
+fn the_stage_walks_down_to_the_dock_and_up_to_the_corner_widgets() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Dock);
+    state.focus = Target::App(state.apps()[5].id.clone());
+    let app = state.focus.clone();
+    press(&mut state, Direction::Up);
+    assert!(matches!(state.focus, Target::LiveInput(_)));
+    press(&mut state, Direction::Up);
+    assert_eq!(home_band(&state.focus), Some(HomeBand::Info));
+    // From the right the widget in the corner is the nearer one.
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+    for _ in 0..3 {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "the corner is the top: {:?}",
+        state.focus
+    );
+    for _ in 0..3 {
+        if matches!(state.focus, Target::LiveInput(_)) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    state.focus = app;
+    // Down through the rows, then the dock.
+    for _ in 0..12 {
+        press(&mut state, Direction::Down);
+        let controls = controls(&state);
+        state.reveal_focus(&controls);
+        if matches!(state.focus, Target::Nav(_)) {
+            break;
+        }
+    }
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::StackCard(..)),
+        "back on the last row"
+    );
+}
+
+#[test]
+fn the_mirror_walks_from_the_bar_to_the_widgets_and_headline() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Flip);
+    state.back();
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "below the bar comes the headline band, not the apps"
+    );
+    let first = state.focus.clone();
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, first, "back where it left");
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::LiveInput(_)));
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    // The leftmost app leads up to the widget on the left.
+    state.focus = first_app(&state);
+    for _ in 0..2 {
+        press(&mut state, Direction::Up);
+    }
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+}
