@@ -266,9 +266,9 @@ mod native {
     }
     impl Native {
         pub fn load() -> Self {
-            let library = std::env::current_exe()
+            let library = crate::platform::install_dir()
                 .ok()
-                .and_then(|exe| exe.parent().map(|p| p.join("lib/libluma_cinema.so")))
+                .map(|directory| directory.join("lib/libluma_cinema.so"))
                 .and_then(|p| CString::new(p.to_string_lossy().as_bytes()).ok())
                 .map_or(std::ptr::null_mut(), |p| unsafe {
                     libc::dlopen(p.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL)

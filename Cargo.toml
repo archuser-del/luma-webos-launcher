@@ -9,7 +9,7 @@ license = "MIT"
 description = "A remote-first native launcher for rooted LG webOS TVs"
 
 [workspace]
-members = ["vector-geometry", "tools/vector-assets"]
+members = ["vector-geometry", "tools/vector-assets", "tv-helper"]
 resolver = "3"
 
 [features]

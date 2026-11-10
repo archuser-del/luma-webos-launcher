@@ -196,6 +196,31 @@ Luma runs as a normal app without root. On a rooted TV (Homebrew Channel, elevat
 
 Without root the Root features section is hidden, and Luma never tries to change system files.
 
+### Make Luma the Home screen
+
+Replaces LG Home with Luma on a rooted TV: the Home button opens Luma, and Luma comes up when the TV
+starts. Supported on webOS 5, 6, 24, 25 and 26. Run in the TV's root SSH shell, and confirm with `y`:
+
+```sh
+sh /media/developer/apps/usr/palm/applications/com.archbtw.luma/home.sh enable
+```
+
+What it does: on webOS 5/6/24 it mounts Luma's program over LG Home's; on 25/26 it mounts a Home app
+that points at Luma. LG Home's own files stay untouched underneath. A boot hook
+(`/var/lib/webosbrew/init.d/64-luma-home`) reapplies it at every cold boot, and **Home Auto Launch**
+is turned on so the TV opens Home, now Luma, at power-on.
+
+Check it, or go back to LG Home (this also restores Home Auto Launch to what it was):
+
+```sh
+sh /var/lib/luma-home/home.sh status
+sh /var/lib/luma-home/home.sh disable
+```
+
+Disable it before uninstalling Luma. If you use the autostart hook below, disable that first; you
+don't need both. Logs: `/var/lib/luma-home/boot.log` (boot hook) and `/tmp/luma-home.log` (Luma
+running as Home).
+
 ### Autostart from the command line
 
 Opens Luma 25 seconds after a full cold boot, as a regular app (the Home button is not remapped).

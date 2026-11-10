@@ -1,5 +1,8 @@
 mod aerial_video;
 mod app_artwork;
+#[cfg(all(feature = "webos", unix))]
+#[path = "app-subscription.rs"]
+mod app_subscription;
 mod branding;
 mod custom_videos;
 mod diagnostics;
@@ -104,8 +107,12 @@ impl Options {
             if let Some(argument) = args.next() {
                 let metadata: serde_json::Value =
                     serde_json::from_str(&argument).map_err(|error| error.to_string())?;
-                result.webos_home = metadata.get("nid").and_then(serde_json::Value::as_str)
-                    == Some(platform::HOME_ID);
+                result.webos_home = ["nid", "appId"].iter().any(|key| {
+                    metadata
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(platform::is_home_id)
+                });
             }
             eprintln!("Luma webOS launch parameters accepted");
         }
@@ -2017,9 +2024,142 @@ fn scripted_click(
 /// (visible, fullscreen camera, live cameras, hidden cameras) last sent to Smart Home.
 type HaView = (bool, Option<String>, Vec<String>, Vec<String>);
 
+/// Register with sam as Home, so the Home key relaunches the running Luma instead of
+/// restarting it. Returns the SDL event type lifecycle events arrive as, and for a staged
+/// Home a way to end the registration.
+#[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
+#[allow(clippy::type_complexity)]
+fn home_lifecycle(
+    sdl: &sdl2::Sdl,
+    as_home: bool,
+) -> Result<(Option<u32>, Option<Box<dyn Fn()>>), String> {
+    if !as_home {
+        return Ok((None, None));
+    }
+    let subsystem = sdl.event()?;
+    // SAFETY: registers one SDL user event type before any are pushed.
+    let event_type = unsafe { subsystem.register_event()? };
+    let pusher = move |sender: sdl2::event::EventSender| {
+        move |lifecycle: platform::Lifecycle| {
+            let code = match lifecycle {
+                platform::Lifecycle::Relaunch => 1,
+                platform::Lifecycle::Close => 2,
+            };
+            let _ = sender.push_event(Event::User {
+                timestamp: 0,
+                window_id: 0,
+                type_: event_type,
+                code,
+                data1: std::ptr::null_mut(),
+                data2: std::ptr::null_mut(),
+            });
+        }
+    };
+    // SAFETY: geteuid has no preconditions.
+    let as_root = unsafe { libc::geteuid() } == 0;
+    if platform::runs_as_lg_home() {
+        // In place of LG's Home executable (webOS 5/6/24), LG's role is bound to that path,
+        // so Luma registers through lifecycle v2 on its own connection.
+        let push = pusher(subsystem.event_sender());
+        luna::subscribe(
+            Some(platform::home_id()),
+            "luna://com.webos.applicationManager/registerApp",
+            &serde_json::json!({"id": platform::home_id()}),
+            // sam answers "registered" at once; without it sam would end Home later.
+            Duration::from_secs(10),
+            move |message| {
+                eprintln!("Luma lifecycle: {message}");
+                let refused = message
+                    .get("returnValue")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false);
+                match platform::Lifecycle::from_reply(&message) {
+                    Some(lifecycle) => push(lifecycle),
+                    // Registration lost (e.g. sam restarted): quit, so sam starts Home afresh.
+                    None if refused => push(platform::Lifecycle::Close),
+                    None => {}
+                }
+            },
+        )?;
+        return Ok((Some(event_type), None));
+    }
+    if !as_root {
+        return Ok((None, None));
+    }
+    if std::path::Path::new(platform::HOME_LIFECYCLE_OFF).exists() {
+        eprintln!(
+            "Luma lifecycle: {} exists; Home stays unregistered",
+            platform::HOME_LIFECYCLE_OFF
+        );
+        return Ok((None, None));
+    }
+    // A staged Home manifest (webOS 25/26) runs Luma's own executable as root under LG's
+    // app-ID based Home role, which Luma's connection cannot claim. Hold the registration as
+    // that app through `luna-send -a`; sam then expects lifecycle v1. Until sam answers, Home
+    // is simply unregistered.
+    let push = pusher(subsystem.event_sender());
+    let close = pusher(subsystem.event_sender());
+    match luna::subscribe_as_app(
+        platform::home_id(),
+        "luna://com.webos.applicationManager/registerNativeApp",
+        &serde_json::json!({}),
+        Duration::from_secs(10),
+        move |message| {
+            eprintln!("Luma lifecycle: {message}");
+            if let Some(lifecycle) = platform::Lifecycle::from_reply(&message) {
+                push(lifecycle);
+            }
+        },
+        // A registration sam had accepted is gone: quit, so sam starts Home afresh.
+        move |registered| {
+            if registered {
+                close(platform::Lifecycle::Close);
+            }
+        },
+    ) {
+        Ok(subscription) => Ok((
+            Some(event_type),
+            Some(Box::new(move || subscription.end()) as Box<dyn Fn()>),
+        )),
+        Err(error) => {
+            eprintln!("Luma lifecycle: {error}; Home stays unregistered");
+            Ok((None, None))
+        }
+    }
+}
+
+/// sam discards a system app's output. As Home, keep it in a small log.
+#[cfg(all(feature = "webos", unix))]
+fn log_home_output() {
+    use std::os::unix::io::IntoRawFd;
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/luma-home.log")
+    {
+        // SAFETY: duplicates a valid, owned descriptor onto stderr.
+        unsafe { libc::dup2(file.into_raw_fd(), 2) };
+    }
+}
+
 fn run() -> Result<(), String> {
     let startup = Instant::now();
+    // In place of LG's Home executable, before parsing, so option errors are kept too.
+    #[cfg(all(feature = "webos", unix))]
+    if platform::runs_as_lg_home() {
+        log_home_output();
+    }
     let mut options = Options::parse()?;
+    // Running as LG's Home executable (webOS 5/6/24) is Home whatever the launch says.
+    if cfg!(feature = "webos") && platform::runs_as_lg_home() {
+        options.webos_home = true;
+    }
+    // A staged Home manifest (webOS 25/26) is only recognised from its launch parameters.
+    #[cfg(all(feature = "webos", unix))]
+    if options.webos_home && !platform::runs_as_lg_home() {
+        log_home_output();
+    }
     let webos = cfg!(feature = "webos");
     let startup_stage = |stage: &str| {
         if webos {
@@ -2037,7 +2177,7 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         let surface_id = if options.webos_home {
-            platform::HOME_ID
+            platform::home_id()
         } else {
             platform::APP_ID
         };
@@ -2050,20 +2190,22 @@ fn run() -> Result<(), String> {
         }
         eprintln!("Luma webOS surface: {surface_id}");
         sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+        // In place of LG's Home executable, SDL's own registration cannot reach the bus under
+        // LG's Home role; Luma registers with sam itself below (lifecycle v2).
+        if platform::runs_as_lg_home() {
+            sdl2::hint::set("SDL_WEBOS_REGISTER_APP", "0");
+        }
     }
     // Resolve the local offset before artwork, HTTP or platform workers start.
     let local_offset = OffsetDateTime::now_local()
         .map(|now| now.offset())
         .unwrap_or(time::UtcOffset::UTC);
-    let root = options.assets.clone().unwrap_or_else(|| {
-        if webos {
-            std::env::current_exe()
-                .unwrap_or_default()
-                .with_file_name("assets")
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".build/assets")
-        }
-    });
+    // As LG's Home executable, assets are in the installed package, not beside /usr/bin.
+    let root = match options.assets.clone() {
+        Some(root) => root,
+        None if webos => platform::install_dir()?.join("assets"),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".build/assets"),
+    };
     let assets = view::Assets::load(root, webos)?;
     startup_stage("asset metadata");
     let default_preferences = options
@@ -2723,6 +2865,17 @@ fn run() -> Result<(), String> {
     let mut captured = None;
     let mut last_drawable = None;
     let mut events = sdl.event_pump()?;
+    // Lifecycle as Home: sam sends "relaunch" (bring the running Luma to the front) instead of
+    // killing and restarting it, and "close" when it wants Luma to exit. `end_registration`
+    // drops a staged Home's registration (webOS 25/26) if a relaunch did not reach the front.
+    type EndRegistration = Box<dyn Fn()>;
+    #[cfg(not(all(feature = "webos", target_os = "linux", target_arch = "arm")))]
+    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) = (None, None);
+    #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
+    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) =
+        home_lifecycle(&sdl, webos && options.webos_home)?;
+    // Whether a staged Home's relaunch reached the front; see platform::ForegroundCheck.
+    let mut foreground = platform::ForegroundCheck::default();
     let mut press: Option<Press> = None;
     // When Up/Down started being held, to speed up long Settings lists.
     let mut vertical_held: Option<std::time::Instant> = None;
@@ -3356,6 +3509,29 @@ fn run() -> Result<(), String> {
                     let _ = x;
                 }
                 Event::Quit { .. } => running = false,
+                Event::User { type_, code, .. } if Some(type_) == lifecycle_event => {
+                    if code == 1 {
+                        eprintln!("Luma lifecycle: relaunch, back to Home");
+                        press = None;
+                        pending = state.return_home();
+                        // A staged Home must come forward itself. If it does not, its
+                        // registration would leave the Home key dead: checked below.
+                        if end_registration.is_some() {
+                            foreground.relaunched(Instant::now(), visible);
+                        }
+                        // SAFETY: the window outlives the event loop.
+                        unsafe {
+                            sdl2::sys::SDL_RestoreWindow(window.raw());
+                            sdl2::sys::SDL_ShowWindow(window.raw());
+                            sdl2::sys::SDL_RaiseWindow(window.raw());
+                        }
+                        visible = true;
+                        state.dirty = true;
+                        pending.push(Effect::Refresh);
+                    } else if code == 2 {
+                        running = false;
+                    }
+                }
                 Event::Window {
                     window_id,
                     win_event,
@@ -3373,6 +3549,10 @@ fn run() -> Result<(), String> {
                     WindowEvent::FocusLost => press = None,
                     WindowEvent::Shown | WindowEvent::Restored | WindowEvent::FocusGained => {
                         visible = true;
+                        // Shown and Restored can come from SDL itself; only focus confirms.
+                        if matches!(win_event, WindowEvent::FocusGained) {
+                            foreground.confirmed();
+                        }
                         state.dirty = true;
                         // Double Start+Select on a TV gamepad (pad_watch): close the game.
                         let quit = std::fs::remove_file(pad_watch::FLAG).is_ok();
@@ -4271,6 +4451,20 @@ fn run() -> Result<(), String> {
         frame += 1;
         if final_frame {
             running = false;
+        }
+        if foreground.failed(Instant::now())
+            && let Some(end_registration) = &end_registration
+        {
+            // Fall back to the restart sam does for an unregistered Home: remember that and
+            // end the registration, which quits Luma so sam starts it afresh.
+            eprintln!(
+                "Luma lifecycle: a relaunch did not bring Luma to the front; creating {}",
+                platform::HOME_LIFECYCLE_OFF
+            );
+            if let Err(error) = std::fs::write(platform::HOME_LIFECYCLE_OFF, b"") {
+                eprintln!("Luma lifecycle: {error}");
+            }
+            end_registration();
         }
         // Block until input instead of polling at frame rate on idle screens.
         // VSync paces animation; holds, scripted checks and icons still being

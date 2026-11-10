@@ -164,11 +164,8 @@ pub struct Player {
 }
 impl Player {
     pub fn new() -> Result<Self, String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let path = exe
-            .parent()
-            .ok_or("No application directory")?
-            .join("lib/libluma_hwplayer.so");
+        // The installed package, also when Luma runs in place of LG's Home executable.
+        let path = crate::platform::install_dir()?.join("lib/libluma_hwplayer.so");
         let c = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
         let lib = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if lib.is_null() {
@@ -313,11 +310,7 @@ impl Player {
         if !playable_source(&entry.url) {
             return Err("Invalid streaming URL".into());
         }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let demux = exe
-            .parent()
-            .ok_or("No application directory")?
-            .join("luma-demux");
+        let demux = crate::platform::install_dir()?.join("luma-demux");
         let log = OpenOptions::new()
             .create(true)
             .append(true)

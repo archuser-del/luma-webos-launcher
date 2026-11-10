@@ -1,0 +1,3 @@
+/media/cryptofs/apps/usr/palm/applications/com.archbtw.luma
+/media/developer/apps/usr/palm/applications/com.archbtw.luma
+/usr/palm/applications/com.archbtw.luma

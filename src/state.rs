@@ -1636,6 +1636,27 @@ impl State {
                 }))
     }
 
+    /// Home asked for again (sam relaunched Luma as LG Home): close whatever was open and
+    /// show the Home tab. Keyboard drafts are committed first.
+    pub fn return_home(&mut self) -> Vec<Effect> {
+        let pending = self.finish_text_input();
+        if self.ambient_on() {
+            self.leave_ambient();
+        }
+        self.library = None;
+        self.library_closing = None;
+        self.movie = None;
+        self.album = None;
+        self.game = None;
+        self.widget_detail = None;
+        self.ha_detail = None;
+        self.ha_camera = None;
+        self.ha_camera_menu = None;
+        self.pointer = false;
+        self.open(0);
+        pending
+    }
+
     pub fn open(&mut self, index: usize) {
         self.weather.cancel_search();
         if index == self.page_index() {

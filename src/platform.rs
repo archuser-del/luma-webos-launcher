@@ -8,22 +8,171 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::mpsc, thread};
 
+#[path = "platform-install.rs"]
+mod installation;
+
 pub const APP_ID: &str = "com.archbtw.luma";
 pub const HOME_ID: &str = "com.webos.app.home";
+pub const FULL_HOME_ID: &str = "com.webos.app.fullhome";
+
+pub fn is_home_id(id: &str) -> bool {
+    matches!(id, HOME_ID | FULL_HOME_ID)
+}
+
+/// Keep the window surface and SAM lifecycle identity aligned with the executed Home app.
+fn home_identity(executable: Option<&std::path::Path>, metadata: Option<&Value>) -> &'static str {
+    if let Some(executable) = executable {
+        if executable == std::path::Path::new("/usr/bin/com.webos.app.fullhome") {
+            return FULL_HOME_ID;
+        }
+        if executable == std::path::Path::new(LG_HOME_EXE) {
+            return HOME_ID;
+        }
+    }
+    if metadata.is_some_and(|value| {
+        ["nid", "appId"]
+            .iter()
+            .any(|key| value.get(key).and_then(Value::as_str) == Some(FULL_HOME_ID))
+    }) {
+        FULL_HOME_ID
+    } else {
+        HOME_ID
+    }
+}
+
+/// Derive the identity from SAM's actual launch, never from a saved preference.
+pub fn home_id() -> &'static str {
+    let executable = std::env::current_exe().ok();
+    let metadata = std::env::args()
+        .nth(1)
+        .and_then(|arg| serde_json::from_str::<Value>(&arg).ok());
+    home_identity(executable.as_deref(), metadata.as_ref())
+}
+
+/// LG's Home executable. The root integration may bind-mount Luma over it (webOS 5/6/24), so
+/// sam starts Luma under LG's own Home manifest and LS2 role (lifecycle v2, keep-alive).
+pub const LG_HOME_EXE: &str = "/usr/bin/com.webos.app.home";
+
+/// Whether this process runs in place of LG's Home executable.
+pub fn runs_as_lg_home() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        exe == std::path::Path::new(LG_HOME_EXE)
+            || exe == std::path::Path::new("/usr/bin/com.webos.app.fullhome")
+    })
+}
+
+/// While this file exists, a staged Home (webOS 10/11) does not register with sam and is
+/// restarted per Home key as before. Luma creates it when a relaunch did not bring it to the
+/// front; delete it to try registering again.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+pub const HOME_LIFECYCLE_OFF: &str = "/var/lib/luma-home/no-lifecycle";
+
+/// Whether a relaunch actually brought a staged Home (webOS 10/11) to the front. Only the
+/// compositor's focus or remote input counts: SDL_ShowWindow emits Shown by itself, so Shown
+/// and Restored say nothing about whether the raise reached the screen.
+#[derive(Debug, Default)]
+pub struct ForegroundCheck {
+    deadline: Option<std::time::Instant>,
+}
+
+impl ForegroundCheck {
+    pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// A relaunch arrived. `in_front`: Luma was already focused and visible, so nothing to check.
+    #[cfg_attr(
+        not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+        allow(dead_code)
+    )]
+    pub fn relaunched(&mut self, now: std::time::Instant, in_front: bool) {
+        if !in_front {
+            self.deadline = Some(now + Self::TIMEOUT);
+        }
+    }
+
+    /// The compositor focused Luma, or remote input reached it.
+    pub fn confirmed(&mut self) {
+        self.deadline = None;
+    }
+
+    /// Whether a pending relaunch has failed by `now`. Reports each failure once.
+    pub fn failed(&mut self, now: std::time::Instant) -> bool {
+        let failed = self.deadline.is_some_and(|deadline| now >= deadline);
+        if failed {
+            self.deadline = None;
+        }
+        failed
+    }
+}
+
+/// What sam asks of a registered Home, from one lifecycle reply. Only TV builds register.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// Bring the running instance to the front instead of a restart.
+    Relaunch,
+    /// Exit.
+    Close,
+}
+
+impl Lifecycle {
+    /// Lifecycle v2 (`registerApp`) names the event in `event`; v1 (`registerNativeApp`) in
+    /// `message`. Other replies (`registered`, `pause`, keep-alive) need no action.
+    #[cfg_attr(
+        not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+        allow(dead_code)
+    )]
+    pub fn from_reply(reply: &Value) -> Option<Self> {
+        let name = reply
+            .get("event")
+            .or_else(|| reply.get("message"))
+            .and_then(Value::as_str)?;
+        match name {
+            "relaunch" => Some(Self::Relaunch),
+            "close" => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+/// Directory holding assets/, lib/ and splash/: next to the executable, or the installed
+/// package when the executable runs in place of LG's Home.
+pub fn install_dir() -> Result<std::path::PathBuf, String> {
+    static DIRECTORY: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            installation::find_directory(&executable, installation::directories())
+        })
+        .clone()
+}
 /// LG's web browser; `target` in its launch parameters is the page to open.
 pub const BROWSER_ID: &str = "com.webos.app.browser";
 
 pub fn redirect_to_home() -> Result<bool, String> {
     // The root-only integration mounts this marker with its native Home
-    // manifest. A normal tile launch then opens that same instance instead of
-    // starting a second renderer writing the same preferences.
-    if std::fs::read_to_string("/usr/palm/applications/com.webos.app.home/.luma-home")
-        .is_ok_and(|marker| marker.trim() == APP_ID)
+    // manifest, or writes it to /var/run on webOS 5/6/24, where it mounts this
+    // executable over LG's (a tile's jail sees /usr/bin without that mount).
+    // A normal tile launch then opens that same instance instead of starting
+    // a second renderer writing the same preferences.
+    let marked = |file| std::fs::read_to_string(file).is_ok_and(|marker| marker.trim() == APP_ID);
+    if marked("/usr/palm/applications/com.webos.app.home/.luma-home")
+        || marked("/var/run/luma-home")
     {
         thread::spawn(|| {
+            let target = std::fs::read_to_string("/var/run/luma-home-target")
+                .ok()
+                .filter(|id| is_home_id(id.trim()))
+                .map_or_else(|| HOME_ID.to_owned(), |id| id.trim().to_owned());
             call(
                 "luna://com.webos.applicationManager/launch",
-                json!({"id": HOME_ID}),
+                json!({"id": target}),
             )
         })
         .join()
