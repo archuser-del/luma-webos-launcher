@@ -1327,6 +1327,89 @@ fn header_circles(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
+/// "PlayStation 5 is on · HDMI 1": one button per input with a picture,
+/// beside the Favorites title, one press of Up from the apps. Its live dot
+/// and accent outline make it easy to spot without focus.
+fn live_input_buttons(out: &mut Scene, state: &State, assets: &Assets, x: f32, title_y: f32) {
+    let style = text(25., 600, -0.01);
+    let mut x = x;
+    let h = 56.;
+    let y = title_y + (SECTION_TITLE_H - h) / 2.;
+    // A soft pulse on the live dot, still with reduced motion.
+    let pulse = if state.preferences.reduced_motion {
+        1.
+    } else {
+        0.6 + 0.4
+            * (state.page_started.elapsed().as_secs_f32() * 2.4)
+                .sin()
+                .abs()
+    };
+    for input in state.live_inputs() {
+        let target = Target::LiveInput(input.id.clone());
+        // The viewer's name for it, else what the TV calls it (often the
+        // device itself, from HDMI-CEC), else the port.
+        let name = state
+            .preferences
+            .input_name(input)
+            .or_else(|| (input.title != input.port).then_some(input.title.as_str()))
+            .unwrap_or(&input.port);
+        let label = if name == input.port {
+            format!("Switch to {}", input.port)
+        } else {
+            format!("Switch to {name} · {}", input.port)
+        };
+        let label_w = assets.width(&label, style).ceil();
+        let w = 24. + 14. + 14. + 30. + 14. + label_w + 28.;
+        if x + w > crate::state::HOME_STRIP_RIGHT {
+            break;
+        }
+        let rect = Rect::new(x, y, w, h);
+        let focus = state.focus_level(&target);
+        let lift = rect.inset(-3. * focus);
+        out.shadow(
+            lift,
+            lift.h / 2.,
+            18. + 18. * focus,
+            6. + 6. * focus,
+            0.2 + 0.2 * focus,
+        );
+        out.glass(lift, lift.h / 2.);
+        if focus > 0. {
+            let at = out.draw.len();
+            accent_fill(out, lift, lift.h / 2., state);
+            out.fade(at, focus, 1.);
+        } else {
+            out.accent_ring(lift, lift.h / 2., state);
+        }
+        let ink = blend(WHITE, accent_ink(state), focus);
+        let dot = Rect::new(lift.x + 24., lift.y + (lift.h - 14.) / 2., 14., 14.);
+        out.shape(dot.inset(-4. * pulse), 11., c(0x4ade80, 0.25 * pulse));
+        out.shape(dot, 7., c(0x4ade80, 1.));
+        let icon = format!(
+            "input-{}",
+            input_icon(input, state.preferences.input_name(input))
+        );
+        out.icon(
+            assets,
+            &icon,
+            Rect::new(dot.x + 14. + 14., lift.y + (lift.h - 30.) / 2., 30., 30.),
+            ink,
+        );
+        out.text(
+            &label,
+            line_box(
+                Rect::new(dot.x + 14. + 14. + 30. + 14., lift.y, label_w + 8., lift.h),
+                style,
+            ),
+            style,
+            ink,
+            false,
+        );
+        out.control(target, rect, false);
+        x += w + 16.;
+    }
+}
+
 /// App tiles and stack posters share one generous corner radius.
 pub(crate) const TILE_RADIUS: f32 = 26.;
 
@@ -2233,6 +2316,21 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         FAVORITES_TOP + home_content_offset - s,
     );
     out.enter(fav_label_start, state, 0.3, 22.);
+    if state.moving.is_none() {
+        let start = out.draw.len();
+        let title_w = assets.width(
+            language.t("favoriteApps"),
+            heading_fixed(assets, 31., 700).tracking(-0.01),
+        );
+        live_input_buttons(
+            out,
+            state,
+            assets,
+            84. + title_w + 36.,
+            FAVORITES_TOP + home_content_offset - s,
+        );
+        out.enter(start, state, 0.33, 22.);
+    }
     if state.moving.is_some() {
         out.text(
             language.t("moveApps"),

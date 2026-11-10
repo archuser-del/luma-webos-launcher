@@ -55,6 +55,53 @@ fn uploaded_videos_join_the_catalog_and_can_play_alone() {
 }
 
 #[test]
+fn an_input_with_a_picture_gets_a_switch_button_on_home() {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    // Signals reported: only HDMI 2 has a picture now.
+    crate::model::apply_signals(
+        &mut state.inventory.inputs,
+        &[(1, false), (2, true), (3, false)],
+    );
+    let live = |state: &State| -> Vec<Target> {
+        controls(state)
+            .into_iter()
+            .filter(|c| matches!(c.target, Target::LiveInput(_)))
+            .map(|c| c.target)
+            .collect()
+    };
+    assert_eq!(
+        live(&state),
+        vec![Target::LiveInput("com.webos.app.hdmi2".into())]
+    );
+    // One press of Up from the apps, and OK switches to the input.
+    state.focus = Target::App("netflix".into());
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::LiveInput("com.webos.app.hdmi2".into()));
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.webos.app.hdmi2".into())]
+    );
+    state.launching = false;
+    // Down goes back to the apps.
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::App("netflix".into()));
+    // An input the viewer turned off gets no button.
+    state
+        .preferences
+        .input_modes
+        .insert("com.webos.app.hdmi2".into(), InputMode::Off);
+    assert!(live(&state).is_empty());
+    // The signal goes away: the button goes, and focus does not stay on it.
+    state.preferences.input_modes.clear();
+    state.focus = Target::LiveInput("com.webos.app.hdmi2".into());
+    crate::model::apply_signals(&mut state.inventory.inputs, &[(2, false)]);
+    state.reconcile_focus();
+    assert!(live(&state).is_empty());
+    assert!(!matches!(state.focus, Target::LiveInput(_)));
+}
+
+#[test]
 fn lg_system_apps_are_hidden_once_and_unhiding_sticks() {
     let mut state = State::new(Preferences::default());
     assert!(state.set_inventory(demo_inventory(), None));
@@ -134,6 +181,9 @@ fn remote_routes_from_header_and_back_through_settings() {
     state.preferences.background = "dunes".into();
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::App("netflix".into()));
+    // The demo's plugged-in HDMI 1 offers its Switch button on the way up.
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::LiveInput("com.webos.app.hdmi1".into()));
     state.direction(Direction::Up, &controls(&state));
     assert_eq!(state.focus, Target::Nav(0));
     state.open(2);

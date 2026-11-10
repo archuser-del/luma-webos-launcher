@@ -71,6 +71,9 @@ pub enum Target {
     TvSettings,
     App(String),
     Input(String),
+    /// Home: the large "PlayStation 5 is on · Switch" button of an HDMI
+    /// input that has a picture right now.
+    LiveInput(String),
     Browse,
     Filter(usize),
     Search,
@@ -658,6 +661,16 @@ pub struct State {
     pub widget_return: Option<Target>,
 }
 
+/// The live input buttons on screen, left to right.
+fn live_controls(controls: &[Control]) -> Vec<Target> {
+    let mut live: Vec<&Control> = controls
+        .iter()
+        .filter(|c| matches!(c.target, Target::LiveInput(_)))
+        .collect();
+    live.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
+    live.into_iter().map(|c| c.target.clone()).collect()
+}
+
 impl State {
     pub fn new(mut preferences: Preferences) -> Self {
         preferences.accent.normalized();
@@ -871,6 +884,19 @@ impl State {
             service: service.into(),
             data: serde_json::json!({ "entity_id": id }),
         })]
+    }
+
+    /// HDMI inputs with a picture right now (or, without a signal report,
+    /// a cable plugged in), unless the viewer turned the input off.
+    pub fn live_inputs(&self) -> Vec<&crate::model::Input> {
+        self.inventory
+            .inputs
+            .iter()
+            .filter(|input| {
+                self.preferences.input_modes.get(&input.id) != Some(&InputMode::Off)
+                    && input.signal.unwrap_or(input.connected == Some(true))
+            })
+            .collect()
     }
 
     /// Wallpaper type: 0 photo, 1 video, 2 ImmichFrame.
@@ -1877,6 +1903,11 @@ impl State {
         {
             self.focus = self.first_content();
         }
+        if let Target::LiveInput(id) = &self.focus
+            && !self.live_inputs().iter().any(|input| &input.id == id)
+        {
+            self.focus = self.first_content();
+        }
         if let Target::Input(id) = &self.focus
             && !self
                 .inventory
@@ -2628,11 +2659,41 @@ impl State {
                     }
                     Direction::Up => self.focus(Target::Nav(0), controls),
                     Direction::Down => {
+                        if let Some(live) = live_controls(controls).first() {
+                            self.focus(live.clone(), controls);
+                        } else if let Some(app) = self.apps().first() {
+                            let id = app.id.clone();
+                            self.focus(Target::App(id), controls);
+                        }
+                    }
+                }
+                return vec![];
+            }
+            // The live input buttons sit between the headline and Favorites.
+            if self.page == Page::Home
+                && let Target::LiveInput(_) = &self.focus
+            {
+                let live = live_controls(controls);
+                let at = live.iter().position(|t| *t == self.focus).unwrap_or(0);
+                match direction {
+                    Direction::Left if at > 0 => self.focus(live[at - 1].clone(), controls),
+                    Direction::Right if at + 1 < live.len() => {
+                        self.focus(live[at + 1].clone(), controls)
+                    }
+                    Direction::Up => {
+                        if controls.iter().any(|c| c.target == Target::VideoTitle) {
+                            self.focus(Target::VideoTitle, controls)
+                        } else {
+                            self.focus(Target::Nav(0), controls)
+                        }
+                    }
+                    Direction::Down => {
                         if let Some(app) = self.apps().first() {
                             let id = app.id.clone();
                             self.focus(Target::App(id), controls);
                         }
                     }
+                    _ => {}
                 }
                 return vec![];
             }
@@ -2694,7 +2755,9 @@ impl State {
                             self.focus(Target::App(id), controls);
                         }
                         Direction::Up => {
-                            if controls.iter().any(|c| c.target == Target::VideoTitle) {
+                            if let Some(live) = live_controls(controls).first() {
+                                self.focus(live.clone(), controls)
+                            } else if controls.iter().any(|c| c.target == Target::VideoTitle) {
                                 self.focus(Target::VideoTitle, controls)
                             } else {
                                 self.focus(Target::Nav(0), controls)
@@ -4590,7 +4653,7 @@ impl State {
             Target::DismissNotice => self.notice = None,
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(id) | Target::Input(id) if !self.launching => {
+            Target::App(id) | Target::Input(id) | Target::LiveInput(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::Filter(index) => {
