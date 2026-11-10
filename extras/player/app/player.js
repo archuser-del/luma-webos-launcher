@@ -41,6 +41,9 @@ let hoverSec = null;
 let playing = false;
 let lastMark = 0;
 let leaving = false;
+// Jellyfin: what the TV decodes, the file's streams, the choices made and
+// the stream chosen from them (streams.js). null for other sources.
+let jf = null;
 
 // ---------- helpers ----------
 function clock(sec) {
@@ -180,6 +183,7 @@ function paintFocus() {
 function header() {
   const series = p.source === 'series';
   $('kind').textContent = series ? 'SERIES' : 'MOVIE';
+  $('mode').textContent = jf && jf.plan ? jf.plan.label.toUpperCase() : 'MEDIA';
   const title = $('title');
   title.textContent = p.title || '';
   title.classList.toggle('long', (p.title || '').length > 42);
@@ -274,6 +278,7 @@ function esc(s) {
 
 // ---------- tracks ----------
 function audioList() {
+  if (jf) return jf.info.audio.map((a) => a.name);
   const t = video.audioTracks;
   const n = t && t.length ? t.length : (p.audio || []).length;
   const out = [];
@@ -283,12 +288,27 @@ function audioList() {
 // The stream's own label first ("01. Дубляж. MovieDalen (RUS)"); media's
 // list may be ordered differently from the playlist.
 function audioName(i) {
+  if (jf) return (jf.info.audio[i] || {}).name || 'Audio';
   const t = video.audioTracks && video.audioTracks[i];
   const label = t && (t.label || '').trim();
   if (label) return label.replace(/^\d+\.\s*/, '');
   return (p.audio || [])[i] || (t && t.language) || `Track ${i + 1}`;
 }
+// Turn on one of the file's own audio tracks (Direct Play keeps them all).
+function enableTrack(i) {
+  const t = video.audioTracks;
+  if (t && t.length > i) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
+}
 function setAudio(i) {
+  if (jf) {
+    const a = jf.info.audio[i];
+    if (!a) return;
+    audioIndex = i;
+    jf.audio = a.index;
+    jfReplan();
+    buildRow();
+    return;
+  }
   const t = video.audioTracks;
   if (t && t.length) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
   audioIndex = i;
@@ -298,6 +318,13 @@ function setSubtitle(i) {
   subtitleIndex = i;
   cues = [];
   const track = (p.subtitles || [])[i];
+  if (jf) {
+    // An image subtitle is burned into the picture; leaving one, or
+    // picking one, needs another stream from Jellyfin.
+    const wasBurned = jf.plan && jf.plan.burn;
+    jf.subtitle = track ? track.index : null;
+    if ((track && track.image) || wasBurned) jfReplan();
+  }
   if (track && track.url) {
     const x = new XMLHttpRequest();
     x.open('GET', track.url);
@@ -336,6 +363,15 @@ function parseSubtitles(text) {
   return out.sort((x, y) => x.start - y.start);
 }
 function setQuality(i) {
+  if (jf) {
+    const q = (p.qualities || [])[i];
+    if (!q) return;
+    qualityIndex = i;
+    jf.quality = q.bitrate ? { bitrate: q.bitrate, height: q.height } : null;
+    jfReplan();
+    buildRow();
+    return;
+  }
   const q = (p.qualities || [])[i];
   if (!q || !q.url || i === qualityIndex) {
     qualityIndex = i;
@@ -442,6 +478,127 @@ function scrollToFocus() {
   }
 }
 
+// ---------- Jellyfin ----------
+// The TV is asked once per title what it decodes; streams.js turns that
+// and the viewer's choices into Direct Play, Direct Stream or a transcode.
+function jfStart(at) {
+  const j = p.jellyfin;
+  const S = window.LumaStreams;
+  const info = S.sourceInfo(j.source);
+  jf = {
+    caps: S.capabilities(video),
+    info,
+    audio: typeof j.audio === 'number' ? j.audio : null,
+    subtitle: typeof j.subtitle === 'number' ? j.subtitle : null,
+    quality: j.quality || null,
+    forceStream: false,
+    plan: null,
+  };
+  const chosenAudio = info.audio.findIndex((a) => a.index === jf.audio);
+  audioIndex =
+    chosenAudio >= 0
+      ? chosenAudio
+      : Math.max(
+          0,
+          info.audio.findIndex((a) => a.isDefault),
+        );
+  p.audio = info.audio.map((a) => a.name);
+  const ctx = jfContext();
+  p.subtitles = info.subtitles.map((sub) => ({
+    name: S.subtitleLabel(info, sub),
+    url: S.subtitleUrl(ctx, sub),
+    image: sub.image,
+    index: sub.index,
+  }));
+  p.qualities = [{ name: info.video.hdr ? 'Original · HDR' : 'Original' }].concat(
+    S.qualities(info),
+  );
+  qualityIndex = jf.quality
+    ? Math.max(
+        0,
+        p.qualities.findIndex((q) => q.bitrate === jf.quality.bitrate),
+      )
+    : 0;
+  const sub = p.subtitles.findIndex((t) => t.index === jf.subtitle);
+  subtitleIndex = -1;
+  cues = [];
+  jf.plan = S.plan(jfContext());
+  header();
+  buildRow();
+  if (sub >= 0) {
+    subtitleIndex = sub;
+    const track = p.subtitles[sub];
+    if (track.url) setSubtitle(sub);
+  }
+  open(jf.plan.url, at);
+}
+function jfContext() {
+  const j = p.jellyfin;
+  return {
+    base: j.base,
+    token: j.token,
+    deviceId: j.deviceId,
+    item: j.item,
+    session: j.session,
+    info: jf.info,
+    caps: jf.caps,
+    audio: jf.audio,
+    subtitle: jf.subtitle,
+    quality: jf.quality,
+    forceStream: jf.forceStream,
+  };
+}
+// A choice changed: the same stream only switches tracks; another stream
+// reopens where the picture was.
+function jfReplan() {
+  const next = window.LumaStreams.plan(jfContext());
+  const old = jf.plan;
+  jf.plan = next;
+  header();
+  if (old && old.url === next.url) {
+    enableTrack(next.audioPosition);
+    return;
+  }
+  open(next.url, video.currentTime || 0);
+}
+// The next or previous episode: Jellyfin is asked for its file first.
+function jfEpisode(e, done) {
+  const r = p.report;
+  const x = new XMLHttpRequest();
+  x.open(
+    'POST',
+    `${r.base}/Items/${e.item}/PlaybackInfo?UserId=${encodeURIComponent(r.user || '')}`,
+  );
+  x.setRequestHeader('Content-Type', 'application/json');
+  x.setRequestHeader(
+    'Authorization',
+    `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${r.deviceId}", Version="${r.version || '1'}", Token="${r.token}"`,
+  );
+  x.onload = () => {
+    let info = null;
+    try {
+      info = JSON.parse(x.responseText || 'null');
+    } catch {
+      info = null;
+    }
+    const source = info && info.MediaSources && info.MediaSources[0];
+    if (x.status >= 300 || !source) return done(false);
+    p.jellyfin = Object.assign({}, p.jellyfin, {
+      item: e.item,
+      source,
+      session: info.PlaySessionId || p.jellyfin.session,
+      audio: null,
+      subtitle: null,
+      quality: null,
+    });
+    r.source = source.Id;
+    r.session = p.jellyfin.session;
+    done(true);
+  };
+  x.onerror = () => done(false);
+  x.send(JSON.stringify({ UserId: r.user || undefined }));
+}
+
 // ---------- playback ----------
 let opening = null;
 function open(url, at) {
@@ -458,11 +615,13 @@ function open(url, at) {
     video.removeEventListener('loadedmetadata', start);
     opening = null;
     if (at > 0) video.currentTime = at;
-    if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
+    if (jf) enableTrack(jf.plan ? jf.plan.audioPosition : 0);
+    else if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
   };
   opening = start;
   video.addEventListener('loadedmetadata', start);
-  video.play();
+  const started = video.play();
+  if (started && started.catch) started.catch(() => {});
   if (p.report) setTimeout(() => report('start'), 0);
 }
 function showNote(title, sub) {
@@ -580,6 +739,17 @@ function episode(target) {
     p.subtitles = [];
     subtitleIndex = -1;
     cues = [];
+    if (jf) {
+      showNote('Loading…');
+      jfEpisode(e, (ok) => {
+        if (ok) return jfStart(0);
+        jf = null;
+        header();
+        buildRow();
+        open(e.url, 0);
+      });
+      return;
+    }
     header();
     buildRow();
     open(e.url, 0);
@@ -621,7 +791,18 @@ video.addEventListener('playing', () => {
 video.addEventListener('waiting', () => {
   if (playing) render();
 });
-video.addEventListener('error', () => showNote("Can't play this video", 'The stream did not open'));
+video.addEventListener('error', () => {
+  // The TV refused the original file after all: retry once with the video
+  // copied into a new container (still no re-encoding, HDR intact).
+  // Only a format or decode refusal: a network hiccup is not the file's fault.
+  const code = video.error ? video.error.code : 0;
+  if (jf && jf.plan && jf.plan.method === 'DirectPlay' && !jf.forceStream && code >= 3) {
+    jf.forceStream = true;
+    jfReplan();
+    return;
+  }
+  showNote("Can't play this video", 'The stream did not open');
+});
 video.addEventListener('ended', () => {
   if (music) {
     if (music.at + 1 < music.order.length) step(1);
@@ -1122,6 +1303,13 @@ function start() {
     startMusic();
     render();
     renderMusic();
+    return;
+  }
+  jf = null;
+  if (p.jellyfin && p.jellyfin.source && window.LumaStreams) {
+    jfStart((p.resumeMs || 0) / 1000);
+    reveal();
+    render();
     return;
   }
   header();

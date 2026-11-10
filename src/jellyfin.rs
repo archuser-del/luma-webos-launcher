@@ -968,6 +968,7 @@ fn play_album(
         base: link.server.clone(),
         token: link.token.clone(),
         device_id: link.device_id.clone(),
+        user: link.user_id.clone(),
         item: first.item.clone(),
         source: first.item.clone(),
         session,
@@ -990,6 +991,7 @@ fn play_album(
         next_episode: None,
         selected_subtitle: None,
         report: Some(report),
+        jellyfin: None,
         music: Some(crate::player::Music {
             album: title,
             artist,
@@ -1126,7 +1128,7 @@ fn details(reply: &mpsc::Sender<Response>, cache: &Path, link: &JellyfinLink, id
         &agent,
         link,
         &format!(
-            "/Items/{guid}?userId={}&Fields=Overview,Genres,People,ProductionLocations,MediaStreams",
+            "/Items/{guid}?userId={}&Fields=Overview,Genres,People,ProductionLocations,MediaStreams,MediaSources",
             link.user_id
         ),
     ) else {
@@ -1155,12 +1157,33 @@ fn details(reply: &mpsc::Sender<Response>, cache: &Path, link: &JellyfinLink, id
             .iter()
             .map(|s| stream_label(s))
             .collect(),
-        subtitles: streams(&item, "Subtitle")
-            .iter()
-            .filter(|s| s.get("IsTextSubtitleStream").and_then(Value::as_bool) == Some(true))
-            .map(|s| (stream_label(s), String::new()))
-            .collect(),
         ..Default::default()
+    };
+    // Versions, qualities and every subtitle (image ones say they burn in).
+    let sources = item
+        .get("MediaSources")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let first = sources.first().unwrap_or(&item);
+    let hdr = source_hdr(first);
+    detail.subtitles = streams(first, "Subtitle")
+        .iter()
+        .map(|s| (subtitle_label(s, hdr), String::new()))
+        .collect();
+    if sources.len() > 1 {
+        detail.versions = sources
+            .iter()
+            .map(|s| (version_label(s), text(s, "Id")))
+            .collect();
+    }
+    detail.default_quality = Some(if hdr { "Original · HDR" } else { "Original" }.into());
+    // A series has no file of its own: its episodes get the whole ladder,
+    // and the player still never re-encodes an HDR episode.
+    detail.qualities = if serial {
+        QUALITY_LADDER.iter().map(|q| q.0.to_owned()).collect()
+    } else {
+        quality_ladder(first)
     };
     if serial {
         let list = episodes(&agent, link, &guid);
@@ -1213,12 +1236,183 @@ fn details(reply: &mpsc::Sender<Response>, cache: &Path, link: &JellyfinLink, id
 
 /// HLS that Jellyfin remuxes (or transcodes only when it must) for the TV's
 /// web video element. The URL carries the token: never logged.
-fn hls_url(link: &JellyfinLink, item: &str, source: &str, session: &str) -> String {
+/// Lower qualities offered for SDR files, re-encoded to H.264. The player's
+/// streams.js has the same ladder; the names travel between the two.
+pub const QUALITY_LADDER: [(&str, u64, u64); 5] = [
+    ("1080p · 20 Mbps", 20_000_000, 1080),
+    ("1080p · 10 Mbps", 10_000_000, 1080),
+    ("720p · 6 Mbps", 6_000_000, 720),
+    ("720p · 3 Mbps", 3_000_000, 720),
+    ("480p · 1.5 Mbps", 1_500_000, 480),
+];
+/// Subtitle formats the player draws itself; anything else is an image
+/// format (PGS, VobSub, DVB) that has to be burned into the picture.
+const TEXT_SUBTITLES: [&str; 11] = [
+    "srt", "subrip", "ass", "ssa", "vtt", "webvtt", "mov_text", "ttml", "text", "smi", "sami",
+];
+
+fn source_video(source: &Value) -> Option<&Value> {
+    streams(source, "Video").first().copied()
+}
+/// HDR10, HLG or Dolby Vision. Jellyfin turns HDR into SDR whenever it
+/// re-encodes, so these files are only ever played as they are.
+pub fn source_hdr(source: &Value) -> bool {
+    source_video(source).is_some_and(|v| {
+        let range = text(v, "VideoRangeType");
+        text(v, "VideoRange").eq_ignore_ascii_case("hdr")
+            || (!range.is_empty() && range != "SDR" && range != "Unknown")
+    })
+}
+/// Lower qualities worth offering for this file (none for HDR).
+pub fn quality_ladder(source: &Value) -> Vec<String> {
+    if source_hdr(source) {
+        return vec![];
+    }
+    let height = source_video(source)
+        .and_then(|v| v.get("Height"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1080)
+        .max(480);
+    let bitrate = source
+        .get("Bitrate")
+        .and_then(Value::as_u64)
+        .filter(|b| *b > 0)
+        .unwrap_or(u64::MAX);
+    QUALITY_LADDER
+        .iter()
+        .filter(|(_, b, h)| *h <= height && *b < bitrate)
+        .map(|(name, _, _)| (*name).to_owned())
+        .collect()
+}
+/// (bitrate, height) of a quality picked on the title card.
+pub fn quality_spec(label: &str) -> Option<(u64, u64)> {
+    QUALITY_LADDER
+        .iter()
+        .find(|(name, _, _)| *name == label)
+        .map(|(_, b, h)| (*b, *h))
+}
+fn image_subtitle(stream: &Value) -> bool {
+    let codec = text(stream, "Codec").to_lowercase();
+    stream.get("IsTextSubtitleStream").and_then(Value::as_bool) != Some(true)
+        && !TEXT_SUBTITLES.contains(&codec.as_str())
+}
+/// A subtitle as the pickers show it; image subtitles say what they cost.
+pub fn subtitle_label(stream: &Value, hdr: bool) -> String {
+    let mut name = text(stream, "DisplayTitle");
+    if name.is_empty() {
+        name = text(stream, "Title");
+    }
+    if name.is_empty() {
+        name = text(stream, "Language");
+    }
+    if name.is_empty() {
+        name = "Subtitles".into();
+    }
+    match (image_subtitle(stream), hdr) {
+        (false, _) => name,
+        (true, false) => format!("{name} · burned in"),
+        (true, true) => format!("{name} · burned in, SDR"),
+    }
+}
+/// A version as the Version picker shows it: the server's name for it,
+/// else what it is ("4K · HDR10 · HEVC").
+fn version_label(source: &Value) -> String {
+    let name = text(source, "Name");
+    if !name.is_empty() {
+        return name;
+    }
+    let Some(video) = source_video(source) else {
+        return "Version".into();
+    };
+    let mut parts = vec![];
+    match video.get("Height").and_then(Value::as_u64).unwrap_or(0) {
+        h if h >= 2000 => parts.push("4K".to_owned()),
+        h if h > 0 => parts.push(format!("{h}p")),
+        _ => {}
+    }
+    if source_hdr(source) {
+        parts.push(text(video, "VideoRangeType").replace("DOVI", "Dolby Vision"));
+    }
+    parts.push(codec_name(&text(video, "Codec")));
+    parts.join(" · ")
+}
+fn codec_name(codec: &str) -> String {
+    match codec.to_lowercase().as_str() {
+        "hevc" | "h265" => "HEVC".into(),
+        "h264" | "avc" => "H.264".into(),
+        "av1" => "AV1".into(),
+        "vp9" => "VP9".into(),
+        other => other.to_uppercase(),
+    }
+}
+/// The fields of a MediaSource the web player needs, and nothing else:
+/// launch parameters stay small.
+pub fn trim_source(source: &Value) -> Value {
+    const KEEP: [&str; 19] = [
+        "Index",
+        "Type",
+        "Codec",
+        "Language",
+        "DisplayTitle",
+        "Title",
+        "IsDefault",
+        "IsForced",
+        "IsExternal",
+        "IsTextSubtitleStream",
+        "Channels",
+        "Height",
+        "Width",
+        "BitRate",
+        "BitDepth",
+        "VideoRange",
+        "VideoRangeType",
+        "Profile",
+        "ChannelLayout",
+    ];
+    let streams: Vec<Value> = source
+        .get("MediaStreams")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter(|s| matches!(text(s, "Type").as_str(), "Video" | "Audio" | "Subtitle"))
+                .take(64)
+                .map(|s| {
+                    let mut kept = serde_json::Map::new();
+                    for key in KEEP {
+                        if let Some(v) = s.get(key).filter(|v| !v.is_null()) {
+                            kept.insert(key.into(), v.clone());
+                        }
+                    }
+                    Value::Object(kept)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "Id": text(source, "Id"),
+        "Name": text(source, "Name"),
+        "Container": text(source, "Container"),
+        "Bitrate": source.get("Bitrate").cloned().unwrap_or(Value::Null),
+        "MediaStreams": streams,
+    })
+}
+/// The original file, as the TV would fetch it for Direct Play.
+fn static_url(
+    link: &JellyfinLink,
+    item: &str,
+    source: &str,
+    container: &str,
+    session: &str,
+) -> String {
+    let ext = container
+        .split(',')
+        .next()
+        .filter(|c| !c.is_empty())
+        .unwrap_or("mkv");
     format!(
-        "{}/Videos/{item}/master.m3u8?MediaSourceId={source}&ApiKey={}&DeviceId={}\
-         &PlaySessionId={session}&VideoCodec=hevc,h264&AudioCodec=aac,ac3,eac3,mp3\
-         &SegmentContainer=mp4&TranscodingMaxAudioChannels=6&MaxStreamingBitrate=120000000",
-        link.server, link.token, link.device_id
+        "{}/Videos/{item}/stream.{ext}?static=true&MediaSourceId={source}&PlaySessionId={session}\
+         &DeviceId={}&api_key={}",
+        link.server, link.device_id, link.token
     )
 }
 
@@ -1264,6 +1458,9 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
     };
     let target = position.map_or(&item, |i| &list[i]);
     let target_id = text(target, "Id");
+    // Every version of the file, with its streams. Which one plays and how
+    // (Direct Play, Direct Stream or a transcode) the web player decides on
+    // the TV, which knows what it can decode.
     let info = agent
         .post(&format!(
             "{}/Items/{target_id}/PlaybackInfo?userId={}",
@@ -1271,16 +1468,23 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         ))
         .header("Authorization", &auth(&link.device_id, &link.token))
         .header("Content-Type", "application/json")
-        .send("{}")
+        .send(json!({ "UserId": link.user_id }).to_string())
         .ok()
         .and_then(read);
-    let Some(source) = info
+    let sources = info
         .as_ref()
         .and_then(|i| i.get("MediaSources"))
         .and_then(Value::as_array)
-        .and_then(|v| v.first())
         .cloned()
-    else {
+        .unwrap_or_default();
+    // A version chosen on the title card applies to that title, not to the
+    // other episodes of a series.
+    let chosen = request
+        .version
+        .as_ref()
+        .filter(|_| !series)
+        .and_then(|id| sources.iter().find(|s| &text(s, "Id") == id));
+    let Some(source) = chosen.or(sources.first()).cloned() else {
         return fail("The server has no playable file for this title");
     };
     let source_id = text(&source, "Id");
@@ -1289,27 +1493,29 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         .map(|i| text(i, "PlaySessionId"))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(crate::phone_link::random_hex);
-    // MP4 plays as is (full quality, instant seeking); anything else goes
-    // through HLS, which keeps the original streams whenever the TV can play them.
-    let direct = text(&source, "Container")
-        .split(',')
-        .any(|c| c == "mp4" || c == "mov")
-        && source.get("SupportsDirectPlay").and_then(Value::as_bool) == Some(true);
-    let url = if direct {
-        format!(
-            "{}/Videos/{target_id}/stream?static=true&MediaSourceId={source_id}&ApiKey={}",
-            link.server, link.token
-        )
-    } else {
-        hls_url(link, &target_id, &source_id, &session)
-    };
+    let hdr = source_hdr(&source);
+    let container = text(&source, "Container");
+    let url = static_url(link, &target_id, &source_id, &container, &session);
+    // Subtitle picked on the card, by its label, in this file's own list.
+    let subtitle_index = request.subtitle.as_ref().and_then(|want| {
+        streams(&source, "Subtitle")
+            .iter()
+            .find(|s| &subtitle_label(s, hdr) == want)
+            .and_then(|s| s.get("Index").and_then(Value::as_i64))
+    });
+    // Lower quality never applies to HDR: it would be re-encoded to SDR.
+    let quality = request
+        .quality
+        .as_deref()
+        .and_then(quality_spec)
+        .filter(|_| !hdr);
     let subtitles: Vec<crate::player::Track> = streams(&source, "Subtitle")
         .iter()
-        .filter(|s| s.get("IsTextSubtitleStream").and_then(Value::as_bool) == Some(true))
+        .filter(|s| !image_subtitle(s))
         .map(|s| crate::player::Track {
-            name: stream_label(s),
+            name: subtitle_label(s, hdr),
             url: Some(format!(
-                "{}/Videos/{target_id}/{source_id}/Subtitles/{}/Stream.vtt?ApiKey={}",
+                "{}/Videos/{target_id}/{source_id}/Subtitles/{}/0/Stream.vtt?api_key={}",
                 link.server,
                 s.get("Index").and_then(Value::as_i64).unwrap_or(0),
                 link.token
@@ -1320,6 +1526,17 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         .subtitle
         .as_ref()
         .and_then(|want| subtitles.iter().position(|t| &t.name == want));
+    let plan = json!({
+        "base": link.server,
+        "token": link.token,
+        "deviceId": link.device_id,
+        "item": target_id,
+        "session": session,
+        "source": trim_source(&source),
+        "audio": Value::Null,
+        "subtitle": subtitle_index,
+        "quality": quality.map(|(bitrate, height)| json!({ "bitrate": bitrate, "height": height })),
+    });
     let neighbour = |i: Option<usize>| i.and_then(|i| list.get(i)).map(season_number);
     let title = text(&item, "Name");
     let (title, episode_line) = match position {
@@ -1342,6 +1559,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         base: link.server.clone(),
         token: link.token.clone(),
         device_id: link.device_id.clone(),
+        user: link.user_id.clone(),
         item: target_id.clone(),
         source: source_id.clone(),
         session: session.clone(),
@@ -1354,7 +1572,9 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
                 crate::player::ReportEpisode {
                     season,
                     number,
-                    url: hls_url(link, &id, &id, &session),
+                    // Fallback only: the web player asks Jellyfin for each
+                    // episode's file and chooses how to play it.
+                    url: static_url(link, &id, &id, "mkv", &session),
                     line: if name.is_empty() {
                         format!("Season {season} · Episode {number}")
                     } else {
@@ -1395,6 +1615,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         selected_subtitle,
         report: Some(report),
         music: None,
+        jellyfin: Some(plan),
     })));
 }
 
@@ -1632,6 +1853,133 @@ mod tests {
                 .is_some_and(|p| std::path::Path::new(p).is_file())
         }));
         let _ = std::fs::remove_dir_all(&cache);
+    }
+    #[test]
+    fn versions_qualities_and_subtitles_follow_the_file() {
+        let hdr = json!({
+            "Id": "v4k", "Name": "4K HDR", "Container": "mkv", "Bitrate": 60000000,
+            "SupportsDirectPlay": false, "Path": "/secret/path.mkv",
+            "MediaStreams": [
+                {"Index": 0, "Type": "Video", "Codec": "hevc", "VideoRange": "HDR", "VideoRangeType": "HDR10", "Height": 2160},
+                {"Index": 1, "Type": "Audio", "Codec": "truehd", "DisplayTitle": "English TrueHD 7.1", "Channels": 8},
+                {"Index": 2, "Type": "Subtitle", "Codec": "PGSSUB", "DisplayTitle": "English PGS"},
+                {"Index": 3, "Type": "Subtitle", "Codec": "subrip", "DisplayTitle": "English SRT", "IsTextSubtitleStream": true},
+                {"Index": 4, "Type": "Attachment", "Codec": "ttf"}
+            ]
+        });
+        let sdr = json!({
+            "Id": "v1080", "Container": "mkv", "Bitrate": 12000000,
+            "MediaStreams": [
+                {"Index": 0, "Type": "Video", "Codec": "h264", "VideoRange": "SDR", "VideoRangeType": "SDR", "Height": 1080},
+                {"Index": 1, "Type": "Subtitle", "Codec": "dvd_subtitle", "DisplayTitle": "French"}
+            ]
+        });
+        assert!(source_hdr(&hdr));
+        assert!(!source_hdr(&sdr));
+        // HDR: nothing lower to offer. SDR 12 Mbps: only what is below it.
+        assert!(quality_ladder(&hdr).is_empty());
+        assert_eq!(
+            quality_ladder(&sdr),
+            vec![
+                "1080p · 10 Mbps",
+                "720p · 6 Mbps",
+                "720p · 3 Mbps",
+                "480p · 1.5 Mbps"
+            ]
+        );
+        assert_eq!(quality_spec("720p · 6 Mbps"), Some((6_000_000, 720)));
+        let subs = streams(&hdr, "Subtitle");
+        assert_eq!(
+            subtitle_label(subs[0], true),
+            "English PGS · burned in, SDR"
+        );
+        assert_eq!(subtitle_label(subs[1], true), "English SRT");
+        assert_eq!(
+            subtitle_label(streams(&sdr, "Subtitle")[0], false),
+            "French · burned in"
+        );
+        assert_eq!(version_label(&hdr), "4K HDR");
+        assert_eq!(version_label(&sdr), "1080p · H.264");
+        // The player gets streams, never paths or attachments.
+        let trimmed = trim_source(&hdr);
+        assert!(trimmed.get("Path").is_none());
+        assert_eq!(trimmed["MediaStreams"].as_array().unwrap().len(), 4);
+        assert_eq!(trimmed["MediaStreams"][0]["VideoRangeType"], "HDR10");
+    }
+    #[test]
+    fn play_hands_the_chosen_version_to_the_player() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let mut seen = vec![];
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let body = if path.contains("/PlaybackInfo") {
+                    json!({"PlaySessionId": "sess9", "MediaSources": [
+                        {"Id": "v4k", "Name": "4K HDR", "Container": "mkv", "MediaStreams": [
+                            {"Index": 0, "Type": "Video", "Codec": "hevc", "VideoRange": "HDR", "VideoRangeType": "DOVIWithHDR10"},
+                            {"Index": 1, "Type": "Subtitle", "Codec": "PGSSUB", "DisplayTitle": "English"}]},
+                        {"Id": "v1080", "Name": "1080p", "Container": "mkv", "MediaStreams": [
+                            {"Index": 0, "Type": "Video", "Codec": "h264", "VideoRangeType": "SDR"}]}
+                    ]})
+                } else {
+                    json!({"Id": "movie1", "Name": "Film", "Type": "Movie", "RunTimeTicks": 72000000000u64})
+                };
+                let body = body.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                seen.push(path);
+            }
+            seen
+        });
+        let link = JellyfinLink {
+            server: format!("http://127.0.0.1:{port}"),
+            user_id: "u1".into(),
+            token: "tok".into(),
+            device_id: "dev".into(),
+            ..Default::default()
+        };
+        let id = card_id("movie1");
+        let (tx, rx) = mpsc::channel();
+        play(
+            &tx,
+            &link,
+            PlayRequest {
+                id,
+                version: Some("v4k".into()),
+                // Ignored: the chosen version is HDR.
+                quality: Some("720p · 6 Mbps".into()),
+                subtitle: Some("English · burned in, SDR".into()),
+                ..Default::default()
+            },
+        );
+        server.join().unwrap();
+        let Some(Response::Play(request)) = rx.try_iter().last() else {
+            panic!("no play reply");
+        };
+        let plan = request.jellyfin.as_ref().expect("jellyfin plan");
+        assert_eq!(plan["source"]["Id"], "v4k");
+        assert_eq!(plan["session"], "sess9");
+        assert_eq!(plan["item"], "movie1");
+        assert_eq!(plan["subtitle"], 1);
+        assert!(plan["quality"].is_null(), "no lower quality for HDR");
+        // The fallback address is the original file, never a transcode.
+        assert!(
+            request
+                .url
+                .contains("/Videos/movie1/stream.mkv?static=true&MediaSourceId=v4k")
+        );
+        assert_eq!(request.report.as_ref().unwrap().source, "v4k");
+        assert_eq!(request.report.as_ref().unwrap().user, "u1");
     }
     #[test]
     fn libraries_say_what_they_hold() {

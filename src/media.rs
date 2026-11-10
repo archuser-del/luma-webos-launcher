@@ -5,8 +5,11 @@ pub struct PlayRequest {
     pub id: i64,
     /// (season, episode) numbers; None plays the next unwatched episode.
     pub episode: Option<(i64, i64)>,
-    /// File quality label such as "1080p"; None picks the best one.
+    /// File quality label such as "1080p"; None picks the best one
+    /// (Jellyfin: the original file, never transcoded for quality).
     pub quality: Option<String>,
+    /// Jellyfin: the chosen version (MediaSource id); None plays the first.
+    pub version: Option<String>,
     /// Subtitle label from the card (e.g. "English"), matched in the played
     /// file's own list; None plays without.
     pub subtitle: Option<String>,
@@ -48,6 +51,12 @@ pub struct Detail {
     /// (label, file url)
     pub subtitles: Vec<(String, String)>,
     pub qualities: Vec<String>,
+    /// What the quality picker calls its first row (no choice made):
+    /// "Original" for Jellyfin; None shows "Auto".
+    pub default_quality: Option<String>,
+    /// Jellyfin versions of the title: (label, MediaSource id). One or none
+    /// shows no Version pill.
+    pub versions: Vec<(String, String)>,
     pub trailer: Option<String>,
     pub seasons: Vec<i64>,
     pub episodes: Vec<Episode>,

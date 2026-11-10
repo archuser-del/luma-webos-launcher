@@ -50,10 +50,7 @@ test('version sync changes only release versions and is idempotent', async (t) =
   );
   assert.equal(
     after[3],
-    before[3].replaceAll(
-      `com.archbtw.luma_${previous}_arm.ipk`,
-      'com.archbtw.luma_3.1.0_arm.ipk',
-    ),
+    before[3].replaceAll(`com.archbtw.luma_${previous}_arm.ipk`, 'com.archbtw.luma_3.1.0_arm.ipk'),
   );
   assert.deepEqual((await syncVersions(directory, { check: true })).changed, []);
   assert.deepEqual((await syncVersions(directory)).changed, []);

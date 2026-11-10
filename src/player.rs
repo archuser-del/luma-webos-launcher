@@ -143,6 +143,10 @@ pub struct OpenRequest {
     pub report: Option<Report>,
     /// An album: the web player shows its "now playing" screen instead of video.
     pub music: Option<Music>,
+    /// Jellyfin: the server, the chosen file (MediaSource) and the viewer's
+    /// choices. The web player asks the TV what it decodes and picks Direct
+    /// Play, Direct Stream or a transcode itself (streams.js). Holds the token.
+    pub jellyfin: Option<serde_json::Value>,
 }
 
 /// Songs the web player plays one after another, with the album's cover.
@@ -177,6 +181,8 @@ pub struct Report {
     pub base: String,
     pub token: String,
     pub device_id: String,
+    /// Jellyfin user, for the episodes the web player asks about itself.
+    pub user: String,
     pub item: String,
     pub source: String,
     pub session: String,
@@ -272,6 +278,7 @@ impl OpenRequest {
             selected_subtitle: Some(0),
             report: None,
             music: None,
+            jellyfin: None,
         }
     }
 }

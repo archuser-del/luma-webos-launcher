@@ -3323,6 +3323,7 @@ fn stack_card_opens_title_card_and_back_returns_to_the_card() {
             episode: None,
             quality: None,
             subtitle: Some("English".into()),
+            version: None,
         })]
     );
     // More like this lists the other cards of the row.

@@ -844,6 +844,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         base: link.server_uri.clone(),
         token: link.server_token.clone(),
         device_id: link.client_id.clone(),
+        user: String::new(),
         item: target_key.clone(),
         source: String::new(),
         session: session.clone(),
@@ -893,6 +894,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         selected_subtitle,
         report: Some(report),
         music: None,
+        jellyfin: None,
     })));
 }
 

@@ -346,6 +346,7 @@ fn effects(
                         selected_subtitle: None,
                         report: None,
                         music: None,
+                        jellyfin: None,
                     };
                     if let Ok(request) = request.sanitize() {
                         open_player(state, platform, request);
@@ -471,8 +472,7 @@ fn effects(
                     media::PlayRequest {
                         id,
                         episode: Some((season, number)),
-                        quality: None,
-                        subtitle: None,
+                        ..Default::default()
                     },
                 ));
             }
@@ -483,8 +483,7 @@ fn effects(
                     media::PlayRequest {
                         id,
                         episode: Some((season, number)),
-                        quality: None,
-                        subtitle: None,
+                        ..Default::default()
                     },
                 ));
             }
@@ -535,6 +534,7 @@ fn effects(
                     selected_subtitle: None,
                     report: None,
                     music: None,
+                    jellyfin: None,
                 };
                 match request.sanitize() {
                     Ok(request) => open_player(state, platform, request),
@@ -1754,6 +1754,7 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
             "base": r.base,
             "token": r.token,
             "deviceId": r.device_id,
+            "user": r.user,
             "version": env!("CARGO_PKG_VERSION"),
             "item": r.item,
             "source": r.source,
@@ -1781,6 +1782,7 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
                 "ms": s.ms,
             })).collect::<Vec<_>>(),
         })),
+        "jellyfin": request.jellyfin,
         "accentA": hex(a),
         "accentB": hex(if gradient { b } else { a }),
         "accentKind": if gradient { "gradient" } else { "solid" },
