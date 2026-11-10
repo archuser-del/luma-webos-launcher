@@ -12,6 +12,7 @@ mod hw_wallpaper;
 mod i18n;
 mod immich_frame;
 mod jellyfin;
+mod layout;
 mod library;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
@@ -2891,10 +2892,14 @@ fn run() -> Result<(), String> {
     let mut signals_at = Instant::now();
     let mut retry_at = Instant::now();
     let mut signals_pending = false;
-    let initial_nav =
-        view::navigation_for(&assets, state.preferences.language, state.show_smart_tab());
-    let mut pill = initial_nav.items[0].x;
-    let mut pill_width = initial_nav.items[0].w;
+    let initial_nav = view::navigation_in(
+        state.preferences.layout,
+        &assets,
+        state.preferences.language,
+        state.show_smart_tab(),
+    );
+    let (mut pill, mut pill_width) =
+        view::nav_pill_target(state.preferences.layout, initial_nav.items[0]);
     let mut last_frame = Instant::now();
     let mut last_sky_frame = Instant::now();
     let mut last_art_frame = Instant::now();
@@ -4232,10 +4237,17 @@ fn run() -> Result<(), String> {
         assets.active_text.set(state.preferences.text_font);
         assets.heading_pct.set(state.preferences.heading_size_pct);
         assets.text_pct.set(state.preferences.text_size_pct);
-        let navigation =
-            view::navigation_for(&assets, state.preferences.language, state.show_smart_tab());
-        let target = navigation.items[state.page_index()].x;
-        let target_width = navigation.items[state.page_index()].w;
+        let navigation = view::navigation_in(
+            state.preferences.layout,
+            &assets,
+            state.preferences.language,
+            state.show_smart_tab(),
+        );
+        // Along the bar: across for the top bars and the dock, down the rail.
+        let (target, target_width) = view::nav_pill_target(
+            state.preferences.layout,
+            navigation.items[state.page_index()],
+        );
         if state.preferences.reduced_motion
             || ((pill - target).abs() < 0.2 && (pill_width - target_width).abs() < 0.2)
         {
@@ -4599,8 +4611,8 @@ fn hit(
             control.rect.contains(x, y)
                 && (!control.scrollable
                     || ((state::HOME_VIEWPORT_LEFT..state::HOME_VIEWPORT_RIGHT).contains(&x)
-                        && y >= 108.8
-                        && y < state.main_bottom()))
+                        && y >= 108.8 + state.preferences.layout.body_offset().1
+                        && y < state.preferences.layout.pointer_bottom(state.main_bottom())))
         })
         .map(|control| control.target.clone())
 }

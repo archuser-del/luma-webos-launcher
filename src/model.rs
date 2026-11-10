@@ -246,6 +246,8 @@ pub struct Preferences {
     /// because an app listed here is never hidden automatically again.
     pub lg_auto_hidden: BTreeSet<String>,
     pub background: String,
+    /// Where the tabs, inputs and clock sit (Settings › Appearance › Layout).
+    pub layout: crate::layout::Layout,
     pub video_index: usize,
     /// Bitset for Apple, Amazon, Aerial Community, RobinFrcd.
     pub video_sources_mask: u8,
@@ -319,6 +321,7 @@ impl Default for Preferences {
             lg_auto_hidden: BTreeSet::new(),
             // Video wallpapers (bundled aerials and the viewer's own uploads).
             background: "video".into(),
+            layout: crate::layout::Layout::default(),
             video_index: 0,
             video_sources_mask: crate::video_catalog::ALL_SOURCES,
             video_excluded: BTreeSet::new(),

@@ -1,6 +1,7 @@
 //! Screen geometry and styling mirror the web UI's 1920×1080 / 16px-rem layout.
 use crate::{
     i18n::Language,
+    layout::{self, Layout},
     model::{App, BACKGROUNDS, CATEGORIES, Input, InputMode},
     motion,
     renderer::{Color, Draw, TextStyle, WHITE},
@@ -634,6 +635,119 @@ pub fn navigation_for(assets: &Assets, language: Language, show_smart: bool) -> 
     }
 }
 
+/// The tabs of `layout`: the classic pill, moved or stood on end.
+pub fn navigation_in(
+    layout: Layout,
+    assets: &Assets,
+    language: Language,
+    show_smart: bool,
+) -> Navigation {
+    let classic = navigation_for(assets, language, show_smart);
+    let moved = |dx: f32, dy: f32, surface: Option<Rect>| Navigation {
+        surface: surface.unwrap_or(Rect::new(
+            classic.surface.x + dx,
+            classic.surface.y + dy,
+            classic.surface.w,
+            classic.surface.h,
+        )),
+        items: classic
+            .items
+            .iter()
+            .map(|r| Rect::new(r.x + dx, r.y + dy, r.w, r.h))
+            .collect(),
+    };
+    match layout {
+        Layout::Classic => moved(0., 0., None),
+        // Right-aligned with the page content.
+        Layout::Flip => moved(
+            crate::state::HOME_STRIP_RIGHT - (classic.surface.x + classic.surface.w),
+            0.,
+            None,
+        ),
+        // Centred in the bar, which is the surface itself.
+        Layout::Dock => moved(
+            0.,
+            layout::DOCK_TOP + (layout::DOCK_HEIGHT - NAV_PILL) / 2. - (NAV_TOP + NAV_PAD),
+            Some(Rect::new(
+                crate::state::HOME_STRIP_LEFT,
+                layout::DOCK_TOP,
+                crate::state::HOME_STRIP_RIGHT - crate::state::HOME_STRIP_LEFT,
+                layout::DOCK_HEIGHT,
+            )),
+        ),
+        Layout::Rail => {
+            let n = classic.items.len() as f32;
+            let pad = (layout::RAIL_WIDTH - layout::RAIL_BUTTON) / 2.;
+            Navigation {
+                surface: Rect::new(
+                    layout::RAIL_LEFT,
+                    NAV_TOP,
+                    layout::RAIL_WIDTH,
+                    2. * pad + n * layout::RAIL_BUTTON + (n - 1.) * layout::RAIL_GAP,
+                ),
+                items: (0..classic.items.len())
+                    .map(|i| {
+                        Rect::new(
+                            layout::RAIL_LEFT + pad,
+                            NAV_TOP + pad + i as f32 * (layout::RAIL_BUTTON + layout::RAIL_GAP),
+                            layout::RAIL_BUTTON,
+                            layout::RAIL_BUTTON,
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+/// Where the selection pill rests on a tab: its start and length along the
+/// bar (across for the top bars and the dock, down for the rail).
+pub fn nav_pill_target(layout: Layout, item: Rect) -> (f32, f32) {
+    if layout.vertical() {
+        (item.y, item.h)
+    } else {
+        (item.x, item.w)
+    }
+}
+
+/// Moves page content out of the chrome's way: every paint, clip and fade.
+fn shift_body(draws: &mut [Draw], layout: Layout) {
+    let (dx, dy) = layout.body_offset();
+    if dx == 0. && dy == 0. {
+        return;
+    }
+    for draw in draws {
+        match draw {
+            Draw::Clip(Some(r)) => {
+                r.x += dx;
+                r.y += dy;
+                // Rows still run out under the rail to the screen edge.
+                if dx > 0. && r.x <= dx {
+                    r.w += r.x;
+                    r.x = 0.;
+                }
+            }
+            Draw::RoundClip(Some((r, _))) => {
+                r.x += dx;
+                r.y += dy;
+            }
+            Draw::EdgeFade(Some(fade)) => {
+                fade[0] += dy;
+                fade[1] += dy;
+                if layout == Layout::Dock && fade[2] >= 1080. {
+                    // Content dissolves before it reaches the dock.
+                    fade[2] = layout::DOCK_FADE[0];
+                    fade[3] = layout::DOCK_FADE[1];
+                } else {
+                    fade[2] += dy;
+                    fade[3] += dy;
+                }
+            }
+            _ => motion::transform(draw, dx, dy, 1.),
+        }
+    }
+}
+
 /// Full-resolution first frame of a wallpaper clip, shown while it loads.
 pub fn video_still_path(assets: &Assets, index: usize) -> String {
     assets.video_still(index.min(crate::video_catalog::all().len() - 1))
@@ -777,7 +891,10 @@ pub fn scene_with_pill(
         ));
     }
     let main_bottom = state.main_bottom();
+    let layout = state.preferences.layout;
+    let (body_dx, body_dy) = layout.body_offset();
     let body_start = out.draw.len();
+    let body_controls = out.controls.len();
     // Horizontal Favorites media may reach the physical screen edge; keep
     // Apps and Settings inside their established 64.0.1856 content fields.
     let (body_left, body_width) = if matches!(state.page, Page::Home | Page::Settings) {
@@ -859,7 +976,9 @@ pub fn scene_with_pill(
                         .iter()
                         .filter_map(tvos_settings_view::backdrop_rect)
                         .find(|r| {
-                            (r.x - backdrop.x).abs() < 0.01 && (r.w - backdrop.w).abs() < 0.01
+                            // The frame before is already in its shifted place.
+                            (r.x - backdrop.x - body_dx).abs() < 0.01
+                                && (r.w - backdrop.w).abs() < 0.01
                         })
                         .map(|r| r.h)
                         .unwrap_or(backdrop.h);
@@ -927,6 +1046,16 @@ pub fn scene_with_pill(
             control.rect.x += dx;
         }
     }
+    // The layout moves the finished page as one block. Frozen snapshots of
+    // earlier frames, added below, are already where they were shown.
+    shift_body(&mut out.draw[body_start..body_end], layout);
+    for control in &mut out.controls[body_controls..] {
+        control.rect.x += body_dx;
+        control.rect.y += body_dy;
+    }
+    if out.page_bottom > 0. {
+        out.page_bottom += body_dy;
+    }
     // Crossfade frozen snapshots of the outgoing composited content. When another
     // navigation arrives mid-transition, compose() retargets from the visible frame.
     if let Some((previous, started, direction)) = &state.previous_page_layer {
@@ -984,10 +1113,21 @@ pub fn scene_with_pill(
         footer(&mut out, state, assets);
     }
     if state.page == Page::Home {
-        // Clock, then navigation, then the circles.
-        ambient_move(&mut out.draw[header_start..], state, 0., -260., |r| {
-            2. * r.x / 1920.
-        });
+        // Clock, then navigation, then the circles: each layout's chrome
+        // leaves over the screen edge it sits on.
+        match layout {
+            Layout::Classic | Layout::Flip => {
+                ambient_move(&mut out.draw[header_start..], state, 0., -260., |r| {
+                    2. * r.x / 1920.
+                })
+            }
+            Layout::Dock => ambient_move(&mut out.draw[header_start..], state, 0., 260., |r| {
+                2. * r.x / 1920.
+            }),
+            Layout::Rail => ambient_move(&mut out.draw[header_start..], state, -260., 0., |r| {
+                2. * r.y / 1080.
+            }),
+        }
         if state.ambient_on() {
             out.controls.clear();
         }
@@ -1112,43 +1252,109 @@ fn header(
     state: &State,
     assets: &Assets,
     now: OffsetDateTime,
-    pill_x: f32,
-    pill_width: f32,
+    pill_at: f32,
+    pill_len: f32,
 ) {
     let language = state.preferences.language;
+    let layout = state.preferences.layout;
     let clock = language.clock(
         now,
         state.preferences.hour_24,
         state.preferences.show_seconds,
     );
-    let layout = navigation_for(assets, language, state.show_smart_tab());
+    let navigation = navigation_in(layout, assets, language, state.show_smart_tab());
+    let (left, right) = (
+        crate::state::HOME_STRIP_LEFT,
+        crate::state::HOME_STRIP_RIGHT,
+    );
+    let date = language.date(now);
     // The clock digits are exactly as tall as the selected navigation pill
     // (52 px, NAV_TOP + NAV_PAD to its bottom); the date sits close under it.
     let clock_style = heading_fixed(assets, 64., 700).tracking(-0.03);
-    out.text(
-        &clock,
-        Rect::new(crate::state::HOME_STRIP_LEFT, 49.5, 760., 78.),
-        clock_style,
-        WHITE,
-        false,
-    );
     // Caps start 0.41 of the size below the box top: 14 px under the digits.
-    out.text(
-        language.date(now),
-        Rect::new(
-            crate::state::HOME_STRIP_LEFT,
-            NAV_TOP + NAV_PAD + NAV_PILL + 14. - 0.41 * 27.,
-            760.,
-            40.,
-        ),
-        text(27., 500, -0.02),
-        c(0xf0f3f6, 0.82),
-        false,
+    let date_y = NAV_TOP + NAV_PAD + NAV_PILL + 14. - 0.41 * 27.;
+    let date_style = text(27., 500, -0.02);
+    let date_ink = c(0xf0f3f6, 0.82);
+    match layout {
+        Layout::Classic => {
+            out.text(
+                &clock,
+                Rect::new(left, 49.5, 760., 78.),
+                clock_style,
+                WHITE,
+                false,
+            );
+            out.text(
+                &date,
+                Rect::new(left, date_y, 760., 40.),
+                date_style,
+                date_ink,
+                false,
+            );
+        }
+        // Top right, flush with the right edge of the shifted page.
+        Layout::Rail => {
+            let x = right + layout.body_offset().0 - 760.;
+            out.text(
+                &clock,
+                Rect::new(x, 49.5, 760., 78.),
+                clock_style.right(),
+                WHITE,
+                false,
+            );
+            out.text(
+                &date,
+                Rect::new(x, date_y, 760., 40.),
+                date_style.right(),
+                date_ink,
+                false,
+            );
+        }
+        Layout::Flip => {
+            out.text(
+                &clock,
+                Rect::new(580., 49.5, 760., 78.),
+                clock_style,
+                WHITE,
+                true,
+            );
+            out.text(
+                &date,
+                Rect::new(580., date_y, 760., 40.),
+                date_style,
+                date_ink,
+                true,
+            );
+        }
+        // In the dock: the time, then the date on the same line.
+        Layout::Dock => {}
+    }
+    let nav = navigation.surface;
+    let nav_radius = nav.w.min(nav.h) / 2.;
+    out.shadow(
+        nav,
+        nav_radius,
+        18.,
+        4.,
+        if layout == Layout::Dock { 0.2 } else { 0.06 },
     );
-    let nav = layout.surface;
-    out.shadow(nav, NAV_HEIGHT / 2., 18., 4., 0.06);
-    out.glass(nav, NAV_HEIGHT / 2.);
-    let pill = Rect::new(pill_x, NAV_TOP + NAV_PAD, pill_width, NAV_PILL);
+    out.glass(nav, nav_radius);
+    if layout == Layout::Dock {
+        let time_style = heading_fixed(assets, 40., 700).tracking(-0.03);
+        let time_width = assets.width(&clock, time_style);
+        let time = Rect::new(nav.x + 36., nav.y, time_width + 4., nav.h);
+        out.text(&clock, line_box(time, time_style), time_style, WHITE, false);
+        let day_style = text(24., 500, -0.02);
+        let day = Rect::new(time.x + time.w + 18., nav.y + 2., 520., nav.h);
+        out.text(&date, line_box(day, day_style), day_style, date_ink, false);
+    }
+    let first_item = navigation.items[0];
+    let pill = if layout.vertical() {
+        Rect::new(first_item.x, pill_at, first_item.w, pill_len)
+    } else {
+        Rect::new(pill_at, first_item.y, pill_len, NAV_PILL)
+    };
+    let pill_radius = pill.w.min(pill.h) / 2.;
     let nav_accent = state.preferences.accent.use_nav;
     let (first, second) = state.accent_colors();
     // The selected tab is one solid accent surface with dark-or-light ink chosen
@@ -1160,12 +1366,12 @@ fn header(
     };
     out.draw.push(if nav_accent {
         if state.preferences.accent.kind == "gradient" {
-            Draw::DiagonalGradient(pill, NAV_PILL / 2., c(first, 1.), c(second, 1.))
+            Draw::DiagonalGradient(pill, pill_radius, c(first, 1.), c(second, 1.))
         } else {
-            Draw::RoundedGradient(pill, NAV_PILL / 2., c(first, 1.), c(first, 1.))
+            Draw::RoundedGradient(pill, pill_radius, c(first, 1.), c(first, 1.))
         }
     } else {
-        Draw::RoundedGradient(pill, NAV_PILL / 2., c(0xfafafa, 1.), c(0xe5e5e5, 1.))
+        Draw::RoundedGradient(pill, pill_radius, c(0xfafafa, 1.), c(0xe5e5e5, 1.))
     });
     let keys = if state.show_smart_tab() {
         vec!["home", "apps", "Smart Home", "settings"]
@@ -1173,28 +1379,86 @@ fn header(
         vec!["home", "apps", "settings"]
     };
     for (index, key) in keys.into_iter().enumerate() {
-        let rect = layout.items[index];
-        out.text(
-            if key == "Smart Home" {
-                key
-            } else {
-                language.t(key)
-            },
-            line_box(rect, nav_label_style()),
-            nav_label_style(),
-            {
-                let overlap = ((pill.x + pill.w).min(rect.x + rect.w) - pill.x.max(rect.x)).max(0.);
-                let coverage = (overlap / rect.w).clamp(0., 1.);
-                blend(c(0xeeeeee, 0.73), selected_nav_color, coverage)
-            },
-            true,
-        );
+        let rect = navigation.items[index];
+        let label = if key == "Smart Home" {
+            key
+        } else {
+            language.t(key)
+        };
+        // How much of this tab the moving pill covers decides its ink.
+        let coverage = if layout.vertical() {
+            ((pill.y + pill.h).min(rect.y + rect.h) - pill.y.max(rect.y)).max(0.) / rect.h
+        } else {
+            ((pill.x + pill.w).min(rect.x + rect.w) - pill.x.max(rect.x)).max(0.) / rect.w
+        }
+        .clamp(0., 1.);
+        let ink = blend(c(0xeeeeee, 0.73), selected_nav_color, coverage);
+        if layout.vertical() {
+            // The rail shows icons; the tab under the remote names itself.
+            let icon = match key {
+                "home" => "home",
+                "apps" => "grid",
+                "Smart Home" => "smart-light",
+                _ => "settings",
+            };
+            let size = 28.;
+            out.icon(
+                assets,
+                icon,
+                Rect::new(
+                    rect.x + (rect.w - size) / 2.,
+                    rect.y + (rect.h - size) / 2.,
+                    size,
+                    size,
+                ),
+                ink,
+            );
+            let focus = state.focus_level(&Target::Nav(index));
+            if focus > 0. && !state.pointer {
+                rail_caption(out, assets, label, rect, focus);
+            }
+        } else {
+            out.text(
+                label,
+                line_box(rect, nav_label_style()),
+                nav_label_style(),
+                ink,
+                true,
+            );
+        }
         out.control(Target::Nav(index), rect, false);
     }
     header_circles(out, state, assets);
     if state.page == Page::Home && state.music.now.is_some() {
+        // The mini-player belongs to the page: it moves with the content.
+        let (from, controls) = (out.draw.len(), out.controls.len());
         mini_view::mini_player(out, state, assets);
+        let (dx, dy) = layout.body_offset();
+        motion::transform_group(&mut out.draw[from..], dx, dy, 1.);
+        for control in &mut out.controls[controls..] {
+            control.rect.x += dx;
+            control.rect.y += dy;
+        }
     }
+}
+
+/// The rail has no room for words: the button under the remote gets a small
+/// glass label to its right.
+fn rail_caption(out: &mut Scene, assets: &Assets, label: &str, anchor: Rect, alpha: f32) {
+    let style = nav_label_style();
+    let height = 44.;
+    let rect = Rect::new(
+        layout::RAIL_LEFT + layout::RAIL_WIDTH + 12.,
+        anchor.y + (anchor.h - height) / 2.,
+        assets.width(label, style) + 40.,
+        height,
+    );
+    let from = out.draw.len();
+    out.shadow(rect, height / 2., 18., 4., 0.3);
+    out.glass(rect, height / 2.);
+    out.shape(rect, height / 2., c(0x0b0f16, 0.55));
+    out.text(label, line_box(rect, style), style, WHITE, true);
+    out.fade(from, alpha, 1.);
 }
 
 /// Text color on an accent surface, picked by contrast against the actual fill.
@@ -1267,20 +1531,43 @@ pub(crate) fn header_circle_targets(state: &State) -> Vec<(Target, String, Strin
     items
 }
 
-pub(crate) fn header_circle_rect(slot: usize) -> Rect {
-    Rect::new(
-        crate::state::HOME_STRIP_RIGHT
-            - HEADER_CIRCLE
-            - slot as f32 * (HEADER_CIRCLE + HEADER_CIRCLE_GAP),
-        NAV_TOP,
-        HEADER_CIRCLE,
-        HEADER_CIRCLE,
-    )
+/// Slot 0 is TV settings; every further slot is one visible input. The
+/// circles grow away from the corner the layout gives them.
+pub(crate) fn chrome_circle_rect(layout: Layout, slot: usize) -> Rect {
+    let size = HEADER_CIRCLE;
+    let step = slot as f32;
+    let (x, y) = match layout {
+        Layout::Classic => (
+            crate::state::HOME_STRIP_RIGHT - size - step * (size + HEADER_CIRCLE_GAP),
+            NAV_TOP,
+        ),
+        Layout::Flip => (
+            crate::state::HOME_STRIP_LEFT + step * (size + HEADER_CIRCLE_GAP),
+            NAV_TOP,
+        ),
+        Layout::Dock => (
+            crate::state::HOME_STRIP_RIGHT - 8. - size - step * (size + 12.),
+            layout::DOCK_TOP + (layout::DOCK_HEIGHT - size) / 2.,
+        ),
+        Layout::Rail => (
+            layout::RAIL_LEFT + (layout::RAIL_WIDTH - size) / 2.,
+            1080. - NAV_TOP - size - step * (size + 12.),
+        ),
+    };
+    Rect::new(x, y, size, size)
 }
 
 fn header_circles(out: &mut Scene, state: &State, assets: &Assets) {
+    let layout = state.preferences.layout;
     for (slot, (target, icon, caption)) in header_circle_targets(state).into_iter().enumerate() {
-        let rect = header_circle_rect(slot);
+        let rect = chrome_circle_rect(layout, slot);
+        // On the rail the sliders are the Settings tab; the TV's own
+        // settings get the TV.
+        let icon = if layout == Layout::Rail && target == Target::TvSettings {
+            "tv".to_owned()
+        } else {
+            icon
+        };
         let focus = state.focus_level(&target);
         let lift = rect.inset(-2.7 * focus);
         let radius = lift.w / 2.;
@@ -1311,17 +1598,23 @@ fn header_circles(out: &mut Scene, state: &State, assets: &Assets) {
             ink,
         );
         if focus > 0. && !state.pointer {
-            let style = TextStyle::new(20.).weight(600).leading(1.3);
-            let width = assets.width(&caption, style) + 8.;
-            // Keep the caption on screen even for the rightmost circle.
-            let x = (rect.x + rect.w / 2. - width / 2.).min(1920. - 24. - width);
-            out.text(
-                caption,
-                Rect::new(x, rect.y + rect.h + 12., width, 28.),
-                style,
-                c(0xffffff, 0.95 * focus),
-                true,
-            );
+            if layout == Layout::Rail {
+                rail_caption(out, assets, &caption, rect, focus);
+            } else {
+                let style = TextStyle::new(20.).weight(600).leading(1.3);
+                let width = assets.width(&caption, style) + 8.;
+                // Keep the caption on screen even for the outermost circle.
+                let x = (rect.x + rect.w / 2. - width / 2.)
+                    .min(1920. - 24. - width)
+                    .max(24.);
+                out.text(
+                    caption,
+                    Rect::new(x, rect.y + rect.h + 12., width, 28.),
+                    style,
+                    c(0xffffff, 0.95 * focus),
+                    true,
+                );
+            }
         }
         out.control(target, rect, false);
     }
