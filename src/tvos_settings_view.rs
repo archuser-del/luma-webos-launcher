@@ -1333,6 +1333,22 @@ fn appearance(out: &mut Scene, state: &State, assets: &Assets) {
             partial: false,
         },
     );
+    // Where the tabs, inputs and clock sit; OK steps through the layouts.
+    cell(
+        out,
+        state,
+        assets,
+        Target::LayoutCycle,
+        Rect::new(x, opt_y + 44. + 12. * 92., WIDTH - 2. * S32, ROW_HEIGHT),
+        CellContent {
+            name: "Layout",
+            value: Some(state.preferences.layout.name()),
+            desc: None,
+            chevron: false,
+            checked: false,
+            partial: false,
+        },
+    );
     let selected_resolution = state.preferences.ui_resolution_value();
     cell(
         out,

@@ -105,6 +105,8 @@ pub enum Target {
     PhraseSubtitleSize,
     UiSounds,
     Screensaver,
+    /// Settings › Appearance › Layout: OK steps to the next layout.
+    LayoutCycle,
     UiResolutionOpen,
     UiResolutionPick(usize),
     HeadingFontPick(usize),
@@ -338,7 +340,7 @@ pub enum TextField {
     Library,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Up,
     Down,
@@ -531,6 +533,9 @@ pub struct State {
     pub library_closing: Option<(Box<crate::library::Library>, Instant)>,
     pub page: Page,
     pub focus: Target,
+    /// The control the remote left for the tabs or inputs; the arrow back
+    /// into the page returns to it (layouts other than the classic bar).
+    pub chrome_return: Option<Target>,
     pub inventory: Inventory,
     pub preferences: Preferences,
     pub accent_transition: Option<(u32, u32, Instant)>,
@@ -702,6 +707,7 @@ impl State {
         Self {
             page: Page::Home,
             focus: Target::Nav(0),
+            chrome_return: None,
             inventory: Inventory::default(),
             preferences,
             accent_transition: None,
@@ -2065,7 +2071,9 @@ impl State {
         } else {
             FOCUS_BOTTOM_INSET
         };
-        self.main_bottom() - inset
+        let layout = self.preferences.layout;
+        // Controls are placed where the layout moved the page to.
+        layout.focus_bottom(self.main_bottom() - inset + layout.body_offset().1)
     }
 
     /// Remote focus is revealed after layout changes, including hide/reorder.
@@ -2110,7 +2118,11 @@ impl State {
                 // Leaving Favorites slides the row back to its first card.
                 self.home_scroll_goal = 0.;
             }
-            if matches!(
+            let body_dy = self.preferences.layout.body_offset().1;
+            if crate::layout::is_chrome(&self.focus) && self.preferences.layout.keeps_scroll() {
+                // The rail and the dock sit beside the page, not above it:
+                // the page stays where it is scrolled to.
+            } else if matches!(
                 self.focus,
                 Target::Nav(_)
                     | Target::Filter(_)
@@ -2144,7 +2156,7 @@ impl State {
                     HOME_REVEAL_TOP
                 } else {
                     120.8
-                };
+                } + body_dy;
                 if control.rect.y < top {
                     self.scroll_goal = (self.scroll + control.rect.y - top).max(0.);
                 }
@@ -2161,7 +2173,7 @@ impl State {
                         || self.section == STACKS_SECTION
                         || self.section == SMARTHOME_SECTION)
                 {
-                    936.
+                    936. + body_dy
                 } else {
                     self.focus_bottom()
                 };
@@ -2376,7 +2388,158 @@ impl State {
         self.dirty = true;
     }
 
+    /// One arrow press. The classic bar is routed by `direction_classic`;
+    /// every other layout adds its own way on to, along and off the chrome.
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        use crate::layout::{Layout, is_chrome};
+        let layout = self.preferences.layout;
+        if layout == Layout::Classic || self.ambient_on() {
+            return self.direction_classic(direction, controls);
+        }
+        let has_tabs = controls.iter().any(|c| matches!(c.target, Target::Nav(_)));
+        if has_tabs
+            && is_chrome(&self.focus)
+            && self.overlay.is_none()
+            && let Some(effects) = self.chrome_direction(direction, controls)
+        {
+            return effects;
+        }
+        let before = self.focus.clone();
+        // Left of the first favourite is the rail, not the last favourite.
+        if layout == Layout::Rail
+            && has_tabs
+            && direction == Direction::Left
+            && self.page == Page::Home
+            && self.overlay.is_none()
+            && self.moving.is_none()
+            && let Target::App(id) = &before
+            && self.apps().first().is_some_and(|app| &app.id == id)
+        {
+            self.enter_chrome(before, controls);
+            return vec![];
+        }
+        let mark = self.route_mark();
+        let effects = self.direction_classic(direction, controls);
+        if !has_tabs || is_chrome(&before) {
+            return effects;
+        }
+        if is_chrome(&self.focus) {
+            // A classic route up to the top bar.
+            if direction == layout.outward() {
+                self.enter_chrome(before, controls);
+            } else {
+                // The chrome is not that way in this layout: stay put.
+                self.focus(before, controls);
+            }
+        } else if direction == layout.outward()
+            && layout.keeps_scroll()
+            && effects.is_empty()
+            && self.overlay.is_none()
+            && self.moving.is_none()
+            && mark == self.route_mark()
+        {
+            // Nothing lay that way: the page ends here, the chrome is next.
+            self.enter_chrome(before, controls);
+        }
+        effects
+    }
+
+    /// Everything a press can change without leaving a trace in the effects.
+    fn route_mark(
+        &self,
+    ) -> (
+        Target,
+        Page,
+        SettingsLevel,
+        Option<Subpage>,
+        usize,
+        [u32; 3],
+    ) {
+        (
+            self.focus.clone(),
+            self.page,
+            self.settings_level,
+            self.subpage.clone(),
+            self.section,
+            [
+                self.scroll_goal.to_bits(),
+                self.home_scroll_goal.to_bits(),
+                self.stack_scroll.2.to_bits(),
+            ],
+        )
+    }
+
+    /// Focus moves from the page to this page's own tab and remembers where
+    /// it came from.
+    fn enter_chrome(&mut self, from: Target, controls: &[Control]) {
+        self.chrome_return = Some(from);
+        self.focus(Target::Nav(self.page_index()), controls);
+    }
+
+    /// Arrows while a tab or an input circle has focus. None leaves the
+    /// press to the classic rules.
+    fn chrome_direction(
+        &mut self,
+        direction: Direction,
+        controls: &[Control],
+    ) -> Option<Vec<Effect>> {
+        use crate::layout::is_chrome;
+        let layout = self.preferences.layout;
+        // The chrome in the order it is laid out along its bar.
+        let mut chrome: Vec<&Control> = controls.iter().filter(|c| is_chrome(&c.target)).collect();
+        let along = |c: &Control| {
+            let (x, y) = c.rect.center();
+            if layout.vertical() { y } else { x }
+        };
+        chrome.sort_by(|a, b| along(a).total_cmp(&along(b)));
+        let at = chrome.iter().position(|c| c.target == self.focus)?;
+        let (previous, next) = layout.along();
+        if direction == previous || direction == next {
+            let to = if direction == next {
+                (at + 1 < chrome.len()).then(|| at + 1)
+            } else {
+                at.checked_sub(1)
+            };
+            // The ends of the bar are walls.
+            let Some(to) = to else {
+                return Some(vec![]);
+            };
+            match (&self.focus, chrome[to].target.clone()) {
+                // Moving along the tabs opens them, as on the classic bar.
+                (Target::Nav(_), Target::Nav(index)) => {
+                    self.chrome_return = None;
+                    self.open(index);
+                }
+                // From the circles back onto the tabs: the open page's tab.
+                (_, Target::Nav(_)) => self.focus(Target::Nav(self.page_index()), controls),
+                (_, target) => self.focus(target, controls),
+            }
+            return Some(vec![]);
+        }
+        if direction == layout.inward() {
+            let back = self
+                .chrome_return
+                .take()
+                .filter(|target| controls.iter().any(|c| &c.target == target));
+            if let Some(target) = back {
+                self.focus(target, controls);
+            } else if !matches!(self.focus, Target::Nav(_))
+                && controls.iter().any(|c| c.target == Target::MiniCover)
+            {
+                self.focus(Target::MiniCover, controls);
+            } else {
+                if self.page == Page::Settings {
+                    self.subpage = None;
+                    self.section = 0;
+                }
+                self.focus(self.first_content(), controls);
+            }
+        }
+        // Away from the page there is only the screen edge.
+        Some(vec![])
+    }
+
+    fn direction_classic(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         if self.ambient_on() {
             // Left and Right flip the clip, as on the caption; the rest wakes.
             if matches!(direction, Direction::Left | Direction::Right)
@@ -3108,6 +3271,7 @@ impl State {
                         | Target::PhraseSubtitleSize
                         | Target::UiSounds
                         | Target::Screensaver
+                        | Target::LayoutCycle
                         | Target::UiResolutionOpen
                 ) && self.section == APPEARANCE_SECTION
                     && self.settings_level == SettingsLevel::Section
@@ -3128,6 +3292,8 @@ impl State {
                         (Target::UiSounds, Direction::Up) => Target::PhraseSubtitleSize,
                         (Target::UiSounds, Direction::Down) => Target::Screensaver,
                         (Target::Screensaver, Direction::Up) => Target::UiSounds,
+                        (Target::Screensaver, Direction::Down) => Target::LayoutCycle,
+                        (Target::LayoutCycle, Direction::Up) => Target::Screensaver,
                         (Target::UiResolutionOpen, Direction::Up) => Target::AccentOption(2),
                         (Target::UiResolutionOpen, Direction::Down) => Target::HeadingFontOpen,
                         (_, Direction::Left) => Target::SettingsBack,
@@ -3391,13 +3557,29 @@ impl State {
                         && candidate.rect.x < HOME_VIEWPORT_RIGHT)
             })
             .filter_map(|candidate| {
-                // Header controls never steal an Up route from the active tab.
-                if self.overlay.is_none()
-                    && matches!(direction, Direction::Up)
-                    && candidate.rect.y < 150.
-                    && candidate.target != Target::Nav(self.page_index())
-                {
-                    return None;
+                let layout = self.preferences.layout;
+                if layout.keeps_scroll() {
+                    // The rail and the dock are entered at the page's edge
+                    // only, never by a diagonal shortcut.
+                    if crate::layout::is_chrome(&candidate.target) {
+                        return None;
+                    }
+                } else {
+                    // Header controls never steal an Up route from the active tab.
+                    if self.overlay.is_none()
+                        && matches!(direction, Direction::Up)
+                        && candidate.rect.y < 150.
+                        && candidate.target != Target::Nav(self.page_index())
+                    {
+                        return None;
+                    }
+                    // Mirrored bar: the circles are reached along the bar.
+                    if layout != crate::layout::Layout::Classic
+                        && !matches!(direction, Direction::Up)
+                        && crate::layout::is_chrome(&candidate.target)
+                    {
+                        return None;
+                    }
                 }
                 let (cx, cy) = candidate.rect.center();
                 let (primary, cross, overlap) = match direction {
@@ -3432,6 +3614,11 @@ impl State {
                         (current.rect.h + candidate.rect.h) / 2.,
                     ),
                 };
+                // Toward the rail or the dock only a control straight ahead
+                // counts; otherwise the page ends here and the chrome is next.
+                if cross >= overlap && layout.keeps_scroll() && direction == layout.outward() {
+                    return None;
+                }
                 (primary > 1.).then_some((
                     candidate.target.clone(),
                     primary + cross * 2. + if cross >= overlap { 10000. } else { 0. },
@@ -4413,6 +4600,12 @@ impl State {
             }
             Target::UiSounds => {
                 self.preferences.ui_sounds = !self.preferences.ui_sounds;
+                return vec![Effect::Save];
+            }
+            Target::LayoutCycle => {
+                self.preferences.layout = self.preferences.layout.next();
+                self.chrome_return = None;
+                self.dirty = true;
                 return vec![Effect::Save];
             }
             Target::Screensaver => {

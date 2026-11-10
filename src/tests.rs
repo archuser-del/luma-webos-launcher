@@ -160,12 +160,14 @@ fn scene(state: &State) -> view::Scene {
         text_pct: std::cell::Cell::new(state.preferences.text_size_pct),
         artwork: crate::app_artwork::Service::new(false),
     };
-    let navigation = view::navigation_for(&assets, state.preferences.language, false);
+    let layout = state.preferences.layout;
+    let navigation = view::navigation_in(layout, &assets, state.preferences.language, false);
+    let (pill, length) = view::nav_pill_target(layout, navigation.items[state.page_index()]);
     view::scene_with_pill(
         state,
         &assets,
-        navigation.items[state.page_index()].x,
-        navigation.items[state.page_index()].w,
+        pill,
+        length,
         time::OffsetDateTime::UNIX_EPOCH,
     )
 }
@@ -3817,4 +3819,400 @@ fn unsupported_saved_media_source_is_ignored_without_losing_other_settings() {
     assert_eq!(prefs.stacks[0].source, "jellyfin");
     assert_eq!(prefs.stacks[0].collection, "recent");
     assert!(prefs.luma_player);
+}
+
+// Layouts: where the tabs, inputs and clock sit, and how the remote gets there.
+
+fn laid_out(layout: crate::layout::Layout) -> State {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    state.preferences.reduced_motion = true;
+    state.preferences.layout = layout;
+    state
+}
+
+fn press(state: &mut State, direction: Direction) -> Vec<Effect> {
+    let controls = controls(state);
+    state.direction(direction, &controls)
+}
+
+fn rect_of(state: &State, target: &Target) -> crate::state::Rect {
+    controls(state)
+        .into_iter()
+        .find(|c| &c.target == target)
+        .unwrap_or_else(|| panic!("{target:?} is not on screen"))
+        .rect
+}
+
+fn first_app(state: &State) -> Target {
+    Target::App(state.apps()[0].id.clone())
+}
+
+#[test]
+fn a_saved_layout_loads_by_name_and_an_unknown_one_falls_back() {
+    use crate::layout::Layout;
+    for (name, layout) in [
+        ("classic", Layout::Classic),
+        ("rail", Layout::Rail),
+        ("dock", Layout::Dock),
+        ("flip", Layout::Flip),
+    ] {
+        let prefs: Preferences = serde_json::from_value(json!({ "layout": name })).unwrap();
+        assert_eq!(prefs.layout, layout);
+        assert_eq!(serde_json::to_value(&prefs).unwrap()["layout"], name);
+    }
+    let prefs: Preferences = serde_json::from_value(json!({ "layout": "carousel" })).unwrap();
+    assert_eq!(prefs.layout, Layout::default());
+    assert_eq!(Layout::Classic.body_offset(), (0., 0.));
+}
+
+#[test]
+fn the_layout_row_in_appearance_steps_through_every_layout() {
+    use crate::layout::Layout;
+    let mut state = ready();
+    state.focus = Target::LayoutCycle;
+    let mut seen = vec![state.preferences.layout];
+    for _ in 0..Layout::ALL.len() - 1 {
+        assert_eq!(state.activate(), vec![Effect::Save]);
+        seen.push(state.preferences.layout);
+    }
+    for layout in Layout::ALL {
+        assert!(seen.contains(&layout), "{layout:?} was skipped");
+    }
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(state.preferences.layout, seen[0]);
+}
+
+#[test]
+fn every_layout_keeps_its_chrome_clear_of_the_page() {
+    use crate::layout::{DOCK_TOP, Layout, RAIL_LEFT, RAIL_WIDTH, is_chrome};
+    for layout in Layout::ALL {
+        for page in 0..3 {
+            let mut state = laid_out(layout);
+            state.open(page);
+            let controls = controls(&state);
+            let (chrome, body): (Vec<_>, Vec<_>) =
+                controls.iter().partition(|c| is_chrome(&c.target));
+            assert!(chrome.len() >= 4, "{layout:?}: tabs and a circle");
+            assert!(!body.is_empty(), "{layout:?} page {page} has content");
+            for c in &chrome {
+                assert!(
+                    c.rect.x >= 0. && c.rect.x + c.rect.w <= 1920.,
+                    "{layout:?}: {:?} leaves the screen",
+                    c.target
+                );
+                assert!(c.rect.y >= 0. && c.rect.y + c.rect.h <= 1080.);
+                // No visible part of a page control lies under a chrome
+                // button; the page has dissolved before it reaches the dock.
+                for b in &body {
+                    let bottom = layout.pointer_bottom(b.rect.y + b.rect.h);
+                    let apart = b.rect.x >= c.rect.x + c.rect.w
+                        || b.rect.x + b.rect.w <= c.rect.x
+                        || b.rect.y >= c.rect.y + c.rect.h
+                        || bottom <= c.rect.y;
+                    assert!(
+                        apart,
+                        "{layout:?} page {page}: {:?} overlaps {:?}",
+                        b.target, c.target
+                    );
+                }
+            }
+            match layout {
+                Layout::Rail => {
+                    assert!(
+                        chrome.iter().all(|c| c.rect.x >= RAIL_LEFT
+                            && c.rect.x + c.rect.w <= RAIL_LEFT + RAIL_WIDTH)
+                    );
+                }
+                Layout::Dock => assert!(chrome.iter().all(|c| c.rect.y >= DOCK_TOP)),
+                Layout::Classic | Layout::Flip => {
+                    assert!(chrome.iter().all(|c| c.rect.y + c.rect.h < 150.))
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_mirrored_bar_puts_inputs_left_and_tabs_right() {
+    use crate::layout::Layout;
+    let state = laid_out(Layout::Flip);
+    let tabs = rect_of(&state, &Target::Nav(0));
+    let tv = rect_of(&state, &Target::TvSettings);
+    assert_eq!(tv.x, crate::state::HOME_STRIP_LEFT);
+    assert!(tabs.x > 1200.);
+    let last = rect_of(&state, &Target::Nav(state.settings_nav_index()));
+    assert!((last.x + last.w - crate::state::HOME_STRIP_RIGHT).abs() < 9.);
+    let classic = laid_out(Layout::Classic);
+    assert!(rect_of(&classic, &Target::TvSettings).x > rect_of(&classic, &Target::Nav(0)).x);
+}
+
+#[test]
+fn rail_left_of_the_page_is_the_rail_and_right_returns() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Rail);
+    let netflix = first_app(&state);
+    state.focus = netflix.clone();
+    // Up no longer leads to the tabs: they are on the left now.
+    let above = {
+        press(&mut state, Direction::Up);
+        state.focus.clone()
+    };
+    assert!(!matches!(above, Target::Nav(_)));
+    state.focus = netflix.clone();
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0), "the screen edge is a wall");
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, netflix, "back where the remote came from");
+    // Down the rail opens the next tab; Up comes back.
+    press(&mut state, Direction::Left);
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Apps, Target::Nav(1))
+    );
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(1), "left of the first column");
+    press(&mut state, Direction::Up);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Home, Target::Nav(0))
+    );
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0), "the top of the rail is a wall");
+}
+
+#[test]
+fn rail_inputs_sit_below_the_tabs_and_are_walked_in_order() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Rail);
+    let last = state.settings_nav_index();
+    state.open(last);
+    assert_eq!(state.focus, Target::Nav(last));
+    let mut walked = vec![];
+    for _ in 0..8 {
+        let before = state.focus.clone();
+        press(&mut state, Direction::Down);
+        if state.focus == before {
+            break;
+        }
+        walked.push(state.focus.clone());
+    }
+    assert_eq!(state.page, Page::Settings, "the circles open no tab");
+    assert_eq!(walked.last(), Some(&Target::TvSettings));
+    assert!(
+        walked[..walked.len() - 1]
+            .iter()
+            .all(|t| matches!(t, Target::Input(_)))
+    );
+    // Each one below the one before.
+    let ys: Vec<f32> = walked.iter().map(|t| rect_of(&state, t).y).collect();
+    assert!(ys.windows(2).all(|w| w[1] > w[0]));
+    for _ in 0..walked.len() {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(state.focus, Target::Nav(last), "back on the open tab");
+    assert_eq!(state.page, Page::Settings);
+}
+
+#[test]
+fn dock_is_below_the_last_row_and_up_returns() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Dock);
+    state.open(1);
+    // Into the page from the dock is Up; Down is the screen edge.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Nav(1));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Filter(0), "nothing above the page");
+    // Down through every row of the grid, then once more: the dock.
+    let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+    for _ in 0..rows {
+        press(&mut state, Direction::Down);
+        assert!(matches!(state.focus, Target::App(_)));
+    }
+    let last = state.focus.clone();
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Nav(1));
+    assert_eq!(state.page, Page::Apps);
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, last, "back on the row the remote left");
+    // Along the dock: tabs switch, then the inputs, then the edge.
+    press(&mut state, Direction::Down);
+    press(&mut state, Direction::Left);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Home, Target::Nav(0))
+    );
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0));
+    let last_tab = state.settings_nav_index();
+    for _ in 0..last_tab {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(state.page, Page::Settings);
+    press(&mut state, Direction::Right);
+    assert!(matches!(state.focus, Target::Input(_) | Target::TvSettings));
+    assert_eq!(state.page, Page::Settings);
+    for _ in 0..8 {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(state.focus, Target::TvSettings, "the rightmost circle");
+}
+
+#[test]
+fn dock_never_hides_the_focused_card() {
+    use crate::layout::{DOCK_FADE, Layout};
+    let mut state = laid_out(Layout::Dock);
+    state.open(1);
+    press(&mut state, Direction::Up);
+    let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+    for row in 0..rows {
+        press(&mut state, Direction::Down);
+        // A frame later the page has scrolled the card into view.
+        let controls = controls(&state);
+        state.reveal_focus(&controls);
+        let rect = rect_of(&state, &state.focus.clone());
+        assert!(
+            rect.y + rect.h <= DOCK_FADE[0] + 0.5,
+            "row {row}: card ends at {}, the page fades from {}",
+            rect.y + rect.h,
+            DOCK_FADE[0]
+        );
+        assert!(rect.y >= 0., "row {row} is cut off at the top");
+    }
+}
+
+#[test]
+fn dock_and_rail_keep_the_page_scrolled_when_the_chrome_takes_focus() {
+    use crate::layout::Layout;
+    for layout in [Layout::Dock, Layout::Rail] {
+        let mut state = laid_out(layout);
+        state.open(1);
+        press(&mut state, layout.inward());
+        let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+        for _ in 0..rows {
+            press(&mut state, Direction::Down);
+            let controls = controls(&state);
+            state.reveal_focus(&controls);
+        }
+        let scrolled = state.scroll_goal;
+        assert!(
+            scrolled > 0.,
+            "{layout:?}: the grid is taller than the screen"
+        );
+        let app = state.focus.clone();
+        // Rail: walk to the first column, then off it.
+        for _ in 0..crate::state::APPS_COLUMNS {
+            if matches!(state.focus, Target::Nav(_)) {
+                break;
+            }
+            press(&mut state, layout.outward());
+        }
+        assert_eq!(state.focus, Target::Nav(1), "{layout:?}");
+        assert_eq!(
+            state.scroll_goal, scrolled,
+            "{layout:?}: the page stays put"
+        );
+        press(&mut state, layout.inward());
+        assert!(matches!(state.focus, Target::App(_)), "{layout:?}");
+        if layout == Layout::Dock {
+            assert_eq!(state.focus, app);
+        }
+        // Back still goes to the tab and scrolls the page to its top.
+        state.back();
+        assert_eq!(state.focus, Target::Nav(1));
+        assert_eq!(state.scroll_goal, 0.);
+    }
+}
+
+#[test]
+fn mirrored_bar_walks_from_the_tabs_left_to_the_inputs() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Flip);
+    state.focus = first_app(&state);
+    for _ in 0..4 {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(state.focus, Target::Nav(0), "Up still reaches the bar");
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0));
+    // Left of the first tab are the inputs; the TV settings come last.
+    press(&mut state, Direction::Left);
+    assert!(matches!(state.focus, Target::Input(_)));
+    assert_eq!(state.page, Page::Home);
+    for _ in 0..8 {
+        press(&mut state, Direction::Left);
+    }
+    assert_eq!(state.focus, Target::TvSettings);
+    for _ in 0..8 {
+        press(&mut state, Direction::Right);
+        if matches!(state.focus, Target::Nav(_)) {
+            break;
+        }
+    }
+    assert_eq!(state.focus, Target::Nav(0), "back on the open tab");
+    press(&mut state, Direction::Right);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Apps, Target::Nav(1))
+    );
+    let last = state.settings_nav_index();
+    for _ in 0..6 {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Settings, Target::Nav(last))
+    );
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Sidebar(0));
+    // A page control never jumps sideways onto the circles.
+    state.open(1);
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Filter(0));
+}
+
+#[test]
+fn every_layout_reaches_every_tab_and_gets_back_into_each_page() {
+    use crate::layout::Layout;
+    for layout in [Layout::Rail, Layout::Dock, Layout::Flip] {
+        let mut state = laid_out(layout);
+        let (previous, next) = layout.along();
+        state.back();
+        assert_eq!(state.focus, Target::Nav(0), "{layout:?}");
+        for index in 1..=state.settings_nav_index() {
+            press(&mut state, next);
+            assert_eq!(state.focus, Target::Nav(index), "{layout:?}");
+            assert_eq!(state.page_index(), index, "{layout:?}");
+            press(&mut state, layout.inward());
+            assert!(
+                !crate::layout::is_chrome(&state.focus),
+                "{layout:?}: tab {index} has a way into its page"
+            );
+            state.back();
+            // Settings steps back through its own levels first.
+            for _ in 0..3 {
+                if matches!(state.focus, Target::Nav(_)) {
+                    break;
+                }
+                state.back();
+            }
+            assert_eq!(state.focus, Target::Nav(index), "{layout:?}");
+        }
+        for index in (0..state.settings_nav_index()).rev() {
+            press(&mut state, previous);
+            assert_eq!(state.page_index(), index, "{layout:?}");
+        }
+    }
 }
