@@ -58,7 +58,7 @@ pub const RAIL_GAP: f32 = 6.;
 
 impl Layout {
     /// What a fresh install of this build shows.
-    pub const SHIPPED: Self = Self::Classic;
+    pub const SHIPPED: Self = Self::Rail;
     pub const ALL: [Self; 4] = [Self::Classic, Self::Rail, Self::Dock, Self::Flip];
 
     pub fn name(self) -> &'static str {
@@ -146,4 +146,16 @@ pub fn is_chrome(target: &Target) -> bool {
         target,
         Target::Nav(_) | Target::Input(_) | Target::TvSettings
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Layout;
+
+    #[test]
+    fn a_fresh_install_of_this_build_starts_in_its_own_layout() {
+        assert_eq!(Layout::SHIPPED, Layout::Rail);
+        // Saved settings that name no layout get the same one on the TV.
+        assert_eq!(Layout::SHIPPED.name(), "Rail");
+    }
 }
