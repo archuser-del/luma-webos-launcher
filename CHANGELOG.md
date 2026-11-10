@@ -1,5 +1,14 @@
 # lg-luma
 
+## 2.4.0
+
+### Minor Changes
+
+- Home Assistant control: OK acts on locks (after a second press in the lock's panel), thermostats, media players, covers, fans, humidifiers, vacuums, helpers and buttons. The device panel sets brightness, fan speed, cover position, target temperature, volume or humidity with Up and Down. "Open Home Assistant" on the Smart Home tab opens the web interface in the TV browser.
+- Jellyfin Libraries row: one wide banner card per library with its picture and item count; a card opens the Library page with a tab per library.
+- ImmichFrame photo wallpaper: connect an ImmichFrame server from Settings › Wallpaper › ImmichFrame Photos and the wallpaper shows photos from your Immich library, with place and date.
+- The time-of-day greeting shrinks and wraps to two lines instead of being cut off beside the widgets.
+
 ## 2.3.0
 
 ### Minor Changes

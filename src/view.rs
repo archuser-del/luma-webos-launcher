@@ -711,6 +711,13 @@ pub fn scene_with_pill(
             0.
         };
         out.shape(full, 0., c(0x04090f, 0.30 * (1. - clear)));
+        // A bright sky behind the clock and navigation: darker toward the top.
+        out.draw.push(Draw::RoundedGradient(
+            Rect::new(0., 0., 1920., 320.),
+            0.,
+            c(0x000000, 0.42 * (1. - clear)),
+            c(0x000000, 0.),
+        ));
     } else if let Some((previous, start)) = &state.previous_background {
         out.image(
             assets.path(format!("wallpapers/{previous}.jpg")),
