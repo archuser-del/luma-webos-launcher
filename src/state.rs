@@ -480,6 +480,8 @@ pub struct State {
     pub jellyfin_phone: bool,
     /// Libraries of the signed-in user: ("view:<id>", name).
     pub jellyfin_views: Vec<(String, String)>,
+    /// The server's libraries, as the Libraries row and its page show them.
+    pub jellyfin_libraries: Vec<crate::jellyfin::LibraryInfo>,
     pub plex_code: Option<String>,
     pub plex_status: Option<String>,
     pub plex_error: bool,
@@ -700,6 +702,7 @@ impl State {
             jellyfin_qr_caption: (String::new(), String::new()),
             jellyfin_phone: false,
             jellyfin_views: vec![],
+            jellyfin_libraries: vec![],
             plex_code: None,
             plex_status: None,
             plex_error: false,
@@ -3853,8 +3856,11 @@ impl State {
                 let Some(stack) = crate::stacks::row_stack(self, row) else {
                     return vec![];
                 };
+                if crate::stacks::is_hub(&self.preferences.stacks[stack]) {
+                    return self.open_library_hub(row, index);
+                }
                 if index >= crate::stacks::row_shown(self, row)
-                    && crate::stacks::has_library(&self.preferences.stacks[stack].source)
+                    && crate::stacks::ends_with_library(&self.preferences.stacks[stack])
                 {
                     return self.open_library(row, index);
                 }
@@ -4227,13 +4233,17 @@ impl State {
                             stack.collection = id.clone();
                             stack.list_title = label.clone();
                             stack.name = crate::stacks::row_title(stack);
-                            // Albums are square; leaving music goes back to posters.
+                            // Libraries are wide banners and albums are square;
+                            // leaving either goes back to posters.
                             if stack.source == "jellyfin" {
+                                use crate::stacks::CardShape;
                                 let music = crate::jellyfin::music_collection(&stack.collection);
-                                if music {
-                                    stack.shape = crate::stacks::CardShape::Square;
-                                } else if stack.shape == crate::stacks::CardShape::Square {
-                                    stack.shape = crate::stacks::CardShape::Poster;
+                                if crate::stacks::is_hub(stack) {
+                                    stack.shape = CardShape::Wide;
+                                } else if music {
+                                    stack.shape = CardShape::Square;
+                                } else if stack.shape != CardShape::Poster {
+                                    stack.shape = CardShape::Poster;
                                 }
                             }
                             if let Some(items) = self.stack_items.get_mut(i) {

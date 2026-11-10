@@ -5,7 +5,10 @@ use crate::stacks::{CardShape, StackItem};
 
 const CARD_RADIUS: f32 = crate::view::TILE_RADIUS;
 
-fn rows(state: &State) -> Vec<(String, &'static str, CardShape, Vec<StackItem>, bool)> {
+/// (title, source, card shape, cards, ends with View Library, Libraries row).
+type Row = (String, &'static str, CardShape, Vec<StackItem>, bool, bool);
+
+fn rows(state: &State) -> Vec<Row> {
     let mut rows = Vec::new();
     for (i, stack) in state.preferences.stacks.iter().enumerate() {
         if !stack.show {
@@ -16,12 +19,15 @@ fn rows(state: &State) -> Vec<(String, &'static str, CardShape, Vec<StackItem>, 
             continue;
         }
         items.truncate(crate::stacks::HOME_ROW_MAX);
+        let hub = crate::stacks::is_hub(stack);
         rows.push((
             stack.name.clone(),
             source_label(&stack.source),
-            stack.shape,
+            // Library banners are always wide, whatever an old setting says.
+            if hub { CardShape::Wide } else { stack.shape },
             items,
-            crate::stacks::has_library(&stack.source),
+            crate::stacks::ends_with_library(stack),
+            hub,
         ));
     }
     // Desktop-only design QA: LUMA_STACK_PREVIEW=1 shows placeholder "New" and "Popular" rows.
@@ -33,6 +39,7 @@ fn rows(state: &State) -> Vec<(String, &'static str, CardShape, Vec<StackItem>, 
             CardShape::Poster,
             vec![StackItem::default(); 12],
             true,
+            false,
         ));
         rows.push((
             "Popular Movies".into(),
@@ -40,6 +47,7 @@ fn rows(state: &State) -> Vec<(String, &'static str, CardShape, Vec<StackItem>, 
             CardShape::Poster,
             vec![StackItem::default(); 12],
             true,
+            false,
         ));
     }
     rows
@@ -47,7 +55,7 @@ fn rows(state: &State) -> Vec<(String, &'static str, CardShape, Vec<StackItem>, 
 
 pub(super) fn home_stacks(out: &mut Scene, state: &State, assets: &Assets, top: f32) {
     let mut y = top;
-    for (row, (name, source, shape, items, library)) in rows(state).into_iter().enumerate() {
+    for (row, (name, source, shape, items, library, hub)) in rows(state).into_iter().enumerate() {
         if y > 1080. {
             // Off screen: not drawn, but the page can still scroll down to it.
             y += SECTION_TITLE_H + SECTION_TITLE_GAP + shape.size().1 + 48.;
@@ -89,7 +97,9 @@ pub(super) fn home_stacks(out: &mut Scene, state: &State, assets: &Assets, top: 
             );
             out.shadow(r, CARD_RADIUS, 26. + 14. * f, 8. + 4. * f, 0.16 + 0.1 * f);
             out.accent_glow(r, CARD_RADIUS, f, state);
-            if item.is_none() {
+            if let (true, Some(item)) = (hub, item) {
+                hub_card(out, state, assets, item, r, f);
+            } else if item.is_none() {
                 library_card(out, assets, r, f);
             } else if let Some(path) = item.and_then(|i| i.poster.as_ref()) {
                 out.draw.push(Draw::TintedImage(
@@ -110,7 +120,7 @@ pub(super) fn home_stacks(out: &mut Scene, state: &State, assets: &Assets, top: 
                     },
                 );
             }
-            if item.is_some_and(|it| it.poster.is_none()) {
+            if !hub && item.is_some_and(|it| it.poster.is_none()) {
                 let it = item.unwrap();
                 out.text(
                     &it.title,
@@ -142,6 +152,63 @@ pub(super) fn home_stacks(out: &mut Scene, state: &State, assets: &Assets, top: 
         y = card_y + h + 48.;
     }
     out.page_bottom = out.page_bottom.max(y - 48.);
+}
+
+/// A library on the Libraries row, like a shelf in a console store: the
+/// library's own wide picture, its name and how much it holds over a scrim.
+fn hub_card(out: &mut Scene, state: &State, assets: &Assets, item: &StackItem, r: Rect, f: f32) {
+    match &item.poster {
+        Some(path) => out.draw.push(Draw::TintedImage(
+            path.clone(),
+            r,
+            CARD_RADIUS,
+            false,
+            [1.; 4],
+        )),
+        // No picture yet (or none on the server): the accent, dimmed.
+        None => {
+            out.shape(r, CARD_RADIUS, c(0x23262d, 1.));
+            let (a, b) = state.accent_colors();
+            out.draw.push(Draw::RoundedGradient(
+                r,
+                CARD_RADIUS,
+                c(a, 0.38),
+                c(b, 0.16),
+            ));
+        }
+    }
+    // Legible on any picture: dark from the middle down, stronger in focus.
+    let scrim = Rect::new(r.x, r.y + r.h * 0.38, r.w, r.h * 0.62);
+    out.draw.push(Draw::RoundedGradient(
+        scrim,
+        CARD_RADIUS,
+        c(0x000000, 0.),
+        c(0x000000, 0.78 + 0.1 * f),
+    ));
+    let detail = state
+        .jellyfin_libraries
+        .iter()
+        .find(|l| l.card == item.id)
+        .map_or("", |l| l.detail.as_str());
+    let pad = 28.;
+    let name_style = heading_fixed(assets, 36., 800).tracking(-0.02);
+    let name_y = r.y + r.h - if detail.is_empty() { 72. } else { 98. };
+    out.text(
+        tvos_settings_view::ellipsis_for_smart(assets, &item.title, name_style, r.w - 2. * pad),
+        Rect::new(r.x + pad, name_y, r.w - 2. * pad, 46.),
+        name_style,
+        WHITE,
+        false,
+    );
+    if !detail.is_empty() {
+        out.text(
+            detail,
+            Rect::new(r.x + pad, name_y + 48., r.w - 2. * pad, 32.),
+            TextStyle::new(23.).weight(550),
+            c(0xffffff, 0.78),
+            false,
+        );
+    }
 }
 
 /// Last card of a row: the grey View Library card that opens the whole list.

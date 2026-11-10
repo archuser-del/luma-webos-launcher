@@ -40,7 +40,11 @@ pub struct Server {
 
 /// Row contents: (id, label). Libraries follow as "view:<id>", music
 /// libraries as "music:<id>" (square album cards).
-pub const COLLECTIONS: [(&str, &str); 4] = [
+/// The row of library cards: every library on the server as a wide banner.
+pub const LIBRARIES: &str = "libraries";
+
+pub const COLLECTIONS: [(&str, &str); 5] = [
+    (LIBRARIES, "Libraries"),
     ("resume", "Continue watching"),
     ("nextup", "Next up"),
     ("latest", "Recently added"),
@@ -74,9 +78,26 @@ pub enum Command {
     PlayAlbum(JellyfinLink, i64, usize, bool),
 }
 
+/// One server library on the Libraries row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryInfo {
+    /// Id of its Home card.
+    pub card: i64,
+    /// "view:<id>" or "music:<id>", what the Library page loads.
+    pub collection: String,
+    pub name: String,
+    /// "412 movies", or empty when the server did not say.
+    pub detail: String,
+}
+
 pub enum Response {
     Servers(Vec<Server>),
-    Code { code: String, address: String },
+    /// The server's libraries, for the Libraries row and its Library page.
+    Libraries(Vec<LibraryInfo>),
+    Code {
+        code: String,
+        address: String,
+    },
     Linked(JellyfinLink),
     Failed(String),
     Items(usize, Vec<StackItem>),
@@ -577,6 +598,10 @@ fn fetch(
 ) {
     let agent = agent();
     for (index, collection) in stacks {
+        if collection == LIBRARIES {
+            fetch_libraries(reply, cache, link, &agent, index);
+            continue;
+        }
         let mut seen = vec![];
         let mut targets = vec![];
         // Episodes fold into their series: ask for more, keep 20 cards.
@@ -621,6 +646,111 @@ fn fetch(
         }
         let _ = reply.send(Response::Items(index, cards));
     }
+}
+
+/// Libraries the hub can open: (collection prefix, id, name, Jellyfin's type).
+fn view_list(
+    agent: &ureq::Agent,
+    link: &JellyfinLink,
+) -> Vec<(&'static str, String, String, String)> {
+    list(get(
+        agent,
+        link,
+        &format!("/UserViews?userId={}", link.user_id),
+    ))
+    .iter()
+    .filter(|v| text(v, "Type") == "CollectionFolder")
+    .filter_map(|v| {
+        let kind = v.get("CollectionType").and_then(Value::as_str);
+        let prefix = match kind {
+            Some("movies" | "tvshows" | "homevideos" | "mixed") | None => "view",
+            Some("music") => "music",
+            _ => return None,
+        };
+        Some((
+            prefix,
+            text(v, "Id"),
+            text(v, "Name"),
+            kind.unwrap_or("mixed").to_owned(),
+        ))
+    })
+    .collect()
+}
+
+/// "412 movies": how much a library holds, in its own words.
+fn library_detail(count: u64, kind: &str) -> String {
+    let (one, many) = match kind {
+        "movies" => ("movie", "movies"),
+        "tvshows" => ("show", "shows"),
+        "music" => ("album", "albums"),
+        "homevideos" => ("video", "videos"),
+        _ => ("title", "titles"),
+    };
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The Libraries row: one wide card per library, with the library's own
+/// picture and how much is in it.
+fn fetch_libraries(
+    reply: &mpsc::Sender<Response>,
+    cache: &Path,
+    link: &JellyfinLink,
+    agent: &ureq::Agent,
+    index: usize,
+) {
+    let views = view_list(agent, link);
+    let mut infos = vec![];
+    let mut cards = vec![];
+    for (prefix, id, name, kind) in &views {
+        let card = card_id(id);
+        let types = if *prefix == "music" {
+            "MusicAlbum"
+        } else {
+            "Movie,Series"
+        };
+        let detail = get(
+            agent,
+            link,
+            &format!(
+                "/Items?userId={}&ParentId={id}&Recursive=true&IncludeItemTypes={types}&Limit=0",
+                link.user_id
+            ),
+        )
+        .and_then(|body| body.get("TotalRecordCount").and_then(Value::as_u64))
+        .map(|count| library_detail(count, kind))
+        .unwrap_or_default();
+        infos.push(LibraryInfo {
+            card,
+            collection: format!("{prefix}:{id}"),
+            name: name.clone(),
+            detail,
+        });
+        let cached = cache.join(format!("jf-lib-{card}.jpg"));
+        cards.push(StackItem {
+            title: name.clone(),
+            poster: cached
+                .exists()
+                .then(|| cached.to_string_lossy().into_owned()),
+            id: card,
+        });
+    }
+    let _ = reply.send(Response::Libraries(infos));
+    let _ = reply.send(Response::Items(index, cards.clone()));
+    if cards.iter().all(|c| c.poster.is_some()) {
+        return;
+    }
+    for ((_, id, _, _), card) in views.iter().zip(cards.iter_mut()) {
+        if card.poster.is_none() {
+            // Jellyfin draws every library a 16:9 picture of its own.
+            card.poster = crate::media::download_as(
+                agent,
+                cache,
+                &format!("jf-lib-{}", card.id),
+                &image_url(link, id, "Primary", "fillWidth=850&fillHeight=478"),
+            );
+        }
+    }
+    let _ = reply.send(Response::Items(index, cards));
 }
 
 /// Cards per Library page: eight rows of six.
@@ -689,22 +819,10 @@ pub fn library_page(
 
 /// Movie and show libraries ("view:<id>", name), music ones ("music:<id>", name).
 fn views(agent: &ureq::Agent, link: &JellyfinLink) -> Vec<(String, String)> {
-    list(get(
-        agent,
-        link,
-        &format!("/UserViews?userId={}", link.user_id),
-    ))
-    .iter()
-    .filter(|v| text(v, "Type") == "CollectionFolder")
-    .filter_map(|v| {
-        let kind = match v.get("CollectionType").and_then(Value::as_str) {
-            Some("movies" | "tvshows" | "homevideos" | "mixed") | None => "view",
-            Some("music") => "music",
-            _ => return None,
-        };
-        Some((format!("{kind}:{}", text(v, "Id")), text(v, "Name")))
-    })
-    .collect()
+    view_list(agent, link)
+        .into_iter()
+        .map(|(prefix, id, name, _)| (format!("{prefix}:{id}"), name))
+        .collect()
 }
 
 /// Songs of an album in disc and track order.
@@ -1411,6 +1529,118 @@ mod tests {
         assert_eq!(normalize("  "), "");
     }
 
+    #[test]
+    fn the_libraries_row_is_built_from_the_server() {
+        use std::io::{Read, Write};
+        // A stand-in Jellyfin: two libraries the hub shows, one it skips.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&image::RgbImage::from_pixel(32, 18, image::Rgb([9, 9, 9])))
+            .unwrap();
+        let server = thread::spawn(move || {
+            let mut seen = vec![];
+            // UserViews, two counts, two pictures.
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0u8; 2048];
+                let n = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
+                let (kind, body): (&str, Vec<u8>) = if path.starts_with("/UserViews") {
+                    (
+                        "application/json",
+                        serde_json::json!({"Items": [
+                            {"Id": "aaa", "Name": "Movies", "Type": "CollectionFolder", "CollectionType": "movies"},
+                            {"Id": "bbb", "Name": "Music", "Type": "CollectionFolder", "CollectionType": "music"},
+                            {"Id": "ccc", "Name": "Books", "Type": "CollectionFolder", "CollectionType": "books"}
+                        ]})
+                        .to_string()
+                        .into_bytes(),
+                    )
+                } else if path.contains("/Images/Primary") {
+                    ("image/jpeg", jpeg.clone())
+                } else if path.contains("ParentId=aaa") {
+                    (
+                        "application/json",
+                        br#"{"Items":[],"TotalRecordCount":412}"#.to_vec(),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        br#"{"Items":[],"TotalRecordCount":1}"#.to_vec(),
+                    )
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                seen.push(path);
+            }
+            seen
+        });
+        let cache = std::env::temp_dir().join(format!("luma-jf-hub-{port}"));
+        std::fs::create_dir_all(&cache).unwrap();
+        let link = JellyfinLink {
+            server: format!("http://127.0.0.1:{port}"),
+            user_id: "u1".into(),
+            token: "t".into(),
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        fetch(&tx, &cache, &link, vec![(0, LIBRARIES.to_owned())]);
+        let seen = server.join().unwrap();
+        assert!(
+            seen.iter()
+                .any(|p| p.contains("ParentId=bbb") && p.contains("MusicAlbum"))
+        );
+        let mut libraries = vec![];
+        let mut last_cards = vec![];
+        for response in rx.try_iter() {
+            match response {
+                Response::Libraries(l) => libraries = l,
+                Response::Items(0, cards) => last_cards = cards,
+                _ => {}
+            }
+        }
+        assert_eq!(libraries.len(), 2);
+        assert_eq!(
+            (
+                libraries[0].collection.as_str(),
+                libraries[0].detail.as_str()
+            ),
+            ("view:aaa", "412 movies")
+        );
+        assert_eq!(
+            (
+                libraries[1].collection.as_str(),
+                libraries[1].detail.as_str()
+            ),
+            ("music:bbb", "1 album")
+        );
+        assert_eq!(last_cards.len(), 2);
+        assert_eq!(last_cards[0].title, "Movies");
+        assert_eq!(last_cards[0].id, libraries[0].card);
+        // The library pictures were downloaded for the cards.
+        assert!(last_cards.iter().all(|c| {
+            c.poster
+                .as_ref()
+                .is_some_and(|p| std::path::Path::new(p).is_file())
+        }));
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+    #[test]
+    fn libraries_say_what_they_hold() {
+        assert_eq!(library_detail(412, "movies"), "412 movies");
+        assert_eq!(library_detail(1, "tvshows"), "1 show");
+        assert_eq!(library_detail(0, "music"), "0 albums");
+        assert_eq!(library_detail(7, "mixed"), "7 titles");
+        assert_eq!(COLLECTIONS[0], (LIBRARIES, "Libraries"));
+    }
     #[test]
     fn card_ids_are_stable_and_distinct() {
         let a = card_id("f0b3381645f04afb9a0e392e74b6a1b0");

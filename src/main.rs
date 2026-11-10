@@ -1249,11 +1249,17 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
             jellyfin::Response::Linked(link) => {
                 state.preferences.jellyfin = link;
                 state.jellyfin_reset();
-                // Two rows to start with; more from Settings › Stacks.
-                for collection in ["resume", "latest"] {
+                // Three rows to start with: the libraries themselves, then what
+                // to watch next; more from Settings › Stacks.
+                for collection in [jellyfin::LIBRARIES, "resume", "latest"] {
                     let mut stack = stacks::StackConfig {
                         source: "jellyfin".into(),
                         collection: collection.into(),
+                        shape: if collection == jellyfin::LIBRARIES {
+                            stacks::CardShape::Wide
+                        } else {
+                            stacks::CardShape::Poster
+                        },
                         ..Default::default()
                     };
                     stack.name = stacks::row_title(&stack);
@@ -1262,7 +1268,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 }
                 let _ = storage::save(preferences_path, &state.preferences);
                 if linking {
-                    let i = state.preferences.stacks.len() - 2;
+                    let i = state.preferences.stacks.len() - 3;
                     state.server_linked(i);
                 }
                 state.notify(format!(
@@ -1280,6 +1286,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 state.stack_items[index] = items;
             }
             jellyfin::Response::Views(views) => state.jellyfin_views = views,
+            jellyfin::Response::Libraries(libraries) => state.jellyfin_libraries = libraries,
             jellyfin::Response::Details(detail) => state.media_detail(*detail),
             jellyfin::Response::Album(album) => state.album_details(*album),
             jellyfin::Response::Play(mut request) => {
@@ -2406,6 +2413,52 @@ fn run() -> Result<(), String> {
             Ok(tab) if tab.starts_with("tab") => Target::LibTab(tab[3..].parse().unwrap_or(0)),
             _ => Target::LibCard(focus),
         };
+        state.dirty = true;
+    }
+    // Desktop QA of the Jellyfin Libraries row and its page: LUMA_HUB_PREVIEW=1.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("LUMA_HUB_PREVIEW").is_some() {
+        let libraries = [
+            ("Movies", "412 movies", Some("forest.jpg")),
+            ("TV Shows", "87 shows", Some("northern-lights.jpg")),
+            ("Music", "1 album", Some("prism.jpg")),
+            ("Home Videos", "", None),
+        ];
+        state.preferences.stacks = vec![crate::stacks::StackConfig {
+            name: "Libraries".into(),
+            source: "jellyfin".into(),
+            collection: jellyfin::LIBRARIES.into(),
+            shape: crate::stacks::CardShape::Wide,
+            ..Default::default()
+        }];
+        state.jellyfin_libraries = libraries
+            .iter()
+            .enumerate()
+            .map(|(i, (name, detail, _))| jellyfin::LibraryInfo {
+                card: i as i64 + 1,
+                collection: format!("{}:{i}", if *name == "Music" { "music" } else { "view" }),
+                name: (*name).into(),
+                detail: (*detail).into(),
+            })
+            .collect();
+        state.stack_items = vec![
+            libraries
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _, image))| crate::stacks::StackItem {
+                    title: (*name).into(),
+                    poster: image.map(|file| {
+                        assets
+                            .root
+                            .join("wallpapers")
+                            .join(file)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    id: i as i64 + 1,
+                })
+                .collect(),
+        ];
         state.dirty = true;
     }
     #[cfg(debug_assertions)]

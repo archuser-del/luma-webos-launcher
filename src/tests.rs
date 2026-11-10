@@ -3416,6 +3416,75 @@ fn ha_entity(id: &str, name: &str, state: &str) -> crate::smart_home::Entity {
 }
 
 #[test]
+fn jellyfin_libraries_row_opens_each_library_as_a_tab() {
+    use crate::stacks::{CardShape, StackConfig, StackItem};
+    let mut state = ready();
+    state.preferences.stacks = vec![StackConfig {
+        name: "Libraries".into(),
+        source: "jellyfin".into(),
+        collection: crate::jellyfin::LIBRARIES.into(),
+        shape: CardShape::Wide,
+        ..Default::default()
+    }];
+    state.jellyfin_libraries = [
+        ("view:a", "Movies"),
+        ("view:b", "Shows"),
+        ("music:c", "Music"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (collection, name))| crate::jellyfin::LibraryInfo {
+        card: 10 + i as i64,
+        collection: (*collection).into(),
+        name: (*name).into(),
+        detail: String::new(),
+    })
+    .collect();
+    state.stack_items = vec![
+        (0..3)
+            .map(|i| StackItem {
+                title: format!("Library {i}"),
+                poster: None,
+                id: 10 + i,
+            })
+            .collect(),
+    ];
+    // Every card is a library: no View Library card at the end.
+    assert!(crate::stacks::is_hub(&state.preferences.stacks[0]));
+    assert_eq!(crate::stacks::row_len(&state, 0), 3);
+    assert_eq!(
+        crate::stacks::row_title(&state.preferences.stacks[0]),
+        "Libraries"
+    );
+    // The second card opens the page on the second library.
+    state.focus = Target::StackCard(0, 1);
+    assert!(state.activate().is_empty());
+    let library = state.library.as_ref().expect("library page");
+    assert_eq!(library.tabs.len(), 3);
+    assert_eq!(library.tab_id(), "view:b");
+    assert_eq!(library.source, "jellyfin");
+    assert!(!library.square);
+    assert_eq!(library.restore, Target::StackCard(0, 1));
+    // The music card opens square album covers.
+    state.close_library();
+    state.focus = Target::StackCard(0, 2);
+    state.activate();
+    let library = state.library.as_ref().unwrap();
+    assert_eq!(library.tab_id(), "music:c");
+    assert!(library.square);
+    // An ordinary Jellyfin row still ends with View Library.
+    let ordinary = StackConfig {
+        source: "jellyfin".into(),
+        collection: "latest".into(),
+        ..Default::default()
+    };
+    assert!(crate::stacks::ends_with_library(&ordinary));
+    assert!(!crate::stacks::ends_with_library(
+        &state.preferences.stacks[0]
+    ));
+}
+
+#[test]
 fn home_assistant_devices_are_parsed_with_their_dials() {
     let entities = crate::smart_home::parse_states(
         r#"[

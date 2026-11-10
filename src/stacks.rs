@@ -65,6 +65,17 @@ pub fn has_library(source: &str) -> bool {
     matches!(source, "moonlight" | "jellyfin" | "plex")
 }
 
+/// A Jellyfin Libraries row: its cards are the libraries themselves.
+pub fn is_hub(stack: &StackConfig) -> bool {
+    stack.source == "jellyfin" && stack.collection == crate::jellyfin::LIBRARIES
+}
+
+/// Whether this row ends with the View Library card. A Libraries row does
+/// not: each of its cards already opens a library.
+pub fn ends_with_library(stack: &StackConfig) -> bool {
+    has_library(&stack.source) && !is_hub(stack)
+}
+
 /// Posters the n-th visible row shows on Home (the library card not counted).
 pub fn row_shown(state: &crate::state::State, row: usize) -> usize {
     visible_rows(state).nth(row).map_or(0, |(i, _)| {
@@ -87,7 +98,7 @@ pub fn row_len(state: &crate::state::State, row: usize) -> usize {
         return 13;
     }
     visible_rows(state).nth(row).map_or(0, |(_, s)| {
-        row_shown(state, row) + usize::from(has_library(&s.source))
+        row_shown(state, row) + usize::from(ends_with_library(s))
     })
 }
 
@@ -185,6 +196,9 @@ pub fn row_title(stack: &StackConfig) -> String {
             _ => "Games",
         }
         .to_owned();
+    }
+    if is_hub(stack) {
+        return "Libraries".to_owned();
     }
     if matches!(stack.source.as_str(), "jellyfin" | "plex") {
         return collection_label(stack);
