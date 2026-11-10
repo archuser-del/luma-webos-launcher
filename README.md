@@ -7,7 +7,7 @@ Luma replaces the cluttered LG Home with one calm screen: your favorite apps, li
 Free and open source (MIT). Fork it, change it, ship it.
 
 > [!NOTE]
-> **This is a fork.** It builds Luma **2.4.0** under its own app ID, **`com.archbtw.luma`**, so it
+> **This is a fork.** It builds Luma **2.5.0** under its own app ID, **`com.archbtw.luma`**, so it
 > installs beside the original Luma (`com.denisefremov.luma`) with its own settings. What differs
 > from the original:
 >
@@ -20,6 +20,9 @@ Free and open source (MIT). Fork it, change it, ship it.
 >   the Home Assistant web interface opens from the Smart Home tab.
 > - A Jellyfin **Libraries** row shows every library as a wide banner card.
 > - The wallpaper can be a photo frame fed by an ImmichFrame server.
+> - Jellyfin plays files as they are (Direct Play first), keeps HDR in HDR, and has Version and
+>   Quality pickers.
+> - Home shows a Switch button for every HDMI input with a picture.
 >
 > The promo video and most screenshots below show the original Luma, so headline text and widgets
 > look a little different from this build.
@@ -48,14 +51,21 @@ Free and open source (MIT). Fork it, change it, ship it.
 - HDMI input preview and Home Assistant status line.
 - Small, medium, large and text-line sizes, laid out on a grid.
 
+**Inputs**
+
+- When an HDMI input has a picture, Home shows **Switch to PlayStation 5 · HDMI 1** beside the Favorite apps title, one press of Up from your apps. It uses the name you gave the input, else the one the TV reports over HDMI-CEC. Signal detection is most reliable with root; without it, a plugged-in cable counts.
+
 **Movies, series and music (Jellyfin, Plex)**
 
 - Sign in with a code or a QR code on your phone: no typing with the remote.
 - A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
+- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit and just that audio track is converted to FLAC (lossless, up to 7.1), or to Dolby/AAC on a TV without FLAC. Jellyfin only transcodes the video for a codec the TV cannot decode, an image subtitle (PGS, VobSub) that has to be burned in, or a lower quality you pick. The player's top line says what is happening, e.g. "Direct Stream · HDR10 · TrueHD → FLAC".
+- **HDR stays HDR.** HDR10, HLG and Dolby Vision video is never re-encoded (Jellyfin would turn it into SDR), so HDR titles offer no lower qualities. Burning an image subtitle into an HDR film is the one exception, and that subtitle is labelled "burned in, SDR" so it is your choice.
+- **Version and Quality pickers** on the title card: choose between a title's versions (for example 4K HDR and 1080p) and between "Original" and lower qualities for SDR files. Audio, subtitles and quality can also be changed while playing.
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
 - Music: albums, songs and a now-playing screen.
-- Plex support is new and less tested than Jellyfin.
+- Plex support is new and less tested than Jellyfin (the Direct Play and HDR rules above are Jellyfin's).
 
 **Games (Moonlight)**
 
@@ -210,13 +220,13 @@ you only need one of the two.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.4.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.5.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.0.11_all.ipk`.
+`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.1.0_all.ipk`.
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.4.0_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.0.11_all.ipk
+ares-install --device tv com.archbtw.luma_2.5.0_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.1.0_all.ipk
 ```
 
 Coming from the original Luma? It stays installed as a separate app (`com.denisefremov.luma`) with its
@@ -248,7 +258,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.4.0_arm.ipk, player IPK, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.5.0_arm.ipk, player IPK, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):
