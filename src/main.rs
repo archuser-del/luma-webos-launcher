@@ -5,6 +5,7 @@ mod app_artwork;
 mod app_subscription;
 mod branding;
 mod custom_videos;
+mod debug_log;
 mod diagnostics;
 mod font;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -87,6 +88,8 @@ struct Options {
     resolution: Option<Size>,
     capture_size: Option<Size>,
     diagnostics: Option<PathBuf>,
+    /// Write the debug log from the start (also: Settings › System).
+    debug_log: bool,
     profile_frames: Option<usize>,
     weather_test_server: Option<String>,
     test_extra_apps: usize,
@@ -120,7 +123,7 @@ impl Options {
         while let Some(arg) = args.next() {
             if arg == "--help" {
                 println!(
-                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
+                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n  --debug-log         Write a debug log next to the preferences file\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
                 );
                 println!(
                     "\n  --test-extra-apps N  Explicit scroll preview with up to 300 non-launchable extra cards; separate preferences"
@@ -129,6 +132,10 @@ impl Options {
             }
             if arg == "--fullscreen" {
                 result.fullscreen = true;
+                continue;
+            }
+            if arg == "--debug-log" {
+                result.debug_log = true;
                 continue;
             }
             let value = args
@@ -252,7 +259,19 @@ fn effects(
     home: &smart_home::Service,
 ) -> bool {
     for effect in effects {
+        debug_log!("effect {}", effect_name(&effect));
         match effect {
+            Effect::DebugLog(on) => {
+                if on {
+                    // The zone read at startup; set_offset keeps the first one.
+                    start_debug_log(preferences, time::UtcOffset::UTC, "Settings › System");
+                } else {
+                    debug_log::stop();
+                }
+                state.debug_log_file = debug_log::current()
+                    .filter(|_| debug_log::enabled())
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            }
             Effect::Save => {
                 if let Err(error) = storage::save(preferences, &state.preferences) {
                     eprintln!("{error}");
@@ -1035,6 +1054,7 @@ fn immich_tick(state: &mut State, preferences_path: &std::path::Path, visible: b
             match update {
                 immich_frame::Update::Frame(frame) => state.immich_show(frame),
                 immich_frame::Update::Failed(error) => {
+                    debug_log!("ImmichFrame failed: {error}");
                     state.immich_status = Some((error, true));
                     state.dirty = true;
                 }
@@ -1242,6 +1262,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 }
             }
             jellyfin::Response::Failed(message) => {
+                debug_log!("Jellyfin failed: {message}");
                 if state.launching {
                     state.launching = false;
                     state.notify(message.clone());
@@ -1353,6 +1374,7 @@ fn plex_tick(state: &mut State, preferences_path: &std::path::Path, platform: &P
                 state.plex_status = Some("Waiting for sign-in…".into());
             }
             plex::Response::Failed(message) => {
+                debug_log!("Plex failed: {message}");
                 if state.launching {
                     state.launching = false;
                     state.notify(message.clone());
@@ -2144,6 +2166,23 @@ fn log_home_output() {
     }
 }
 
+/// Turns the debug log on and says where it goes.
+fn start_debug_log(preferences: &std::path::Path, offset: time::UtcOffset, why: &str) {
+    match debug_log::start(&debug_log::directory(preferences), offset, why) {
+        Ok(path) => eprintln!("Luma debug log: {}", path.display()),
+        Err(error) => eprintln!("Luma debug log could not start: {error}"),
+    }
+}
+
+/// "OpenUrl" for Effect::OpenUrl(…): the kind, never what it carries.
+fn effect_name(effect: &Effect) -> String {
+    let full = format!("{effect:?}");
+    full.split(['(', '{', ' '])
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn run() -> Result<(), String> {
     let startup = Instant::now();
     // In place of LG's Home executable, before parsing, so option errors are kept too.
@@ -2201,6 +2240,7 @@ fn run() -> Result<(), String> {
     let local_offset = OffsetDateTime::now_local()
         .map(|now| now.offset())
         .unwrap_or(time::UtcOffset::UTC);
+    debug_log::set_offset(local_offset);
     // As LG's Home executable, assets are in the installed package, not beside /usr/bin.
     let root = match options.assets.clone() {
         Some(root) => root,
@@ -2219,6 +2259,17 @@ fn run() -> Result<(), String> {
     } else {
         default_preferences.clone()
     };
+    // The debug log starts before anything else can go wrong: by option, or
+    // by a debug-log file a person put next to preferences.json.
+    let log_flag = debug_log::flag(&preferences_path);
+    if options.debug_log || log_flag.exists() {
+        let why = if options.debug_log {
+            "--debug-log".to_owned()
+        } else {
+            format!("{} exists", log_flag.display())
+        };
+        start_debug_log(&preferences_path, local_offset, &why);
+    }
     // Uploaded video wallpapers join the catalog before preferences load, so
     // their saved selection survives normalization.
     custom_videos::init(&preferences_path);
@@ -2233,7 +2284,13 @@ fn run() -> Result<(), String> {
     } else {
         storage::load(&preferences_path)?
     };
+    if initial_preferences.debug_log {
+        start_debug_log(&preferences_path, local_offset, "Settings › System");
+    }
     let mut state = State::new(initial_preferences);
+    state.debug_log_file = debug_log::current()
+        .filter(|_| debug_log::enabled())
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     let _ = moonlight_service();
     // Desktop game-card mockup and game Home row, using synthetic preview entries.
     #[cfg(debug_assertions)]
@@ -2971,6 +3028,19 @@ fn run() -> Result<(), String> {
             last_ha_view = Some(ha_view);
         }
         while let Some(update) = home_service.try_recv() {
+            match &update {
+                smart_home::Update::Offline => debug_log!("Home Assistant offline"),
+                smart_home::Update::Connected => debug_log!("Home Assistant connected"),
+                smart_home::Update::Error(error) => debug_log!("Home Assistant error: {error}"),
+                smart_home::Update::PairingError(error) => {
+                    debug_log!("Home Assistant pairing error: {error}")
+                }
+                smart_home::Update::SnapshotFailed { id } => {
+                    debug_log!("Home Assistant camera {id}: no picture")
+                }
+                smart_home::Update::SignedOut => debug_log!("Home Assistant signed out"),
+                _ => {}
+            }
             let should_save = matches!(&update, smart_home::Update::Authorized { .. });
             state.accept_ha(update);
             if should_save {

@@ -181,9 +181,17 @@ fn get(agent: &ureq::Agent, link: &PlexLink, path: &str) -> Option<Value> {
         &link.client_id,
         &link.server_token,
     )
-    .call()
-    .ok()?;
-    read(response)
+    .call();
+    match response {
+        Ok(response) => read(response),
+        Err(error) => {
+            crate::debug_log!(
+                "Plex GET {} failed: {error}",
+                crate::debug_log::path_only(path)
+            );
+            None
+        }
+    }
 }
 
 fn text(value: &Value, key: &str) -> String {

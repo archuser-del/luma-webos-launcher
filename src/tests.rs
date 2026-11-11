@@ -4528,3 +4528,45 @@ fn the_mirror_walks_from_the_bar_to_the_widgets_and_headline() {
         state.focus
     );
 }
+
+#[test]
+fn system_has_a_debug_log_switch_that_the_remote_reaches() {
+    use crate::state::{SYSTEM_SECTION, SettingsLevel};
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    state.focus = Target::Sidebar(SYSTEM_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    // Down the System rows to the last one.
+    for _ in 0..6 {
+        if state.focus == Target::Setting(11) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert_eq!(state.focus, Target::Setting(11));
+    assert!(!state.preferences.debug_log);
+    assert_eq!(state.activate(), vec![Effect::Save, Effect::DebugLog(true)]);
+    assert!(state.preferences.debug_log);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Save, Effect::DebugLog(false)]
+    );
+    // The switch is saved with the other settings.
+    state.preferences.debug_log = true;
+    let saved = serde_json::to_value(&state.preferences).unwrap();
+    assert_eq!(saved["debug_log"], true);
+    let back: Preferences = serde_json::from_value(saved).unwrap();
+    assert!(back.debug_log);
+    // Root features sit below the five System rows, never on them.
+    state.root = Some(crate::platform::RootStatus::default());
+    let list = controls(&state);
+    let debug = rect_of(&state, &Target::Setting(11));
+    let wake = list
+        .iter()
+        .find(|c| c.target == Target::Setting(9))
+        .unwrap()
+        .rect;
+    assert!(wake.y >= debug.y + debug.h, "{wake:?} under {debug:?}");
+}

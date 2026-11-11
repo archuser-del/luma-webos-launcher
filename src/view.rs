@@ -3725,6 +3725,7 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                 (5, language.t("quitApp"), "power"),
                 (7, "Original LG Home", "tv"),
                 (8, "Video library · full screen", "tv"),
+                (11, "Debug Log", "list"),
             ]
             .into_iter()
             .enumerate()
@@ -3738,7 +3739,13 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                         rect: Rect::new(640., 164.8 + position as f32 * 84. - s, 1120., 72.),
                         title,
                         icon: Some(icon),
-                        value: None,
+                        value: (index == 11).then(|| {
+                            language.t(if state.preferences.debug_log {
+                                "stateOn"
+                            } else {
+                                "stateOff"
+                            })
+                        }),
                         description: None,
                         selected: false,
                         chevron: false,
@@ -3763,7 +3770,8 @@ fn root_feature_rows(
     let language = state.preferences.language;
     let x = tvos_settings_view::RIGHT + tvos_settings_view::S32;
     let w = tvos_settings_view::WIDTH - 2. * tvos_settings_view::S32;
-    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 4. * 92. + 16. - state.scroll;
+    // Under the five System rows.
+    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 5. * 92. + 16. - state.scroll;
     out.text(
         "ROOT FEATURES",
         Rect::new(x + 32., y + 6., w - 64., 36.),

@@ -352,6 +352,8 @@ pub enum Direction {
 
 #[derive(Debug, PartialEq)]
 pub enum Effect {
+    /// Settings › System › Debug Log switched on or off.
+    DebugLog(bool),
     Save,
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
@@ -538,6 +540,8 @@ pub struct State {
     /// The control the remote left for the tabs or inputs; the arrow back
     /// into the page returns to it (layouts other than the classic bar).
     pub chrome_return: Option<Target>,
+    /// The debug log file this run writes, while the log is on.
+    pub debug_log_file: Option<String>,
     pub inventory: Inventory,
     pub preferences: Preferences,
     pub accent_transition: Option<(u32, u32, Instant)>,
@@ -710,6 +714,7 @@ impl State {
             page: Page::Home,
             focus: Target::Nav(0),
             chrome_return: None,
+            debug_log_file: None,
             inventory: Inventory::default(),
             preferences,
             accent_transition: None,
@@ -2394,6 +2399,22 @@ impl State {
     /// One arrow press. The classic bar is routed by `direction_classic`;
     /// every other layout adds its own way on to, along and off the chrome.
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.direction_routed(direction, controls);
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.direction_routed(direction, controls);
+        crate::debug_log!(
+            "key {direction:?}: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn direction_routed(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         use crate::layout::{Layout, is_chrome};
         let layout = self.preferences.layout;
         if layout == Layout::Classic || self.ambient_on() {
@@ -4107,6 +4128,22 @@ impl State {
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.activate_target();
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.activate_target();
+        crate::debug_log!(
+            "key OK: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn activate_target(&mut self) -> Vec<Effect> {
         if self.ambient_on() {
             self.leave_ambient();
             return vec![];
@@ -5153,6 +5190,11 @@ impl State {
                         return vec![];
                     }
                     5 => return vec![Effect::Quit],
+                    11 => {
+                        self.preferences.debug_log = !self.preferences.debug_log;
+                        self.dirty = true;
+                        return vec![Effect::Save, Effect::DebugLog(self.preferences.debug_log)];
+                    }
                     9 | 10 => {
                         let Some(root) = self.root.as_mut() else {
                             return vec![];
@@ -5478,6 +5520,22 @@ impl State {
     }
 
     pub fn back(&mut self) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.back_step();
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.back_step();
+        crate::debug_log!(
+            "key Back: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn back_step(&mut self) -> Vec<Effect> {
         if self.ambient_on() {
             self.leave_ambient();
             return vec![];

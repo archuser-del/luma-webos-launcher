@@ -224,9 +224,26 @@ fn get(agent: &ureq::Agent, link: &JellyfinLink, path: &str) -> Option<Value> {
     let response = agent
         .get(&format!("{}{path}", link.server))
         .header("Authorization", &auth(&link.device_id, &link.token))
-        .call()
-        .ok()?;
-    read(response)
+        .call();
+    let value = match response {
+        Ok(response) => read(response),
+        Err(error) => {
+            crate::debug_log!(
+                "Jellyfin GET {}{} failed: {error}",
+                link.server,
+                crate::debug_log::path_only(path)
+            );
+            return None;
+        }
+    };
+    if value.is_none() {
+        crate::debug_log!(
+            "Jellyfin GET {}{}: unreadable answer",
+            link.server,
+            crate::debug_log::path_only(path)
+        );
+    }
+    value
 }
 
 /// "192.168.1.5" → "http://192.168.1.5:8096"; keeps a scheme, port and path given.
