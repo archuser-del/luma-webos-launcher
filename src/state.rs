@@ -39,11 +39,13 @@ pub const SCENE_FIRED: f32 = 2.;
 pub const SMART_REVEAL_TOP: f32 = 186.;
 pub const SYSTEM_SECTION: usize = 5;
 pub const APPEARANCE_SECTION: usize = 6;
-pub const SECTION_COUNT: usize = 8;
+pub const SECTION_COUNT: usize = 9;
 /// Settings › Stacks (rows of media on Home).
 pub const STACKS_SECTION: usize = 7;
 /// Root order: Appearance and Stacks follow Wallpaper; other IDs keep their mapping.
-pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 7, 2, 3, 4, 5];
+/// Settings › Layout: the designs for the bars and for Home.
+pub const LAYOUT_SECTION: usize = 8;
+pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 8, 7, 2, 3, 4, 5];
 pub const APPS_COLUMNS: usize = 6;
 pub const HOME_STRIP_LEFT: f32 = 84.;
 pub const HOME_STRIP_RIGHT: f32 = 1836.;
@@ -105,8 +107,8 @@ pub enum Target {
     PhraseSubtitleSize,
     UiSounds,
     Screensaver,
-    /// Settings › Appearance › Layout: OK steps to the next layout.
-    LayoutCycle,
+    /// Settings › Layout: one of the designs.
+    LayoutChoice(usize),
     UiResolutionOpen,
     UiResolutionPick(usize),
     HeadingFontPick(usize),
@@ -2316,6 +2318,7 @@ impl State {
             SYSTEM_SECTION => Target::Setting(3),
             APPEARANCE_SECTION => Target::AccentChoice(7),
             STACKS_SECTION => Target::StackRow(0),
+            LAYOUT_SECTION => Target::LayoutChoice(self.preferences.layout.index()),
             INPUTS_SECTION => self
                 .inventory
                 .inputs
@@ -3256,6 +3259,24 @@ impl State {
                     return vec![];
                 }
             }
+            // Settings › Layout: one column of designs under the Back arrow.
+            if self.page == Page::Settings
+                && self.subpage.is_none()
+                && self.settings_level == SettingsLevel::Section
+                && self.section == LAYOUT_SECTION
+                && let Target::LayoutChoice(i) = self.focus
+            {
+                let last = crate::layout::Layout::ALL.len() - 1;
+                let next = match direction {
+                    Direction::Up if i == 0 => Target::SettingsBack,
+                    Direction::Up => Target::LayoutChoice(i - 1),
+                    Direction::Down => Target::LayoutChoice((i + 1).min(last)),
+                    Direction::Left => Target::SettingsBack,
+                    Direction::Right => return self.activate(),
+                };
+                self.focus(next, controls);
+                return vec![];
+            }
             // Dedicated UI density choice. Always return to parent cell on Back.
             if self.page == Page::Settings
                 && self.settings_level == SettingsLevel::UiResolution
@@ -3367,7 +3388,6 @@ impl State {
                         | Target::PhraseSubtitleSize
                         | Target::UiSounds
                         | Target::Screensaver
-                        | Target::LayoutCycle
                         | Target::UiResolutionOpen
                 ) && self.section == APPEARANCE_SECTION
                     && self.settings_level == SettingsLevel::Section
@@ -3388,8 +3408,6 @@ impl State {
                         (Target::UiSounds, Direction::Up) => Target::PhraseSubtitleSize,
                         (Target::UiSounds, Direction::Down) => Target::Screensaver,
                         (Target::Screensaver, Direction::Up) => Target::UiSounds,
-                        (Target::Screensaver, Direction::Down) => Target::LayoutCycle,
-                        (Target::LayoutCycle, Direction::Up) => Target::Screensaver,
                         (Target::UiResolutionOpen, Direction::Up) => Target::AccentOption(2),
                         (Target::UiResolutionOpen, Direction::Down) => Target::HeadingFontOpen,
                         (_, Direction::Left) => Target::SettingsBack,
@@ -4698,11 +4716,13 @@ impl State {
                 self.preferences.ui_sounds = !self.preferences.ui_sounds;
                 return vec![Effect::Save];
             }
-            Target::LayoutCycle => {
-                self.preferences.layout = self.preferences.layout.next();
-                self.chrome_return = None;
-                self.dirty = true;
-                return vec![Effect::Save];
+            Target::LayoutChoice(index) => {
+                if let Some(&layout) = crate::layout::Layout::ALL.get(index) {
+                    self.preferences.layout = layout;
+                    self.chrome_return = None;
+                    self.dirty = true;
+                    return vec![Effect::Save];
+                }
             }
             Target::Screensaver => {
                 let steps = SCREENSAVER_STEPS;

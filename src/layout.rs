@@ -70,9 +70,29 @@ impl Layout {
         }
     }
 
-    pub fn next(self) -> Self {
-        let at = Self::ALL.iter().position(|l| *l == self).unwrap_or(0);
-        Self::ALL[(at + 1) % Self::ALL.len()]
+    /// Its place in `ALL`, the order Settings lists the designs in.
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|l| *l == self).unwrap_or(0)
+    }
+
+    /// What this design calls its Home.
+    pub fn home_name(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic Home",
+            Self::Rail => "Shelf Home",
+            Self::Dock => "Stage Home",
+            Self::Flip => "Mirror Home",
+        }
+    }
+
+    /// One line for Settings.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Classic => "Bar on top, headline above the apps",
+            Self::Rail => "Rail on the left, apps on a top shelf",
+            Self::Dock => "Bar at the bottom, wallpaper on top",
+            Self::Flip => "Mirrored bar, headline on the right",
+        }
     }
 
     /// How far the page content moves to make room for the chrome.

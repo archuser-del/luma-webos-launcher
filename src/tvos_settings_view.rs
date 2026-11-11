@@ -23,8 +23,11 @@ pub(super) const STEP: f32 = ROW_HEIGHT + S8;
 pub(super) const PANEL_RADIUS: f32 = 28.;
 pub(super) const CELL_RADIUS: f32 = 16.;
 pub(super) const MEDIA_RADIUS: f32 = 12.;
-// Root: 32 top + six 80px rows + five 12px gaps + 32 bottom.
-const ROOT_HEIGHT: f32 = 2. * S32 + 8. * ROW_HEIGHT + 7. * 12.;
+// Root: 32 top + nine 72px rows + eight 10px gaps + 32 bottom. Nine of the
+// 80px rows other pages use would not fit the panel.
+const ROOT_ROW: f32 = 72.;
+const ROOT_GAP: f32 = 10.;
+const ROOT_HEIGHT: f32 = 2. * S32 + 9. * ROOT_ROW + 8. * ROOT_GAP;
 const PREVIEW_MIN: f32 = 568.;
 const BACK_SIZE: f32 = 56.;
 
@@ -73,6 +76,14 @@ fn list_cell(index: usize) -> Rect {
         TOP + S32 + index as f32 * 92.,
         WIDTH - 2. * S32,
         ROW_HEIGHT,
+    )
+}
+fn root_cell(index: usize) -> Rect {
+    Rect::new(
+        RIGHT + S32,
+        TOP + S32 + index as f32 * (ROOT_ROW + ROOT_GAP),
+        WIDTH - 2. * S32,
+        ROOT_ROW,
     )
 }
 fn trunc(assets: &Assets, value: &str, style: TextStyle, w: f32) -> String {
@@ -482,8 +493,8 @@ fn art_preview(
 fn root(out: &mut Scene, state: &State, assets: &Assets) {
     panels(out, ROOT_HEIGHT);
     let selected = match state.focus {
-        Target::Sidebar(n) => n.min(7),
-        _ => state.section.min(7),
+        Target::Sidebar(n) => n.min(8),
+        _ => state.section.min(8),
     };
     let names = [
         "General",
@@ -494,6 +505,7 @@ fn root(out: &mut Scene, state: &State, assets: &Assets) {
         "System",
         "Appearance",
         "Stacks",
+        "Layout",
     ];
     let hints = [
         "Language, clock and motion",
@@ -504,6 +516,7 @@ fn root(out: &mut Scene, state: &State, assets: &Assets) {
         "Device and launcher controls",
         "Accent color and highlights",
         "Rows of media on Home",
+        state.preferences.layout.summary(),
     ];
     let widgets = &state.preferences.widgets;
     let shown = widgets
@@ -526,10 +539,13 @@ fn root(out: &mut Scene, state: &State, assets: &Assets) {
         Some(assets.version.trim()),
         Some(state.preferences.accent.id.as_str()),
         None,
+        Some(state.preferences.layout.name()),
     ];
     let preview_start = out.draw.len();
     if selected == crate::state::WEATHER_SECTION {
         widgets_settings::preview(out, state, assets, None, ROOT_HEIGHT);
+    } else if selected == crate::state::LAYOUT_SECTION {
+        layout_preview(out, state, assets, state.preferences.layout, ROOT_HEIGHT);
     } else {
         art_preview(
             out,
@@ -550,7 +566,7 @@ fn root(out: &mut Scene, state: &State, assets: &Assets) {
             state,
             assets,
             Target::Sidebar(i),
-            list_cell(pos),
+            root_cell(pos),
             CellContent {
                 name: names[i],
                 value: values[i],
@@ -562,6 +578,185 @@ fn root(out: &mut Scene, state: &State, assets: &Assets) {
         );
     }
 }
+/// Settings › Layout: the designs in one column, the focused one drawn in
+/// miniature on the left.
+const LAYOUT_HEIGHT: f32 = 660.;
+fn layout_page(out: &mut Scene, state: &State, assets: &Assets) {
+    use crate::layout::Layout;
+    panels(out, LAYOUT_HEIGHT);
+    let shown = match state.focus {
+        Target::LayoutChoice(i) => Layout::ALL.get(i).copied(),
+        _ => None,
+    }
+    .unwrap_or(state.preferences.layout);
+    let start = out.draw.len();
+    layout_preview(out, state, assets, shown, LAYOUT_HEIGHT);
+    out.settings_sidebar_range = start..out.draw.len();
+    for (i, layout) in Layout::ALL.into_iter().enumerate() {
+        cell(
+            out,
+            state,
+            assets,
+            Target::LayoutChoice(i),
+            list_cell(i),
+            CellContent {
+                name: layout.name(),
+                value: Some(layout.home_name()),
+                desc: None,
+                chevron: false,
+                checked: state.preferences.layout == layout,
+                partial: false,
+            },
+        );
+    }
+}
+
+/// A design in miniature with its name and one line about it.
+fn layout_preview(out: &mut Scene, state: &State, assets: &Assets, layout: Layout, h: f32) {
+    let back = !(state.settings_level == SettingsLevel::Root && state.subpage.is_none());
+    let title_y = TOP + h - 154.;
+    let top = TOP + S32 + if back { BACK_SIZE + S16 } else { 0. };
+    let w = LEFT_W - 2. * S32;
+    let stage = Rect::new(
+        LEFT + S32,
+        top + ((title_y - S24 - top - w * 9. / 16.) / 2.).max(0.),
+        w,
+        w * 9. / 16.,
+    );
+    layout_miniature(out, state, assets, layout, stage);
+    let text_w = LEFT_W - 2. * S24;
+    out.text(
+        layout.name(),
+        Rect::new(LEFT + S24, title_y, text_w, 44.),
+        text(31., 600, 0.),
+        WHITE,
+        true,
+    );
+    out.text(
+        trunc(assets, layout.summary(), text(25., 500, 0.), text_w),
+        Rect::new(LEFT + S24, title_y + 52., text_w, 40.),
+        text(25., 500, 0.),
+        c(0xffffff, 0.68),
+        true,
+    );
+}
+
+/// The screen at rest, drawn small: where the clock, tabs, inputs, headline,
+/// widgets, Favorites and the first content row sit in `layout`.
+fn layout_miniature(out: &mut Scene, state: &State, assets: &Assets, layout: Layout, p: Rect) {
+    let k = p.w / 1920.;
+    let at = |x: f32, y: f32, w: f32, h: f32| {
+        // Nothing reaches past the bottom of the small screen.
+        let h = h.min(1080. - y).max(0.);
+        Rect::new(p.x + x * k, p.y + y * k, w * k, h * k)
+    };
+    out.image(
+        assets.path(format!(
+            "wallpapers/{}.jpg",
+            if matches!(state.preferences.background.as_str(), "video" | "immich") {
+                "dunes"
+            } else {
+                &state.preferences.background
+            }
+        )),
+        p,
+        MEDIA_RADIUS,
+        false,
+    );
+    out.shape(p, MEDIA_RADIUS, c(0x05080d, 0.48));
+    let glass = c(0x10141b, 0.86);
+    let line = c(0xffffff, 0.16);
+    let (first, second) = state.accent_colors();
+    let (dx, dy) = layout.body_offset();
+    // Clock: the time, the date under or beside it.
+    let (time, date) = match layout {
+        Layout::Classic => (at(84., 54., 190., 56.), at(84., 122., 320., 20.)),
+        Layout::Flip => (at(865., 54., 190., 56.), at(800., 122., 320., 20.)),
+        Layout::Rail => (at(1686., 54., 190., 56.), at(1556., 122., 320., 20.)),
+        Layout::Dock => (at(120., 970., 130., 48.), at(270., 984., 260., 20.)),
+    };
+    // Tabs: the bar and the selected tab in it; then the input circles.
+    let (bar, tab, circles): (Rect, Rect, [Rect; 3]) = match layout {
+        Layout::Classic => (
+            at(780., 44., 360., 68.),
+            at(788., 52., 110., 52.),
+            [0., 1., 2.].map(|i| at(1768. - i * 84., 44., 68., 68.)),
+        ),
+        Layout::Flip => (
+            at(1476., 44., 360., 68.),
+            at(1484., 52., 110., 52.),
+            [0., 1., 2.].map(|i| at(84. + i * 84., 44., 68., 68.)),
+        ),
+        Layout::Rail => (
+            at(24., 44., 72., 196.),
+            at(32., 52., 56., 56.),
+            [0., 1., 2.].map(|i| at(26., 968. - i * 80., 68., 68.)),
+        ),
+        Layout::Dock => (
+            at(84., 952., 1752., 84.),
+            at(788., 968., 110., 52.),
+            [0., 1., 2.].map(|i| at(1760. - i * 80., 960., 68., 68.)),
+        ),
+    };
+    // Home: headline, widget, Favorites, the first content row.
+    let (headline, widget, tiles_y, row_y) = match layout {
+        Layout::Classic => (
+            at(84., 316., 1040., 70.),
+            at(1270., 310., 566., 322.),
+            730.,
+            990.,
+        ),
+        Layout::Flip => (
+            at(796., 316., 1040., 70.),
+            at(84., 310., 566., 322.),
+            730.,
+            990.,
+        ),
+        Layout::Rail => (
+            at(84. + dx, 434., 1040., 70.),
+            at(1270. + dx, 428., 566., 322.),
+            208.,
+            866.,
+        ),
+        Layout::Dock => (
+            at(84., 424., 1040., 70.),
+            at(1270., 144., 566., 322.),
+            738. + dy,
+            // Under the dock until the remote goes down to it.
+            1080.,
+        ),
+    };
+    out.shape(headline, headline.h / 2.6, c(0xffffff, 0.92));
+    out.shape(widget, 28. * k, c(0x3f7fe0, 0.92));
+    for i in 0..6 {
+        let tile = at(84. + dx + i as f32 * 296.4, tiles_y, 270., 154.4);
+        if tile.x + tile.w <= p.x + p.w + 0.5 {
+            out.shape(tile, 19. * k, c(0xffffff, 0.34));
+        }
+    }
+    for i in 0..3 {
+        let card = at(84. + dx + i as f32 * 592.8, row_y, 566., 318.);
+        if card.h > 0. && card.x + card.w <= p.x + p.w + 0.5 {
+            out.shape(card, 19. * k, c(0xffffff, 0.2));
+        }
+    }
+    out.shape(time, time.h / 3., c(0xffffff, 0.95));
+    out.shape(date, date.h / 2., c(0xffffff, 0.5));
+    let radius = bar.w.min(bar.h) / 2.;
+    out.shape(bar, radius, glass);
+    out.border(bar, radius, 1., line);
+    out.draw.push(Draw::DiagonalGradient(
+        tab,
+        tab.w.min(tab.h) / 2.,
+        c(first, 1.),
+        c(second, 1.),
+    ));
+    for circle in circles {
+        out.shape(circle, circle.w / 2., glass);
+        out.border(circle, circle.w / 2., 1., line);
+    }
+}
+
 fn wallpaper(out: &mut Scene, state: &State, assets: &Assets) {
     let h = 740.;
     panels(out, h);
@@ -1327,22 +1522,6 @@ fn appearance(out: &mut Scene, state: &State, assets: &Assets) {
         CellContent {
             name: "Screensaver",
             value: Some(&screensaver),
-            desc: None,
-            chevron: false,
-            checked: false,
-            partial: false,
-        },
-    );
-    // Where the tabs, inputs and clock sit; OK steps through the layouts.
-    cell(
-        out,
-        state,
-        assets,
-        Target::LayoutCycle,
-        Rect::new(x, opt_y + 44. + 12. * 92., WIDTH - 2. * S32, ROW_HEIGHT),
-        CellContent {
-            name: "Layout",
-            value: Some(state.preferences.layout.name()),
             desc: None,
             chevron: false,
             checked: false,
@@ -2674,6 +2853,9 @@ pub(super) fn render(out: &mut Scene, state: &State, assets: &Assets) {
         }
         SettingsLevel::Section if state.section == crate::state::STACKS_SECTION => {
             stacks_list(out, state, assets)
+        }
+        SettingsLevel::Section if state.section == crate::state::LAYOUT_SECTION => {
+            layout_page(out, state, assets)
         }
         SettingsLevel::StackAdd => stack_add(out, state, assets),
         SettingsLevel::MoonlightHosts => moonlight_hosts(out, state, assets),

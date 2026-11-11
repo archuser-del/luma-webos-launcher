@@ -2201,7 +2201,7 @@ fn settings_v2_pointer_back_at_each_depth_returns_to_parent() {
     );
 }
 #[test]
-fn settings_v2_glass_rows_are_exactly_80px_with_no_left_row_icons() {
+fn settings_root_rows_share_one_size_with_no_left_row_icons() {
     let mut state = ready();
     state.open_settings();
     state.preferences.reduced_motion = true;
@@ -2211,10 +2211,11 @@ fn settings_v2_glass_rows_are_exactly_80px_with_no_left_row_icons() {
         .iter()
         .filter(|c| matches!(c.target, Target::Sidebar(_)))
         .collect();
-    assert_eq!(rows.len(), 8);
+    // Nine sections: 72px rows, so the list fits the panel without scrolling.
+    assert_eq!(rows.len(), 9);
     assert!(
         rows.iter()
-            .all(|r| r.rect.h == 80. && r.rect.x == 864. && r.rect.w == 940.)
+            .all(|r| r.rect.h == 72. && r.rect.x == 864. && r.rect.w == 940.)
     );
     assert!(layout.draw.iter().any(
         |d| matches!(d,crate::renderer::Draw::Shape(r, radius, _,color)
@@ -2643,7 +2644,7 @@ fn video_sources_and_categories_have_distinct_pointer_hitboxes() {
 }
 
 #[test]
-fn settings_root_six_rows_have_symmetric_32px_inner_padding() {
+fn settings_root_rows_have_symmetric_32px_inner_padding() {
     let mut state = ready();
     state.open_settings();
     state.preferences.reduced_motion = true;
@@ -2654,13 +2655,14 @@ fn settings_root_six_rows_have_symmetric_32px_inner_padding() {
         .filter_map(crate::view::tvos_settings_view::backdrop_rect)
         .collect::<Vec<_>>();
     assert_eq!(panels.len(), 6);
-    assert!(panels.iter().all(|r| (r.h - 788.).abs() < 0.01));
+    // 32 + nine 72px rows + eight 10px gaps + 32.
+    assert!(panels.iter().all(|r| (r.h - 792.).abs() < 0.01));
     let last = layout
         .controls
         .iter()
         .find(|c| c.target == Target::Sidebar(5))
         .unwrap();
-    assert!((last.rect.y + last.rect.h + 32. - (184. + 788.)).abs() < 0.01);
+    assert!((last.rect.y + last.rect.h + 32. - (184. + 792.)).abs() < 0.01);
 }
 #[test]
 fn settings_backdrops_stay_in_place_during_content_cascade_and_height_change() {
@@ -3867,20 +3869,58 @@ fn a_saved_layout_loads_by_name_and_an_unknown_one_falls_back() {
 }
 
 #[test]
-fn the_layout_row_in_appearance_steps_through_every_layout() {
+fn settings_has_a_layout_page_that_picks_any_design() {
     use crate::layout::Layout;
+    use crate::state::{LAYOUT_SECTION, SECTION_ORDER, SettingsLevel};
     let mut state = ready();
-    state.focus = Target::LayoutCycle;
-    let mut seen = vec![state.preferences.layout];
-    for _ in 0..Layout::ALL.len() - 1 {
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    // Layout is a row of its own on the Settings list, after Appearance.
+    let row = SECTION_ORDER
+        .iter()
+        .position(|s| *s == LAYOUT_SECTION)
+        .unwrap();
+    assert_eq!(SECTION_ORDER[row - 1], crate::state::APPEARANCE_SECTION);
+    let list = controls(&state);
+    let rows: Vec<_> = list
+        .iter()
+        .filter(|c| matches!(c.target, Target::Sidebar(_)))
+        .collect();
+    assert_eq!(rows.len(), SECTION_ORDER.len());
+    // All nine rows fit the glass panel.
+    let bottom = rows.iter().map(|c| c.rect.y + c.rect.h).fold(0., f32::max);
+    assert!(bottom <= 184. + 808. - 32., "the last row ends at {bottom}");
+    state.focus = Target::Sidebar(LAYOUT_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    assert_eq!(state.focus, Target::LayoutChoice(0), "the design in use");
+    let list = controls(&state);
+    for (i, _) in Layout::ALL.iter().enumerate() {
+        assert!(list.iter().any(|c| c.target == Target::LayoutChoice(i)));
+    }
+    // Down the column; OK picks, and the page stays open in the new design.
+    for (i, layout) in Layout::ALL.into_iter().enumerate().skip(1) {
+        press(&mut state, Direction::Down);
+        assert_eq!(state.focus, Target::LayoutChoice(i));
         assert_eq!(state.activate(), vec![Effect::Save]);
-        seen.push(state.preferences.layout);
+        assert_eq!(state.preferences.layout, layout);
+        assert_eq!(state.settings_level, SettingsLevel::Section);
+        let list = controls(&state);
+        assert!(list.iter().any(|c| c.target == Target::LayoutChoice(i)));
     }
-    for layout in Layout::ALL {
-        assert!(seen.contains(&layout), "{layout:?} was skipped");
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::LayoutChoice(Layout::ALL.len() - 1));
+    // Up to the top, then the Back arrow; Back returns to the Layout row.
+    for _ in 0..Layout::ALL.len() {
+        press(&mut state, Direction::Up);
     }
-    assert_eq!(state.activate(), vec![Effect::Save]);
-    assert_eq!(state.preferences.layout, seen[0]);
+    assert_eq!(state.focus, Target::SettingsBack);
+    state.back();
+    assert_eq!(state.settings_level, SettingsLevel::Root);
+    assert_eq!(state.focus, Target::Sidebar(LAYOUT_SECTION));
+    // Opening it again starts on the design in use.
+    state.activate();
+    assert_eq!(state.focus, Target::LayoutChoice(Layout::Flip.index()));
 }
 
 #[test]

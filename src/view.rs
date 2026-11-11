@@ -3521,7 +3521,8 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
         && (state.settings_level != crate::state::SettingsLevel::Section
             || state.section == 1
             || state.section == crate::state::APPEARANCE_SECTION
-            || state.section == crate::state::STACKS_SECTION)
+            || state.section == crate::state::STACKS_SECTION
+            || state.section == crate::state::LAYOUT_SECTION)
     {
         tvos_settings_view::render(out, state, assets);
         return;

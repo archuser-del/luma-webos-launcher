@@ -43,7 +43,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.
 - Photo-frame wallpaper from [Immich](https://immich.app): **Settings › Wallpaper › ImmichFrame Photos** connects an [ImmichFrame](https://immichframe.dev) server (scan the QR code, type its address and, if it has one, its authentication secret). Luma shows a new photo every 15 seconds to 15 minutes, with the place and date it was taken. Portrait photos are shown whole over a soft blur.
 - Frosted-glass UI with one accent gradient, adjustable colors, heading and text fonts, and UI resolution (Auto / 4K / 1440p / 1080p).
-- Four layouts for the tabs, input buttons and clock, in **Settings › Appearance › Layout**: **Classic** (all along the top), **Rail** (icon tabs down the left edge, inputs at its foot, clock top right), **Dock** (one glass bar at the bottom) and **Mirror** (inputs left, clock in the middle, tabs right). The remote follows the layout: Left of the page is the rail, Down past the last row is the dock, and the arrow back returns to the card you left.
+- Four layouts for the tabs, input buttons and clock, on their own page, **Settings › Layout**, each with a small diagram of where everything sits: **Classic** (all along the top), **Rail** (icon tabs down the left edge, inputs at its foot, clock top right), **Dock** (one glass bar at the bottom) and **Mirror** (inputs left, clock in the middle, tabs right). The remote follows the layout: Left of the page is the rail, Down past the last row is the dock, and the arrow back returns to the card you left.
 - A tech-themed headline that comments on the weather ("Thermal throttling: off.", "Packet loss: rain."), plus a clock and date. Prefer a plain greeting? Switch **Settings › General › Greeting** from Tech to Classic (also tech themed: "System booted. Good morning.").
 - LG's own apps (Multi View, Gallery, Home Hub, Camera, Web Browser, LG Link, Sports, Memory Care and the like) start hidden. Live TV stays. Unhide any of them from **Apps › Hidden**.
 
@@ -247,12 +247,12 @@ you only need one of the two.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.5.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
 `ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.1.0_all.ipk`.
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.5.0_arm.ipk
+ares-install --device tv com.archbtw.luma_2.6.0_arm.ipk
 ares-install --device tv com.archbtw.luma.player_0.1.0_all.ipk
 ```
 
@@ -285,7 +285,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.5.0_arm.ipk, player IPK, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.0_arm.ipk, player IPK, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):
