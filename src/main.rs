@@ -2955,6 +2955,9 @@ fn run() -> Result<(), String> {
     // Whether a staged Home's relaunch reached the front; see platform::ForegroundCheck.
     let mut foreground = platform::ForegroundCheck::default();
     let mut press: Option<Press> = None;
+    // A Magic Remote press on nothing at all on Home: its release clears
+    // Home away to the wallpaper.
+    let mut empty_press = false;
     // When Up/Down started being held, to speed up long Settings lists.
     let mut vertical_held: Option<std::time::Instant> = None;
     let mut drag: Option<Drag> = None;
@@ -3968,6 +3971,10 @@ fn run() -> Result<(), String> {
                         });
                         state.stop_kinetic();
                     }
+                    empty_press = mouse_btn == MouseButton::Left
+                        && scene.modal.is_none()
+                        && hit(&scene.controls, &window, x, y, &state).is_none()
+                        && state.home_can_clear();
                     if let Some(target) = hit(&scene.controls, &window, x, y, &state)
                         && state.moving.is_none()
                     {
@@ -4041,6 +4048,13 @@ fn run() -> Result<(), String> {
                         }
                         state.dirty = true;
                         press = None;
+                    } else if std::mem::take(&mut empty_press)
+                        && hit(&scene.controls, &window, x, y, &state).is_none()
+                        && state.home_can_clear()
+                    {
+                        // Clicked beside everything: Home clears to the wallpaper.
+                        press = None;
+                        state.clear_home();
                     } else {
                         match press.take() {
                             Some(held)

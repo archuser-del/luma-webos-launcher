@@ -6032,6 +6032,33 @@ impl State {
         })
     }
 
+    /// Home with nothing open over it: a click beside everything may clear it.
+    pub fn home_can_clear(&self) -> bool {
+        self.page == Page::Home
+            && !self.ambient_on()
+            && self.playback.is_none()
+            && self.movie.is_none()
+            && self.game.is_none()
+            && self.album.is_none()
+            && self.library.is_none()
+            && self.overlay.is_none()
+            && self.ha_detail.is_none()
+            && self.ha_camera.is_none()
+            && self.widget_detail.is_none()
+            && self.widget_edit.is_none()
+            && self.moving.is_none()
+    }
+
+    /// The Magic Remote clicked on no app, button or widget: everything
+    /// leaves in the clean-wallpaper animation (the screensaver's).
+    pub fn clear_home(&mut self) {
+        if self.home_can_clear() {
+            crate::debug_log!("clicked beside everything: Home clears to the wallpaper");
+            self.ambient = Some((true, Instant::now()));
+            self.dirty = true;
+        }
+    }
+
     /// Any key, click or wheel brings the interface back, like tvOS.
     pub fn leave_ambient(&mut self) {
         if self.ambient_on() {

@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.2.0';
+const PLAYER_VERSION = '0.3.0';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -64,12 +64,20 @@ function clock(sec) {
 function hm(d) {
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+// A continuous Jellyfin stream (Direct Stream MKV) starts where it was
+// asked to: the element counts from 0, the film from `offset` seconds.
+let offset = 0;
+let progressive = false;
+function pos() {
+  return offset + (video.currentTime || 0);
+}
 function duration() {
   const d = video.duration;
+  if (progressive) return (p.durationMs || 0) / 1000 || offset + (isFinite(d) ? d : 0);
   return isFinite(d) && d > 0 ? d : (p.durationMs || 0) / 1000;
 }
 function now() {
-  return pendingSeek !== null ? pendingSeek : video.currentTime || 0;
+  return pendingSeek !== null ? pendingSeek : pos();
 }
 function icon(name) {
   return icons[name] || '';
@@ -149,7 +157,7 @@ function render() {
   let buffered = 0;
   for (let i = 0; i < video.buffered.length; i++) {
     if (video.buffered.start(i) <= video.currentTime + 1)
-      buffered = Math.max(buffered, video.buffered.end(i));
+      buffered = Math.max(buffered, offset + video.buffered.end(i));
   }
   $('buffered').style.width = (d ? Math.min(1, buffered / d) * WIDE : 0) + 'px';
   $('pos').textContent = clock(t);
@@ -172,7 +180,7 @@ function render() {
   } else next.classList.add('hidden');
   // Subtitles from the downloaded file.
   const cap = $('caption');
-  const ms = video.currentTime * 1000;
+  const ms = pos() * 1000;
   const cue = subtitleIndex >= 0 ? cues.find((c) => c.start <= ms && c.end >= ms) : null;
   if (cue) {
     cap.textContent = cue.text;
@@ -505,6 +513,8 @@ function jfStart(at) {
     subtitle: typeof j.subtitle === 'number' ? j.subtitle : null,
     quality: j.quality || null,
     forceStream: false,
+    hls: false,
+    start: at,
     plan: null,
   };
   const chosenAudio = info.audio.findIndex((a) => a.index === jf.audio);
@@ -573,6 +583,8 @@ function jfContext() {
     subtitle: jf.subtitle,
     quality: jf.quality,
     forceStream: jf.forceStream,
+    hls: jf.hls,
+    start: jf.start || 0,
   };
 }
 // A choice changed: the same stream only switches tracks; another stream
@@ -588,6 +600,8 @@ function logPlan(why) {
   );
 }
 function jfReplan() {
+  // A continuous stream is asked for again from where the picture is.
+  jf.start = pos();
   const next = window.LumaStreams.plan(jfContext());
   const old = jf.plan;
   jf.plan = next;
@@ -597,7 +611,7 @@ function jfReplan() {
     enableTrack(next.audioPosition);
     return;
   }
-  open(next.url, video.currentTime || 0);
+  open(next.url, jf.start);
 }
 // The next or previous episode: Jellyfin is asked for its file first.
 function jfEpisode(e, done) {
@@ -643,6 +657,8 @@ let opening = null;
 // convert. The address and its keys stay out (log.js drops query strings).
 const STREAM_KEYS = [
   'static',
+  'SegmentContainer',
+  'StartTimeTicks',
   'VideoCodec',
   'AllowVideoStreamCopy',
   'AudioCodec',
@@ -666,6 +682,10 @@ function streamSettings(url) {
 function open(url, at) {
   plog('open stream', url, at > 0 ? `at ${Math.round(at)} s` : '', streamSettings(url));
   playing = false;
+  // The MKV stream already starts at `at` (StartTimeTicks); others seek.
+  progressive = !!(jf && jf.plan && jf.plan.progressive && jf.plan.url === url);
+  offset = progressive ? at : 0;
+  const jumpTo = progressive ? 0 : at;
   showNote('Loading…');
   // Tear the previous stream down first: on webOS a bare src swap can leave
   // the old media pipeline playing next to the new one.
@@ -677,7 +697,7 @@ function open(url, at) {
   const start = () => {
     video.removeEventListener('loadedmetadata', start);
     opening = null;
-    if (at > 0) video.currentTime = at;
+    if (jumpTo > 0) video.currentTime = jumpTo;
     if (jf) enableTrack(jf.plan ? jf.plan.audioPosition : 0);
     else if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
   };
@@ -709,8 +729,16 @@ function seekTo(sec, immediate) {
   pendingSeek = sec;
   clearTimeout(seekTimer);
   const apply = () => {
-    video.currentTime = pendingSeek;
+    const sec = pendingSeek;
     pendingSeek = null;
+    if (progressive && jf) {
+      // A continuous stream cannot jump: Jellyfin starts it again there.
+      jf.start = sec;
+      jf.plan = window.LumaStreams.plan(jfContext());
+      open(jf.plan.url, sec);
+      return;
+    }
+    video.currentTime = sec;
   };
   if (immediate) apply();
   else seekTimer = setTimeout(apply, SEEK_SETTLE_MS);
@@ -733,7 +761,7 @@ function report(event, done) {
     if (done) done();
     return;
   }
-  const ms = Math.floor((video.currentTime || 0) * 1000);
+  const ms = Math.floor(pos() * 1000);
   const x = new XMLHttpRequest();
   x.onloadend = () => {
     if (x.status < 200 || x.status >= 300) {
@@ -825,7 +853,7 @@ function episode(target) {
 function leave(why) {
   if (leaving) return;
   leaving = true;
-  plog('close:', why || 'back', `at ${clock(video.currentTime)}`);
+  plog('close:', why || 'back', `at ${clock(pos())}`);
   if (window.LumaLog) window.LumaLog.flush();
   video.pause();
   // Luma reloads the card on return, so the watch time is saved first (1.5 s at most).
@@ -859,6 +887,29 @@ video.addEventListener('playing', () => {
 video.addEventListener('waiting', () => {
   if (playing) render();
 });
+// For the debug log: what Jellyfin answers at the address that failed (its
+// status, and for HLS the variant lines with their CODECS).
+function probe(url) {
+  if (!url || !window.LumaLog || !window.LumaLog.active()) return;
+  const x = new XMLHttpRequest();
+  x.onload = () => {
+    const text = String(x.responseText || '').slice(0, 4000);
+    const lines = /m3u8/.test(url)
+      ? text.split('\n').filter((l) => /^#EXT-X-(STREAM-INF|MEDIA|VERSION)/.test(l))
+      : [];
+    plog(`server answered HTTP ${x.status}`, lines.slice(0, 4).join(' | '));
+  };
+  x.onerror = () => plog('server did not answer');
+  try {
+    x.open('GET', url);
+    // A peek is enough for a video file.
+    if (!/m3u8/.test(url)) x.setRequestHeader('Range', 'bytes=0-1023');
+    x.send();
+  } catch {
+    plog('server could not be asked');
+  }
+}
+
 // What the TV's media pipeline does, for the debug log.
 ['loadstart', 'canplay', 'stalled', 'pause', 'seeked', 'emptied', 'abort'].forEach((name) =>
   video.addEventListener(name, () => plog(`video ${name} at ${clock(video.currentTime)}`)),
@@ -886,7 +937,15 @@ video.addEventListener('error', () => {
     jfReplan();
     return;
   }
+  // The MKV stream refused or broken off: HLS, video still copied.
+  if (jf && jf.plan && jf.plan.progressive && !jf.hls) {
+    jf.hls = true;
+    plog('Direct Stream (MKV) refused: retrying over HLS');
+    jfReplan();
+    return;
+  }
   plog('gave up: "The stream did not open"');
+  probe(video.currentSrc || video.src);
   showNote("Can't play this video", 'The stream did not open');
 });
 video.addEventListener('ended', () => {

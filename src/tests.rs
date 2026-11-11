@@ -4859,3 +4859,25 @@ fn selecting_jellyfin_hides_the_headline_and_widgets_and_lifts_favorites() {
         assert!(info(&controls(&state)) > 0, "{layout:?}");
     }
 }
+
+#[test]
+fn a_click_beside_everything_clears_home_and_any_key_brings_it_back() {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    assert!(state.home_can_clear());
+    state.clear_home();
+    assert!(state.ambient_on(), "Home clears to the wallpaper");
+    // While clear, nothing on Home takes a click.
+    assert!(controls(&state).is_empty());
+    // A key (or another click) brings everything back.
+    state.leave_ambient();
+    assert!(!state.ambient.is_some_and(|(on, _)| on));
+    // Never over a page, a title card or while apps are being moved.
+    state.open(1);
+    assert!(!state.home_can_clear());
+    state.clear_home();
+    assert!(!state.ambient.is_some_and(|(on, _)| on));
+    state.open(0);
+    state.moving = Some("netflix".into());
+    assert!(!state.home_can_clear());
+}

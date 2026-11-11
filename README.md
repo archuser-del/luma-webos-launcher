@@ -38,6 +38,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 **Home**
 
 - Each layout arranges Home its own way. **Classic**: headline and weather on top, Favorites, then the content rows. **Shelf** (Rail): Favorites and the HDMI switch buttons first, then the headline beside the weather, with a content row already in view. **Stage** (Dock): the wallpaper keeps the top of the screen, the widgets sit in its corner, and the headline, switch buttons and Favorites rest low above the dock. **Mirror**: widgets on the left, the headline and the Favorites title set against the right edge. Up and Down follow each arrangement from top to bottom.
+- With the Magic Remote, click anywhere beside the apps, buttons and widgets and Home clears away to the wallpaper (the screensaver's animation). Any key or click brings it back.
 - A Jellyfin tile in Favorites (the Jellyfin app's own tile when it is a favorite, else one Luma adds at the end, one press of Left from your first app). Jellyfin's rows show only while that tile is selected: the headline, its caption and the widgets fade out, and Favorites and the Jellyfin rows glide up to fill the screen. Down goes into the rows and Up comes back to the tile. Hold OK on Luma's tile to move it like any app.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
@@ -63,7 +64,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Sign in with a code or a QR code on your phone: no typing with the remote.
 - A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
-- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit and just that audio track is converted to FLAC (lossless, up to 7.1), or to Dolby/AAC on a TV without FLAC. Jellyfin only transcodes the video for a codec the TV cannot decode, an image subtitle (PGS, VobSub) that has to be burned in, or a lower quality you pick. The player's top line says what is happening, e.g. "Direct Stream · HDR10 · TrueHD → FLAC".
+- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit and just that audio track is converted to FLAC (lossless, up to 7.1), or to Dolby/AAC on a TV without FLAC. That arrives as one continuous MKV stream, which the TV plays like a file (webOS refuses HEVC with FLAC over HLS); seeking asks Jellyfin for the stream again from the new spot. Should the TV refuse that too, Luma Player tries HLS with the video still copied and the audio in E-AC-3. Jellyfin only transcodes the video for a codec the TV cannot decode, an image subtitle (PGS, VobSub) that has to be burned in, or a lower quality you pick. The player's top line says what is happening, e.g. "Direct Stream · HDR10 · TrueHD → FLAC".
 - **HDR stays HDR.** HDR10, HLG and Dolby Vision video is never re-encoded (Jellyfin would turn it into SDR), so HDR titles offer no lower qualities. Burning an image subtitle into an HDR film is the one exception, and that subtitle is labelled "burned in, SDR" so it is your choice.
 - **Version and Quality pickers** on the title card: choose between a title's versions (for example 4K HDR and 1080p) and between "Original" and lower qualities for SDR files. Audio, subtitles and quality can also be changed while playing.
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
@@ -284,15 +285,15 @@ player keeps up to 400 lines and sends them the next time it starts.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.6.5_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.6_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.2.0_all.ipk` plays
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.3.0_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.6.5_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.2.0_all.ipk
+ares-install --device tv com.archbtw.luma_2.6.6_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.3.0_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
@@ -325,7 +326,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.6.5_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.6_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

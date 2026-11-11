@@ -142,7 +142,15 @@
     }
   }
 
-  const api = { configure, line, flush, clean, stamp, pending: () => queue.slice() };
+  const api = {
+    configure,
+    line,
+    flush,
+    clean,
+    stamp,
+    pending: () => queue.slice(),
+    active: () => !!sink,
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LumaLog = api;
 })(typeof window !== 'undefined' ? window : this);
