@@ -278,13 +278,16 @@ Luma Player (the Jellyfin player) is a web app with its own console; its errors 
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.6.1_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.2_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.1.0_all.ipk`.
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.1.0_all.ipk` plays
+Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
+(**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.6.1_arm.ipk
+ares-install --device tv com.archbtw.luma_2.6.2_arm.ipk
 ares-install --device tv com.archbtw.luma.player_0.1.0_all.ipk
+ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
 Coming from the original Luma? It stays installed as a separate app (`com.denisefremov.luma`) with its
@@ -316,7 +319,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.6.1_arm.ipk, player IPK, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.2_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

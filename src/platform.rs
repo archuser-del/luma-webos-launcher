@@ -319,6 +319,14 @@ impl Platform {
                                 json!({"id": id}),
                             )
                             .map(|_| ())
+                            .map_err(|error| {
+                                // The full-screen video library is a companion app.
+                                if id == AERIALS_ID && player_not_installed(&error) {
+                                    INSTALL_AERIALS_MESSAGE.to_owned()
+                                } else {
+                                    error
+                                }
+                            })
                         }
                     } else {
                         Ok(())
@@ -344,14 +352,18 @@ impl Platform {
 /// Luma's own player: a small web app around the TV's web video element.
 pub const WEB_PLAYER_ID: &str = "com.archbtw.luma.player";
 pub const INSTALL_PLAYER_MESSAGE: &str = "Install Luma Player from Homebrew Channel";
+/// The full-screen video library (Settings › System), also a companion app.
+pub const AERIALS_ID: &str = "com.archbtw.luma.aerials";
+pub const INSTALL_AERIALS_MESSAGE: &str = "Install Luma Aerials to open the video library";
 
 // webOS versions use slightly different texts for unknown application IDs.
-fn player_not_installed(error: &str) -> bool {
+pub(crate) fn player_not_installed(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "not installed",
         "not found",
-        "does not exist",
+        // webOS 6 answers a missing app ID with just "not exist".
+        "not exist",
         "unknown application",
         "invalid appid",
     ]

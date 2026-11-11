@@ -4570,3 +4570,15 @@ fn system_has_a_debug_log_switch_that_the_remote_reaches() {
         .rect;
     assert!(wake.y >= debug.y + debug.h, "{wake:?} under {debug:?}");
 }
+
+#[test]
+fn a_missing_companion_app_is_recognised_in_every_webos_wording() {
+    use crate::platform::player_not_installed;
+    // webOS 6, from a debug log: the launch service answers just "not exist".
+    assert!(player_not_installed(
+        "luna://com.webos.applicationManager/launch: not exist"
+    ));
+    assert!(player_not_installed("Application is not installed"));
+    assert!(player_not_installed("unknown application"));
+    assert!(!player_not_installed("Permission denied"));
+}

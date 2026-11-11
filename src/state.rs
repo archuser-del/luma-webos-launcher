@@ -5211,7 +5211,7 @@ impl State {
                         return vec![Effect::Root(Some(change))];
                     }
                     7 => return vec![Effect::Launch("com.webos.app.home".into())],
-                    8 => return vec![Effect::Launch("com.archbtw.luma.aerials".into())],
+                    8 => return vec![Effect::Launch(crate::platform::AERIALS_ID.into())],
                     6 => {
                         self.subpage = Some(Subpage::Greeting);
                         self.focus = Target::GreetingStyle;

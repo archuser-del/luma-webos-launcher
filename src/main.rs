@@ -1309,6 +1309,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                     .send(jellyfin::Command::Views(state.preferences.jellyfin.clone()));
             }
             jellyfin::Response::Items(index, items) => {
+                debug_log!("Jellyfin row {index}: {} cards", items.len());
                 if state.stack_items.len() <= index {
                     state.stack_items.resize(index + 1, vec![]);
                 }
@@ -1820,7 +1821,24 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
     })
 }
 
+/// Home's media rows refresh this often while Luma is on screen.
+const STACKS_EVERY: Duration = Duration::from_secs(30 * 60);
+/// Coming back on screen refreshes them when the last load is this old.
+const STACKS_AGAIN: Duration = Duration::from_secs(60);
+
 fn stacks_refresh(state: &mut State) {
+    let signed_in = |on: bool| if on { "signed in" } else { "not signed in" };
+    debug_log!(
+        "Home rows: loading {} (Jellyfin {}, Plex {}, Moonlight {})",
+        state.preferences.stacks.len(),
+        signed_in(state.preferences.jellyfin.linked()),
+        signed_in(state.preferences.plex.linked()),
+        if state.preferences.moonlight.paired {
+            "paired"
+        } else {
+            "not paired"
+        },
+    );
     if state.preferences.plex.linked() {
         let wanted = state
             .preferences
@@ -2963,6 +2981,11 @@ fn run() -> Result<(), String> {
     let mut last_minute = None;
     let mut frame = 0u64;
     let mut visible = true;
+    // Home's media rows (Jellyfin, Plex, Moonlight): loaded at start, again
+    // when Luma comes back on screen, and every STACKS_EVERY while shown.
+    let mut stacks_at: Option<Instant> = None;
+    // Cameras without a picture, logged once until they have one again.
+    let mut blank_cameras = std::collections::BTreeSet::new();
     let mut last_ha_view: Option<HaView> = None;
     let mut last_ha_connect = false;
     // Starfish requires a fully displayed/foreground native Wayland window.
@@ -3036,7 +3059,12 @@ fn run() -> Result<(), String> {
                     debug_log!("Home Assistant pairing error: {error}")
                 }
                 smart_home::Update::SnapshotFailed { id } => {
-                    debug_log!("Home Assistant camera {id}: no picture")
+                    if blank_cameras.insert(id.clone()) {
+                        debug_log!("Home Assistant camera {id}: no picture (retrying quietly)")
+                    }
+                }
+                smart_home::Update::Snapshot { id, .. } => {
+                    blank_cameras.remove(id);
                 }
                 smart_home::Update::SignedOut => debug_log!("Home Assistant signed out"),
                 _ => {}
@@ -3300,8 +3328,10 @@ fn run() -> Result<(), String> {
                     match result {
                         Err(error) => {
                             eprintln!("{error}");
-                            if error == platform::INSTALL_PLAYER_MESSAGE {
-                                state.notify(platform::INSTALL_PLAYER_MESSAGE);
+                            if error == platform::INSTALL_PLAYER_MESSAGE
+                                || error == platform::INSTALL_AERIALS_MESSAGE
+                            {
+                                state.notify(error);
                             } else {
                                 state.notify(state.preferences.language.t("appOpenError"));
                             }
@@ -3603,6 +3633,9 @@ fn run() -> Result<(), String> {
                         visible = true;
                         state.dirty = true;
                         pending.push(Effect::Refresh);
+                        if stacks_at.is_some_and(|at| at.elapsed() >= STACKS_AGAIN) {
+                            stacks_at = None;
+                        }
                     } else if code == 2 {
                         running = false;
                     }
@@ -3624,6 +3657,10 @@ fn run() -> Result<(), String> {
                     WindowEvent::FocusLost => press = None,
                     WindowEvent::Shown | WindowEvent::Restored | WindowEvent::FocusGained => {
                         visible = true;
+                        // Back from an app: Continue Watching may have moved on.
+                        if stacks_at.is_some_and(|at| at.elapsed() >= STACKS_AGAIN) {
+                            stacks_at = None;
+                        }
                         // Shown and Restored can come from SDL itself; only focus confirms.
                         if matches!(win_event, WindowEvent::FocusGained) {
                             foreground.confirmed();
@@ -4551,6 +4588,10 @@ fn run() -> Result<(), String> {
         // Block until input instead of polling at frame rate on idle screens.
         // VSync paces animation; holds, scripted checks and icons still being
         // decoded need short timed wakes.
+        if visible && stacks_at.is_none_or(|at| at.elapsed() >= STACKS_EVERY) {
+            stacks_at = Some(Instant::now());
+            stacks_refresh(&mut state);
+        }
         let timeout = if !visible {
             250
         } else if pill != target
