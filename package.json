@@ -1,6 +1,6 @@
 {
   "name": "lg-luma",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "private": true,
   "description": "A modern, remote-first webOS launcher.",
   "license": "MIT",
@@ -39,7 +39,7 @@
     "version:release": "changeset version && pnpm version:sync && oxfmt --write CHANGELOG.md",
     "version:sync": "node tools/sync-version.mjs",
     "version:check": "node tools/sync-version.mjs --check",
-    "test:player": "node --test tests/player-streams.test.mjs"
+    "test:player": "node --test tests/player-streams.test.mjs tests/player-log.test.mjs"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.3",

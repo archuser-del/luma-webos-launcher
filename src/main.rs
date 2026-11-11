@@ -1814,6 +1814,8 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
             })).collect::<Vec<_>>(),
         })),
         "jellyfin": request.jellyfin,
+        // While the debug log is on: where the player sends its lines.
+        "debugLog": debug_log::player_sink(),
         "accentA": hex(a),
         "accentB": hex(if gradient { b } else { a }),
         "accentKind": if gradient { "gradient" } else { "solid" },

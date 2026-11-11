@@ -250,9 +250,9 @@ newest log. Luma then writes one file per start to `logs/` next to its `preferen
 `/media/developer/com.archbtw.luma/logs/luma-<date>T<time>.log`, and keeps the five newest. Each
 line starts with the TV's local time, for example `2026-11-11T20:41:05.123+01:00`.
 
-A log holds every remote press (page and focus before and after), every action Luma takes, failed
-Jellyfin, Plex, Home Assistant and ImmichFrame requests, Luma's own messages, and a backtrace if it
-crashes. It never holds tokens, passwords or URL query strings, but it does show server addresses,
+A log holds every remote press (page and focus before and after), every action Luma takes, each
+load of the Home rows and how many cards came back, failed Jellyfin, Plex, Home Assistant and
+ImmichFrame requests, Luma's own messages, and a backtrace if it crashes. It never holds tokens, passwords or URL query strings, but it does show server addresses,
 app names and HDMI device names.
 
 For a problem that happens while Luma starts, switch the log on before it starts: create an empty
@@ -272,21 +272,26 @@ From your computer, copy the logs off the TV (replace `TV_IP`):
 scp 'root@TV_IP:/media/developer/com.archbtw.luma/logs/*.log' .
 ```
 
-Luma Player (the Jellyfin player) is a web app with its own console; its errors are not in this log.
+Luma Player (the Jellyfin and Plex player, 0.2.0 or later) writes into the same log while it is on,
+tagged `[player]`: which codecs the TV reports, the file's tracks, whether it chose Direct Play,
+Direct Stream or a transcode and why, the stream settings asked of Jellyfin, every state of the
+TV's video pipeline (loading, buffering, playing, errors with their code), track and quality
+changes, remote keys, and failed progress reports. If Luma was not running to receive them, the
+player keeps up to 400 lines and sends them the next time it starts.
 
 ## Install
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.6.2_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.3_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.1.0_all.ipk` plays
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.2.0_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.6.2_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.1.0_all.ipk
+ares-install --device tv com.archbtw.luma_2.6.3_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.2.0_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
@@ -319,7 +324,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.6.2_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.3_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

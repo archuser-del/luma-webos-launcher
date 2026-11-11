@@ -2,7 +2,13 @@
 // Signed media server stream URLs remain in memory, never logged.
 'use strict';
 
+// Debug log (log.js): a no-op unless Luma's debug log is on.
+function plog() {
+  if (window.LumaLog) window.LumaLog.line.apply(null, arguments);
+}
+window.addEventListener('unhandledrejection', (e) => plog('unhandled rejection:', e.reason));
 window.onerror = (message, source, line) => {
+  plog(`script error: ${message} (${String(source).split('/').pop()}:${line})`);
   const n = document.getElementById('note');
   if (n) {
     n.classList.remove('hidden');
@@ -17,6 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
+const PLAYER_VERSION = '0.2.0';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -300,6 +307,7 @@ function enableTrack(i) {
   if (t && t.length > i) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
 }
 function setAudio(i) {
+  plog(`choose audio ${i}:`, audioName(i));
   if (jf) {
     const a = jf.info.audio[i];
     if (!a) return;
@@ -315,6 +323,10 @@ function setAudio(i) {
   buildRow();
 }
 function setSubtitle(i) {
+  plog(
+    `choose subtitle ${i}:`,
+    i >= 0 && p.subtitles && p.subtitles[i] ? p.subtitles[i].name : 'off',
+  );
   subtitleIndex = i;
   cues = [];
   const track = (p.subtitles || [])[i];
@@ -363,6 +375,7 @@ function parseSubtitles(text) {
   return out.sort((x, y) => x.start - y.start);
 }
 function setQuality(i) {
+  plog(`choose quality ${i}:`, p.qualities && p.qualities[i] ? p.qualities[i].name : '?');
   if (jf) {
     const q = (p.qualities || [])[i];
     if (!q) return;
@@ -503,6 +516,19 @@ function jfStart(at) {
           info.audio.findIndex((a) => a.isDefault),
         );
   p.audio = info.audio.map((a) => a.name);
+  const yes = (o) => Object.keys(o).filter((k) => o[k]);
+  plog('TV decodes video:', yes(jf.caps.video).join(','), '· audio:', yes(jf.caps.audio).join(','));
+  plog(
+    'file:',
+    info.container,
+    info.video.codec,
+    info.video.rangeType || (info.video.hdr ? 'HDR' : 'SDR'),
+    `${info.video.height || '?'}p`,
+    '· audio tracks:',
+    info.audio.map((a) => a.codec + (a.isDefault ? '*' : '')).join(','),
+    '· subtitles:',
+    info.subtitles.length,
+  );
   const ctx = jfContext();
   p.subtitles = info.subtitles.map((sub) => ({
     name: S.subtitleLabel(info, sub),
@@ -523,6 +549,7 @@ function jfStart(at) {
   subtitleIndex = -1;
   cues = [];
   jf.plan = S.plan(jfContext());
+  logPlan('plan');
   header();
   buildRow();
   if (sub >= 0) {
@@ -550,10 +577,21 @@ function jfContext() {
 }
 // A choice changed: the same stream only switches tracks; another stream
 // reopens where the picture was.
+function logPlan(why) {
+  const q = jf.plan;
+  plog(
+    `${why}:`,
+    q.method,
+    '·',
+    q.label,
+    q.reasons && q.reasons.length ? `· because ${q.reasons.join(', ')}` : '',
+  );
+}
 function jfReplan() {
   const next = window.LumaStreams.plan(jfContext());
   const old = jf.plan;
   jf.plan = next;
+  logPlan('new plan');
   header();
   if (old && old.url === next.url) {
     enableTrack(next.audioPosition);
@@ -601,7 +639,32 @@ function jfEpisode(e, done) {
 
 // ---------- playback ----------
 let opening = null;
+// The stream's settings for the log: what Jellyfin is asked to copy or
+// convert. The address and its keys stay out (log.js drops query strings).
+const STREAM_KEYS = [
+  'static',
+  'VideoCodec',
+  'AllowVideoStreamCopy',
+  'AudioCodec',
+  'AudioStreamIndex',
+  'TranscodingMaxAudioChannels',
+  'SubtitleStreamIndex',
+  'SubtitleMethod',
+  'VideoBitrate',
+  'MaxHeight',
+];
+function streamSettings(url) {
+  try {
+    const q = new URL(url).searchParams;
+    return STREAM_KEYS.filter((k) => q.has(k))
+      .map((k) => `${k}=${q.get(k)}`)
+      .join(' ');
+  } catch {
+    return '';
+  }
+}
 function open(url, at) {
+  plog('open stream', url, at > 0 ? `at ${Math.round(at)} s` : '', streamSettings(url));
   playing = false;
   showNote('Loading…');
   // Tear the previous stream down first: on webOS a bare src swap can leave
@@ -673,6 +736,9 @@ function report(event, done) {
   const ms = Math.floor((video.currentTime || 0) * 1000);
   const x = new XMLHttpRequest();
   x.onloadend = () => {
+    if (x.status < 200 || x.status >= 300) {
+      plog(`progress report "${event}" to ${r.service || 'jellyfin'} failed: HTTP ${x.status}`);
+    }
     if (done) done();
   };
   if (r.service === 'plex') {
@@ -756,9 +822,11 @@ function episode(target) {
     return;
   }
 }
-function leave(_why) {
+function leave(why) {
   if (leaving) return;
   leaving = true;
+  plog('close:', why || 'back', `at ${clock(video.currentTime)}`);
+  if (window.LumaLog) window.LumaLog.flush();
   video.pause();
   // Luma reloads the card on return, so the watch time is saved first (1.5 s at most).
   let gone = false;
@@ -791,16 +859,34 @@ video.addEventListener('playing', () => {
 video.addEventListener('waiting', () => {
   if (playing) render();
 });
+// What the TV's media pipeline does, for the debug log.
+['loadstart', 'canplay', 'stalled', 'pause', 'seeked', 'emptied', 'abort'].forEach((name) =>
+  video.addEventListener(name, () => plog(`video ${name} at ${clock(video.currentTime)}`)),
+);
+video.addEventListener('loadedmetadata', () =>
+  plog(
+    `video metadata: ${video.videoWidth}x${video.videoHeight}, ${clock(video.duration)},`,
+    `${video.audioTracks ? video.audioTracks.length : '?'} audio tracks`,
+  ),
+);
+video.addEventListener('playing', () => plog(`video playing at ${clock(video.currentTime)}`));
+video.addEventListener('waiting', () => plog(`video buffering at ${clock(video.currentTime)}`));
+video.addEventListener('ended', () => plog('video ended'));
+const MEDIA_ERRORS = ['', 'aborted', 'network', 'decode', 'format not supported'];
 video.addEventListener('error', () => {
   // The TV refused the original file after all: retry once with the video
   // copied into a new container (still no re-encoding, HDR intact).
   // Only a format or decode refusal: a network hiccup is not the file's fault.
   const code = video.error ? video.error.code : 0;
+  const detail = video.error && video.error.message ? `: ${video.error.message}` : '';
+  plog(`video error ${code} (${MEDIA_ERRORS[code] || 'unknown'})${detail}`);
   if (jf && jf.plan && jf.plan.method === 'DirectPlay' && !jf.forceStream && code >= 3) {
     jf.forceStream = true;
+    plog('Direct Play refused: retrying as Direct Stream');
     jfReplan();
     return;
   }
+  plog('gave up: "The stream did not open"');
   showNote("Can't play this video", 'The stream did not open');
 });
 video.addEventListener('ended', () => {
@@ -870,6 +956,7 @@ function activate() {
   }
 }
 document.addEventListener('keydown', (e) => {
+  plog(`key ${e.keyCode}`, music ? '(music)' : `focus ${focus}${panel ? ` panel ${panel}` : ''}`);
   if (music) {
     musicKey(e);
     return;
@@ -1102,6 +1189,7 @@ function current() {
 function playSong(i, fresh) {
   const song = music.songs[i];
   if (!song) return;
+  plog(`song ${i + 1} of ${music.songs.length}`);
   if (p.report) {
     if (fresh !== false && playing) report('stop');
     p.report.item = song.item;
@@ -1284,7 +1372,24 @@ function params() {
 }
 function start() {
   const next = params();
-  if (!next.url) return;
+  if (window.LumaLog) window.LumaLog.configure(next.debugLog);
+  if (!next.url) {
+    plog('launched without a stream');
+    return;
+  }
+  plog(
+    'start:',
+    next.music
+      ? 'music'
+      : next.jellyfin
+        ? 'jellyfin'
+        : next.report
+          ? next.report.service || 'media'
+          : 'url',
+    next.title ? `"${next.title}"` : '',
+    next.resumeMs ? `resume at ${clock(next.resumeMs / 1000)}` : '',
+    `· player ${PLAYER_VERSION} · ${navigator.userAgent}`,
+  );
   leaving = false;
   p = next;
   p.qualities = p.qualities || [];

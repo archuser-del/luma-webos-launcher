@@ -22,6 +22,10 @@ pub const FLAG: &str = "debug-log";
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
 static OFFSET: OnceLock<UtcOffset> = OnceLock::new();
+/// Where Luma Player sends its lines: a local address with a secret path.
+static PLAYER_SINK: OnceLock<String> = OnceLock::new();
+/// A batch from the player is never larger than this.
+const PLAYER_BATCH_MAX: usize = 256 * 1024;
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
@@ -104,7 +108,105 @@ pub fn start(dir: &Path, offset: UtcOffset, why: &str) -> Result<PathBuf, String
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     eprintln!("  args     {}", args.join(" "));
+    match start_player_sink() {
+        Ok(()) => eprintln!("  player   lines arrive at a local address"),
+        Err(error) => eprintln!("  player   no local address for its lines: {error}"),
+    }
     Ok(path)
+}
+
+/// The address Luma Player posts its lines to, while the log is on.
+pub fn player_sink() -> Option<String> {
+    if enabled() {
+        PLAYER_SINK.get().cloned()
+    } else {
+        None
+    }
+}
+
+/// A receiver on 127.0.0.1 only, so nothing outside the TV can write to it.
+/// The random path keeps other local apps out too.
+fn start_player_sink() -> Result<(), String> {
+    if PLAYER_SINK.get().is_some() {
+        return Ok(());
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let secret = format!("/player-log/{}", &crate::phone_link::random_hex()[..16]);
+    let _ = PLAYER_SINK.set(format!("http://127.0.0.1:{port}{secret}"));
+    // Desktop QA only: the address, so a browser test can post to it.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("LUMA_SHOW_PLAYER_SINK").is_some()
+        && let Some(sink) = PLAYER_SINK.get()
+    {
+        eprintln!("  player   {sink}");
+    }
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = receive_player_lines(stream, &secret);
+        }
+    });
+    Ok(())
+}
+
+fn receive_player_lines(mut stream: std::net::TcpStream, secret: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request = String::new();
+    reader.read_line(&mut request)?;
+    let mut parts = request.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let mut length = 0usize;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let status = if path != secret {
+        "404 Not Found"
+    } else if method == "OPTIONS" {
+        "204 No Content"
+    } else if method != "POST" || length > PLAYER_BATCH_MAX {
+        "400 Bad Request"
+    } else {
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body)?;
+        if enabled() {
+            for line in String::from_utf8_lossy(&body).lines() {
+                eprintln!("{}", player_line(line));
+            }
+        }
+        "204 No Content"
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nAccess-Control-Allow-Origin: *\r\n\
+         Access-Control-Allow-Methods: POST, OPTIONS\r\n\
+         Access-Control-Allow-Headers: Content-Type\r\n\
+         Content-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+}
+
+/// "2026-11-11T20:41:05.123-06:00 video playing" from the player becomes
+/// "2026-11-11T20:41:05.123-06:00 [player] video playing": its own time,
+/// which is right even for lines sent late. A line without one gets ours.
+fn player_line(line: &str) -> String {
+    let line: String = line.chars().filter(|c| !c.is_control()).collect();
+    let stamped = line.len() > 29
+        && line.as_bytes().get(10) == Some(&b'T')
+        && line.as_bytes().get(29) == Some(&b' ');
+    if stamped {
+        format!("{} [player] {}", &line[..29], &line[30..])
+    } else {
+        format!("{} [player] {line}", timestamp())
+    }
 }
 
 /// Stops writing new debug lines. Luma's own messages keep going to the
@@ -187,6 +289,44 @@ macro_rules! debug_log {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_lines_keep_their_own_time_and_are_tagged() {
+        assert_eq!(
+            player_line("2026-11-11T20:41:05.123-06:00 video playing at 0:12"),
+            "2026-11-11T20:41:05.123-06:00 [player] video playing at 0:12"
+        );
+        let untimed = player_line("hello\u{1b}[31m");
+        assert!(untimed.ends_with(" [player] hello[31m"), "{untimed}");
+    }
+
+    #[test]
+    fn the_player_receiver_takes_lines_only_at_its_secret_path() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten().take(2) {
+                let _ = receive_player_lines(stream, "/player-log/abc");
+            }
+        });
+        let ask = |path: &str| {
+            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let body = "2026-11-11T20:41:05.123-06:00 hello\n";
+            write!(
+                s,
+                "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            let mut reply = String::new();
+            s.read_to_string(&mut reply).unwrap();
+            reply
+        };
+        assert!(ask("/player-log/abc").starts_with("HTTP/1.1 204"));
+        assert!(ask("/player-log/wrong").starts_with("HTTP/1.1 404"));
+    }
 
     #[test]
     fn query_strings_never_reach_the_log() {
