@@ -10,8 +10,9 @@ type Row = (String, &'static str, CardShape, Vec<StackItem>, bool, bool);
 
 fn rows(state: &State) -> Vec<Row> {
     let mut rows = Vec::new();
-    for (i, stack) in state.preferences.stacks.iter().enumerate() {
-        if !stack.show {
+    for i in crate::stacks::home_order(state) {
+        let stack = &state.preferences.stacks[i];
+        if !stack.show || (stack.source == "jellyfin" && !state.jellyfin_rows_shown()) {
             continue;
         }
         let mut items = state.stack_items.get(i).cloned().unwrap_or_default();

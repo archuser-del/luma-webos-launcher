@@ -1635,7 +1635,7 @@ fn live_input_buttons(out: &mut Scene, state: &State, assets: &Assets, x: f32, t
                 .sin()
                 .abs()
     };
-    for input in state.live_inputs() {
+    for (input, live) in state.plugged_inputs() {
         let target = Target::LiveInput(input.id.clone());
         // The viewer's name for it, else what the TV calls it (often the
         // device itself, from HDMI-CEC), else the port.
@@ -1645,9 +1645,9 @@ fn live_input_buttons(out: &mut Scene, state: &State, assets: &Assets, x: f32, t
             .or_else(|| (input.title != input.port).then_some(input.title.as_str()))
             .unwrap_or(&input.port);
         let label = if name == input.port {
-            format!("Switch to {}", input.port)
+            input.port.clone()
         } else {
-            format!("Switch to {name} · {}", input.port)
+            format!("{name} · {}", input.port)
         };
         let label_w = assets.width(&label, style).ceil();
         let w = 24. + 14. + 14. + 30. + 14. + label_w + 28.;
@@ -1669,13 +1669,21 @@ fn live_input_buttons(out: &mut Scene, state: &State, assets: &Assets, x: f32, t
             let at = out.draw.len();
             accent_fill(out, lift, lift.h / 2., state);
             out.fade(at, focus, 1.);
-        } else {
+        } else if live {
             out.accent_ring(lift, lift.h / 2., state);
+        } else {
+            // Plugged in, no picture: grayed, a plain outline.
+            out.border(lift, lift.h / 2., 1.5, c(0xffffff, 0.16));
         }
-        let ink = blend(WHITE, accent_ink(state), focus);
+        let rest = if live { WHITE } else { c(0xffffff, 0.42) };
+        let ink = blend(rest, accent_ink(state), focus);
         let dot = Rect::new(lift.x + 24., lift.y + (lift.h - 14.) / 2., 14., 14.);
-        out.shape(dot.inset(-4. * pulse), 11., c(0x4ade80, 0.25 * pulse));
-        out.shape(dot, 7., c(0x4ade80, 1.));
+        if live {
+            out.shape(dot.inset(-4. * pulse), 11., c(0x4ade80, 0.25 * pulse));
+            out.shape(dot, 7., c(0x4ade80, 1.));
+        } else {
+            out.border(dot, 7., 2., blend(c(0xffffff, 0.4), ink, focus));
+        }
         let icon = format!(
             "input-{}",
             input_icon(input, state.preferences.input_name(input))

@@ -48,6 +48,8 @@ pub const LAYOUT_SECTION: usize = 8;
 pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 8, 7, 2, 3, 4, 5];
 pub const APPS_COLUMNS: usize = 6;
 pub const HOME_STRIP_LEFT: f32 = 84.;
+/// Luma's own Jellyfin tile at the end of Favorites.
+pub const JELLYFIN_TILE: &str = "luma:jellyfin";
 pub const HOME_STRIP_RIGHT: f32 = 1836.;
 pub const HOME_VIEWPORT_LEFT: f32 = 0.;
 pub const HOME_VIEWPORT_RIGHT: f32 = 1920.;
@@ -540,6 +542,11 @@ pub struct State {
     /// The control the remote left for the tabs or inputs; the arrow back
     /// into the page returns to it (layouts other than the classic bar).
     pub chrome_return: Option<Target>,
+    /// The Favorites tile last selected on Home. The Jellyfin rows show
+    /// only while it is the Jellyfin tile.
+    pub home_pick: Option<String>,
+    /// Luma's own Jellyfin tile, for when the Jellyfin app is not a favorite.
+    jellyfin_tile: App,
     /// The debug log file this run writes, while the log is on.
     pub debug_log_file: Option<String>,
     pub inventory: Inventory,
@@ -714,6 +721,14 @@ impl State {
             page: Page::Home,
             focus: Target::Nav(0),
             chrome_return: None,
+            home_pick: None,
+            jellyfin_tile: {
+                let mut tile = App::new(JELLYFIN_TILE, "Jellyfin");
+                // Jellyfin's logo and colours, as on the Jellyfin app's tile.
+                tile.brand = "jellyfin".into();
+                tile.category = "Streaming".into();
+                tile
+            },
             debug_log_file: None,
             inventory: Inventory::default(),
             preferences,
@@ -901,14 +916,16 @@ impl State {
 
     /// HDMI inputs with a picture right now (or, without a signal report,
     /// a cable plugged in), unless the viewer turned the input off.
-    pub fn live_inputs(&self) -> Vec<&crate::model::Input> {
+    /// Inputs with a cable in, and whether each shows a picture. A device
+    /// asleep keeps its cable's 5 V but sends nothing: plugged in, not live.
+    /// Without signal detection (no root), plugged in counts as live.
+    pub fn plugged_inputs(&self) -> Vec<(&crate::model::Input, bool)> {
         self.inventory
             .inputs
             .iter()
-            .filter(|input| {
-                self.preferences.input_modes.get(&input.id) != Some(&InputMode::Off)
-                    && input.signal.unwrap_or(input.connected == Some(true))
-            })
+            .filter(|input| self.preferences.input_modes.get(&input.id) != Some(&InputMode::Off))
+            .filter(|input| input.connected == Some(true) || input.signal == Some(true))
+            .map(|input| (input, input.signal.unwrap_or(true)))
             .collect()
     }
 
@@ -1253,6 +1270,11 @@ impl State {
     pub fn change_focus(&mut self, target: Target) {
         if self.focus == target {
             return;
+        }
+        if self.page == Page::Home
+            && let Target::App(id) = &target
+        {
+            self.home_pick = Some(id.clone());
         }
         if target != Target::SmartSignOut {
             self.ha_signout_armed = false;
@@ -1710,11 +1732,15 @@ impl State {
     pub fn apps(&self) -> Vec<&App> {
         let ids = self.preferences.favorites(&self.inventory.apps);
         if self.page == Page::Home {
-            return ids
+            let mut apps: Vec<&App> = ids
                 .iter()
                 .filter(|id| !self.preferences.hidden.contains(id))
                 .filter_map(|id| self.inventory.apps.iter().find(|app| &app.id == id))
                 .collect();
+            if self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE) {
+                apps.push(&self.jellyfin_tile);
+            }
+            return apps;
         }
         let query = self.query.to_lowercase();
         let mut apps: Vec<_> = self
@@ -1742,6 +1768,45 @@ impl State {
         apps
     }
 
+    /// The Favorites tile that stands for Jellyfin: the Jellyfin app when it
+    /// is a favorite, else Luma's own tile. None until Jellyfin is signed in
+    /// with a row to show.
+    pub fn jellyfin_tile_id(&self) -> Option<String> {
+        let rows = self
+            .preferences
+            .stacks
+            .iter()
+            .any(|s| s.show && s.source == "jellyfin");
+        if !self.preferences.jellyfin.linked() || !rows {
+            return None;
+        }
+        let favorite = self
+            .preferences
+            .favorites(&self.inventory.apps)
+            .into_iter()
+            .filter(|id| !self.preferences.hidden.contains(id))
+            .find(|id| {
+                self.inventory
+                    .apps
+                    .iter()
+                    .any(|app| &app.id == id && app.brand == "jellyfin")
+            });
+        Some(favorite.unwrap_or_else(|| JELLYFIN_TILE.to_owned()))
+    }
+
+    /// The Jellyfin rows show while the Jellyfin tile is selected: focused,
+    /// or the last tile chosen while the remote is in the rows below.
+    /// Without a tile to choose (not signed in) nothing hides them.
+    pub fn jellyfin_rows_shown(&self) -> bool {
+        let Some(tile) = self.jellyfin_tile_id() else {
+            return true;
+        };
+        match &self.focus {
+            Target::App(id) => *id == tile,
+            _ => self.home_pick.as_deref() == Some(tile.as_str()),
+        }
+    }
+
     pub fn home_scroll_max(&self) -> f32 {
         let count = self
             .preferences
@@ -1751,7 +1816,8 @@ impl State {
                 !self.preferences.hidden.contains(id)
                     && self.inventory.apps.iter().any(|app| &app.id == *id)
             })
-            .count();
+            .count()
+            + usize::from(self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE));
         let content = if count == 0 {
             0.
         } else {
@@ -1938,7 +2004,10 @@ impl State {
             self.focus = self.first_content();
         }
         if let Target::LiveInput(id) = &self.focus
-            && !self.live_inputs().iter().any(|input| &input.id == id)
+            && !self
+                .plugged_inputs()
+                .iter()
+                .any(|(input, _)| &input.id == id)
         {
             self.focus = self.first_content();
         }
@@ -2086,6 +2155,14 @@ impl State {
     /// Remote focus is revealed after layout changes, including hide/reorder.
     /// Pointer paths deliberately do not call this method.
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
+        // Focus set directly (startup, Back) still counts as a pick.
+        if self.page == Page::Home
+            && let Target::App(id) = &self.focus
+            && self.home_pick.as_deref() != Some(id.as_str())
+        {
+            self.home_pick = Some(id.clone());
+            self.dirty = true;
+        }
         let (previous, previous_home) = (self.scroll_goal, self.home_scroll_goal);
         // Home stands still under the title card while it opens, shows and
         // closes; its rows keep their scroll for the card to return to.
@@ -2650,7 +2727,28 @@ impl State {
         } else {
             current.y
         };
-        if let Some(next) = home_band_entry(controls, &further, current.center().0, from_y) {
+        // Coming back up to Favorites lands on the tile last chosen.
+        let entering = further
+            .iter()
+            .find(|b| controls.iter().any(|c| home_band(&c.target) == Some(**b)));
+        let picked = self
+            .home_pick
+            .as_ref()
+            .filter(|_| !down && entering == Some(&HomeBand::Apps))
+            .map(|id| Target::App(id.clone()))
+            .filter(|t| controls.iter().any(|c| &c.target == t));
+        // Down from the Jellyfin tile: its row, from the first card.
+        let jellyfin_row = (down
+            && entering == Some(&HomeBand::Stacks)
+            && self.jellyfin_rows_shown()
+            && matches!(&self.focus, Target::App(id)
+                if self.jellyfin_tile_id().as_deref() == Some(id.as_str())))
+        .then_some(Target::StackCard(0, 0))
+        .filter(|t| controls.iter().any(|c| &c.target == t));
+        if let Some(next) = picked
+            .or(jellyfin_row)
+            .or_else(|| home_band_entry(controls, &further, current.center().0, from_y))
+        {
             self.focus(next, controls);
         } else if direction == self.preferences.layout.outward() {
             // The page ends here; the chrome is next.
@@ -3030,9 +3128,18 @@ impl State {
                     // Changing rows always lands on the first card of the new row.
                     Direction::Up if row > 0 => self.focus(Target::StackCard(row - 1, 0), controls),
                     Direction::Up => {
+                        // Back to the tile these rows belong to (Jellyfin's
+                        // rows vanish when another tile is chosen).
                         let apps = self.apps();
-                        if let Some(app) = apps.get(index.min(apps.len().saturating_sub(1))) {
-                            let id = app.id.clone();
+                        let picked = self
+                            .home_pick
+                            .as_ref()
+                            .filter(|id| apps.iter().any(|app| &app.id == *id))
+                            .cloned();
+                        if let Some(id) = picked.or_else(|| {
+                            apps.get(index.min(apps.len().saturating_sub(1)))
+                                .map(|app| app.id.clone())
+                        }) {
                             self.focus(Target::App(id), controls);
                         }
                     }
@@ -3073,7 +3180,15 @@ impl State {
                                 .filter(|c| matches!(c.target, Target::StackCard(0, _)))
                                 .count();
                             if visible > 0 {
-                                self.focus(Target::StackCard(0, index.min(visible - 1)), controls);
+                                // The Jellyfin tile's own row starts at its first card.
+                                let card = if self.jellyfin_rows_shown()
+                                    && self.jellyfin_tile_id().as_deref() == Some(id.as_str())
+                                {
+                                    0
+                                } else {
+                                    index.min(visible - 1)
+                                };
+                                self.focus(Target::StackCard(0, card), controls);
                                 return vec![];
                             }
                             let x = controls
@@ -3771,7 +3886,9 @@ impl State {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
-        if let Target::App(id) = &self.focus {
+        if let Target::App(id) = &self.focus
+            && id != JELLYFIN_TILE
+        {
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
                 restore: self.focus.clone(),
@@ -5020,6 +5137,24 @@ impl State {
             Target::DismissNotice => self.notice = None,
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
+            Target::App(id) if id == JELLYFIN_TILE => {
+                // OK on Luma's own tile: down into the first Jellyfin row.
+                self.home_pick = Some(id);
+                let row = (0..)
+                    .take_while(|r| crate::stacks::row_stack(self, *r).is_some())
+                    .find(|r| {
+                        crate::stacks::row_stack(self, *r)
+                            .and_then(|i| self.preferences.stacks.get(i))
+                            .is_some_and(|s| s.source == "jellyfin")
+                    });
+                if let Some(row) = row {
+                    self.change_focus(Target::StackCard(row, 0));
+                    self.dirty = true;
+                    return vec![];
+                }
+                self.notify("Loading Jellyfin…");
+                return vec![Effect::StacksRefresh];
+            }
             Target::App(id) | Target::Input(id) | Target::LiveInput(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }

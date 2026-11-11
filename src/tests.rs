@@ -55,32 +55,54 @@ fn uploaded_videos_join_the_catalog_and_can_play_alone() {
 }
 
 #[test]
-fn an_input_with_a_picture_gets_a_switch_button_on_home() {
+fn every_plugged_in_input_gets_a_button_and_a_sleeping_one_is_grayed() {
     let mut state = ready();
     state.preferences.background = "dunes".into();
-    // Signals reported: only HDMI 2 has a picture now.
+    // HDMI 1 and 2 have a cable in; only HDMI 2 has a picture now.
+    for input in &mut state.inventory.inputs {
+        input.connected = Some(input.port != "HDMI 3");
+    }
     crate::model::apply_signals(
         &mut state.inventory.inputs,
         &[(1, false), (2, true), (3, false)],
     );
-    let live = |state: &State| -> Vec<Target> {
-        controls(state)
+    let buttons = |state: &State| -> Vec<Target> {
+        let mut found: Vec<_> = controls(state)
             .into_iter()
             .filter(|c| matches!(c.target, Target::LiveInput(_)))
-            .map(|c| c.target)
-            .collect()
+            .collect();
+        found.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
+        found.into_iter().map(|c| c.target).collect()
     };
+    let hdmi = |n: u8| Target::LiveInput(format!("com.webos.app.hdmi{n}"));
+    // Both plugged-in inputs, by name; HDMI 3 has no cable and no button.
+    assert_eq!(buttons(&state), vec![hdmi(1), hdmi(2)]);
+    let plugged = state.plugged_inputs();
+    let live: Vec<(&str, bool)> = plugged
+        .iter()
+        .map(|(input, live)| (input.port.as_str(), *live))
+        .collect();
     assert_eq!(
-        live(&state),
-        vec![Target::LiveInput("com.webos.app.hdmi2".into())]
+        live,
+        vec![("HDMI 1", false), ("HDMI 2", true)],
+        "HDMI 1 is grayed"
     );
-    // One press of Up from the apps, and OK switches to the input.
+    // Up from the apps reaches them; Left and Right walk them; OK switches,
+    // also to the grayed one (it may wake the device).
     state.focus = Target::App("netflix".into());
     state.direction(Direction::Up, &controls(&state));
-    assert_eq!(state.focus, Target::LiveInput("com.webos.app.hdmi2".into()));
+    assert_eq!(state.focus, hdmi(1));
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.focus, hdmi(2));
     assert_eq!(
         state.activate(),
         vec![Effect::Launch("com.webos.app.hdmi2".into())]
+    );
+    state.launching = false;
+    state.focus = hdmi(1);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.webos.app.hdmi1".into())]
     );
     state.launching = false;
     // Down goes back to the apps.
@@ -91,13 +113,17 @@ fn an_input_with_a_picture_gets_a_switch_button_on_home() {
         .preferences
         .input_modes
         .insert("com.webos.app.hdmi2".into(), InputMode::Off);
-    assert!(live(&state).is_empty());
-    // The signal goes away: the button goes, and focus does not stay on it.
+    assert_eq!(buttons(&state), vec![hdmi(1)]);
+    // The cable comes out: the button goes, and focus does not stay on it.
     state.preferences.input_modes.clear();
-    state.focus = Target::LiveInput("com.webos.app.hdmi2".into());
-    crate::model::apply_signals(&mut state.inventory.inputs, &[(2, false)]);
+    state.focus = hdmi(1);
+    for input in &mut state.inventory.inputs {
+        if input.port == "HDMI 1" {
+            input.connected = Some(false);
+        }
+    }
     state.reconcile_focus();
-    assert!(live(&state).is_empty());
+    assert_eq!(buttons(&state), vec![hdmi(2)]);
     assert!(!matches!(state.focus, Target::LiveInput(_)));
 }
 
@@ -4581,4 +4607,163 @@ fn a_missing_companion_app_is_recognised_in_every_webos_wording() {
     assert!(player_not_installed("Application is not installed"));
     assert!(player_not_installed("unknown application"));
     assert!(!player_not_installed("Permission denied"));
+}
+
+fn jellyfin_home(with_app: bool) -> State {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    state.preferences.reduced_motion = true;
+    if !with_app {
+        state.preferences.hidden.push("org.jellyfin.webos".into());
+    }
+    state.preferences.jellyfin = crate::jellyfin::JellyfinLink {
+        server: "http://jf:8096".into(),
+        user_id: "u".into(),
+        token: "t".into(),
+        device_id: "d".into(),
+        ..Default::default()
+    };
+    let films = |n: i64| -> Vec<crate::stacks::StackItem> {
+        (1..=n)
+            .map(|id| crate::stacks::StackItem {
+                title: format!("Film {id}"),
+                poster: None,
+                id,
+            })
+            .collect()
+    };
+    state.preferences.stacks = vec![
+        crate::stacks::StackConfig {
+            source: "moonlight".into(),
+            name: "Games".into(),
+            ..Default::default()
+        },
+        crate::stacks::StackConfig {
+            source: "jellyfin".into(),
+            name: "Continue watching".into(),
+            ..Default::default()
+        },
+    ];
+    state.stack_items = vec![films(3), films(6)];
+    state
+}
+
+fn row_names(state: &State) -> Vec<usize> {
+    (0..4)
+        .filter_map(|r| crate::stacks::row_stack(state, r))
+        .collect()
+}
+
+#[test]
+fn luma_adds_a_jellyfin_tile_whose_rows_show_only_while_it_is_selected() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    let apps: Vec<String> = state.apps().iter().map(|a| a.id.clone()).collect();
+    assert_eq!(
+        apps.last().map(String::as_str),
+        Some(JELLYFIN_TILE),
+        "last in the row"
+    );
+    assert_eq!(
+        state.apps().last().unwrap().brand,
+        "jellyfin",
+        "with Jellyfin's logo"
+    );
+    // On Netflix: the Games row, no Jellyfin row.
+    state.focus = first_app(&state);
+    let _ = controls(&state);
+    assert_eq!(row_names(&state), vec![0]);
+    // Left from the first tile wraps to the Jellyfin tile: its row appears,
+    // first, right under Favorites; Games follows.
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| matches!(c.target, Target::StackCard(0, _)))
+    );
+    // Down goes straight into it.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::StackCard(0, 0));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    // OK goes down into it too; it stays while the remote is there.
+    assert_eq!(state.activate(), vec![]);
+    assert_eq!(state.focus, Target::StackCard(0, 0));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, Target::StackCard(0, 1));
+    // Down to Games and back up: still there; Up again returns to the
+    // Jellyfin tile, not the app above the card.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::StackCard(1, 0));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    press(&mut state, Direction::Up);
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    // Another tile: the row goes away again.
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, first_app(&state));
+    assert_eq!(row_names(&state), vec![0]);
+    // Luma's own tile has no app options.
+    state.focus = Target::App(JELLYFIN_TILE.into());
+    state.options();
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn the_jellyfin_app_tile_stands_for_jellyfin_when_it_is_a_favorite() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(true);
+    let mut favorites = state.preferences.favorites(&state.inventory.apps);
+    favorites.push("org.jellyfin.webos".into());
+    state.preferences.favorites = Some(favorites);
+    let apps: Vec<String> = state.apps().iter().map(|a| a.id.clone()).collect();
+    assert!(apps.contains(&"org.jellyfin.webos".to_owned()));
+    assert!(
+        !apps.contains(&JELLYFIN_TILE.to_owned()),
+        "no second Jellyfin tile"
+    );
+    state.focus = Target::App("org.jellyfin.webos".into());
+    let _ = controls(&state);
+    assert_eq!(row_names(&state), vec![1, 0]);
+    // OK still opens the app itself.
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("org.jellyfin.webos".into())]
+    );
+    state.launching = false;
+    state.focus = first_app(&state);
+    assert_eq!(row_names(&state), vec![0]);
+}
+
+#[test]
+fn without_jellyfin_signed_in_there_is_no_tile() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    state.preferences.jellyfin = Default::default();
+    assert!(state.apps().iter().all(|a| a.id != JELLYFIN_TILE));
+    assert_eq!(state.jellyfin_tile_id(), None);
+}
+
+#[test]
+fn every_layout_returns_up_from_the_jellyfin_rows_to_the_jellyfin_tile() {
+    use crate::layout::Layout;
+    use crate::state::JELLYFIN_TILE;
+    for layout in [Layout::Rail, Layout::Dock, Layout::Flip] {
+        let mut state = jellyfin_home(false);
+        state.preferences.layout = layout;
+        state.focus = Target::App(JELLYFIN_TILE.into());
+        let _ = controls(&state);
+        assert_eq!(state.activate(), vec![], "{layout:?}");
+        assert_eq!(state.focus, Target::StackCard(0, 0), "{layout:?}");
+        for _ in 0..4 {
+            if matches!(state.focus, Target::App(_)) {
+                break;
+            }
+            press(&mut state, Direction::Up);
+        }
+        assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()), "{layout:?}");
+    }
 }

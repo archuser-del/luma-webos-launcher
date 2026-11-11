@@ -3292,6 +3292,17 @@ fn run() -> Result<(), String> {
                     if state.set_inventory(inventory, warning) {
                         let _ = storage::save(&preferences_path, &state.preferences);
                     }
+                    // Desktop QA of the HDMI buttons: LUMA_SIGNALS_PREVIEW=1:false,2:true
+                    // (port number: has a picture). The desktop has no HDMI.
+                    #[cfg(debug_assertions)]
+                    if let Ok(spec) = std::env::var("LUMA_SIGNALS_PREVIEW") {
+                        let signals: Vec<(u8, bool)> = spec
+                            .split(',')
+                            .filter_map(|pair| pair.split_once(':'))
+                            .filter_map(|(port, on)| Some((port.parse().ok()?, on == "true")))
+                            .collect();
+                        model::apply_signals(&mut state.inventory.inputs, &signals);
+                    }
                     if initial_focus
                         && state.focus == Target::Nav(0)
                         && state.page == state::Page::Home

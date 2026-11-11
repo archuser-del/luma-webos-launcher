@@ -38,6 +38,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 **Home**
 
 - Each layout arranges Home its own way. **Classic**: headline and weather on top, Favorites, then the content rows. **Shelf** (Rail): Favorites and the HDMI switch buttons first, then the headline beside the weather, with a content row already in view. **Stage** (Dock): the wallpaper keeps the top of the screen, the widgets sit in its corner, and the headline, switch buttons and Favorites rest low above the dock. **Mirror**: widgets on the left, the headline and the Favorites title set against the right edge. Up and Down follow each arrangement from top to bottom.
+- A Jellyfin tile in Favorites (the Jellyfin app's own tile when it is a favorite, else one Luma adds at the end, one press of Left from your first app). Jellyfin's rows show only while that tile is selected, right under Favorites; Down goes into them and Up comes back to the tile.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.
@@ -55,7 +56,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 
 **Inputs**
 
-- When an HDMI input has a picture, Home shows **Switch to PlayStation 5 · HDMI 1** beside the Favorite apps title, one press of Up from your apps. It uses the name you gave the input, else the one the TV reports over HDMI-CEC. Signal detection is most reliable with root; without it, a plugged-in cable counts.
+- Above Favorites, one small button per plugged-in HDMI input, by name (**PlayStation 5 · HDMI 1**), one press of Up from your apps. Inputs with a picture have a green dot; a device that is plugged in but asleep is grayed out (OK still switches to it). Names are the ones you gave the inputs, else what the TV reports over HDMI-CEC. Signal detection needs root; without it, every plugged-in input counts as live.
 
 **Movies, series and music (Jellyfin, Plex)**
 
@@ -283,14 +284,14 @@ player keeps up to 400 lines and sends them the next time it starts.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.6.3_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.4_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
 `ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.2.0_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.6.3_arm.ipk
+ares-install --device tv com.archbtw.luma_2.6.4_arm.ipk
 ares-install --device tv com.archbtw.luma.player_0.2.0_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
@@ -324,7 +325,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.6.3_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.4_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):
