@@ -48,8 +48,11 @@ pub const LAYOUT_SECTION: usize = 8;
 pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 8, 7, 2, 3, 4, 5];
 pub const APPS_COLUMNS: usize = 6;
 pub const HOME_STRIP_LEFT: f32 = 84.;
-/// Luma's own Jellyfin tile at the end of Favorites.
-pub const JELLYFIN_TILE: &str = "luma:jellyfin";
+/// Seconds Home takes to turn to Jellyfin and back.
+pub const JELLYFIN_GLIDE: f32 = 0.32;
+/// Luma's own Jellyfin tile in Favorites. Saved in the favorites list like
+/// an app, so it can be moved; no app is installed under this id.
+pub const JELLYFIN_TILE: &str = "com.archbtw.luma.jellyfin";
 pub const HOME_STRIP_RIGHT: f32 = 1836.;
 pub const HOME_VIEWPORT_LEFT: f32 = 0.;
 pub const HOME_VIEWPORT_RIGHT: f32 = 1920.;
@@ -547,6 +550,9 @@ pub struct State {
     pub home_pick: Option<String>,
     /// Luma's own Jellyfin tile, for when the Jellyfin app is not a favorite.
     jellyfin_tile: App,
+    /// Jellyfin focus on Home: (on, since, where the glide started). Kept in
+    /// a Cell because drawing notices the change.
+    jellyfin_mode: std::cell::Cell<(bool, Instant, f32)>,
     /// The debug log file this run writes, while the log is on.
     pub debug_log_file: Option<String>,
     pub inventory: Inventory,
@@ -722,6 +728,7 @@ impl State {
             focus: Target::Nav(0),
             chrome_return: None,
             home_pick: None,
+            jellyfin_mode: std::cell::Cell::new((false, Instant::now(), 0.)),
             jellyfin_tile: {
                 let mut tile = App::new(JELLYFIN_TILE, "Jellyfin");
                 // Jellyfin's logo and colours, as on the Jellyfin app's tile.
@@ -1639,6 +1646,7 @@ impl State {
                 .ha_scene_fired
                 .as_ref()
                 .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < SCENE_FIRED)
+            || self.jellyfin_gliding()
             || self.previous_page_layer.is_some()
             || self.previous_panel_layer.is_some()
             || self.previous_sidebar_layer.is_some()
@@ -1732,15 +1740,7 @@ impl State {
     pub fn apps(&self) -> Vec<&App> {
         let ids = self.preferences.favorites(&self.inventory.apps);
         if self.page == Page::Home {
-            let mut apps: Vec<&App> = ids
-                .iter()
-                .filter(|id| !self.preferences.hidden.contains(id))
-                .filter_map(|id| self.inventory.apps.iter().find(|app| &app.id == id))
-                .collect();
-            if self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE) {
-                apps.push(&self.jellyfin_tile);
-            }
-            return apps;
+            return self.home_apps();
         }
         let query = self.query.to_lowercase();
         let mut apps: Vec<_> = self
@@ -1807,17 +1807,63 @@ impl State {
         }
     }
 
-    pub fn home_scroll_max(&self) -> f32 {
-        let count = self
-            .preferences
-            .favorites(&self.inventory.apps)
+    /// Favorites in their saved order, Luma's Jellyfin tile included: where
+    /// it was moved to, else at the end.
+    pub fn home_favorite_ids(&self) -> Vec<String> {
+        let mut ids = self.preferences.favorites(&self.inventory.apps);
+        if self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE)
+            && !ids.iter().any(|id| id == JELLYFIN_TILE)
+        {
+            ids.push(JELLYFIN_TILE.to_owned());
+        }
+        ids
+    }
+
+    /// The tiles of Home's Favorites row.
+    fn home_apps(&self) -> Vec<&App> {
+        let tile = self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE);
+        self.home_favorite_ids()
             .iter()
-            .filter(|id| {
-                !self.preferences.hidden.contains(id)
-                    && self.inventory.apps.iter().any(|app| &app.id == *id)
+            .filter(|id| !self.preferences.hidden.contains(id))
+            .filter_map(|id| {
+                if id == JELLYFIN_TILE {
+                    tile.then_some(&self.jellyfin_tile)
+                } else {
+                    self.inventory.apps.iter().find(|app| &app.id == id)
+                }
             })
-            .count()
-            + usize::from(self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE));
+            .collect()
+    }
+
+    /// 0 → 1 while Home turns to Jellyfin: the headline, its caption and
+    /// the widgets fade out, Favorites and the Jellyfin rows glide up.
+    pub fn jellyfin_focus(&self) -> f32 {
+        let on = self.page == Page::Home
+            && self.jellyfin_tile_id().is_some()
+            && self.jellyfin_rows_shown();
+        let (target, since, from) = self.jellyfin_mode.get();
+        let goal = if target { 1. } else { 0. };
+        let now = if self.preferences.reduced_motion {
+            goal
+        } else {
+            let t = motion::progress(since.elapsed().as_secs_f32(), JELLYFIN_GLIDE);
+            from + (goal - from) * t
+        };
+        if on != target {
+            self.jellyfin_mode.set((on, Instant::now(), now));
+        }
+        now
+    }
+
+    fn jellyfin_gliding(&self) -> bool {
+        // Notices a change of selection first.
+        let _ = self.jellyfin_focus();
+        let (_, since, _) = self.jellyfin_mode.get();
+        !self.preferences.reduced_motion && since.elapsed().as_secs_f32() < JELLYFIN_GLIDE
+    }
+
+    pub fn home_scroll_max(&self) -> f32 {
+        let count = self.home_apps().len();
         let content = if count == 0 {
             0.
         } else {
@@ -2931,14 +2977,17 @@ impl State {
             return self.library_direction(direction);
         }
         if let Some(id) = self.moving.clone() {
-            let mut ids = self.preferences.favorites(&self.inventory.apps);
+            // The Jellyfin tile moves like an app; its place is saved too.
+            let mut ids = self.home_favorite_ids();
+            let tile = self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE);
             let slots: Vec<_> = ids
                 .iter()
                 .enumerate()
                 .filter_map(|(index, id)| {
                     (!self.preferences.hidden.contains(id)
-                        && self.inventory.apps.iter().any(|app| &app.id == id))
-                    .then_some(index)
+                        && (self.inventory.apps.iter().any(|app| &app.id == id)
+                            || (tile && id == JELLYFIN_TILE)))
+                        .then_some(index)
                 })
                 .collect();
             if let Some(index) = slots.iter().position(|slot| ids[*slot] == id) {

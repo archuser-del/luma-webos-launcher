@@ -924,7 +924,11 @@ pub fn scene_with_pill(
         let [top, solid] = match state.preferences.layout {
             Layout::Rail => [96., 146.],
             Layout::Dock => [100., 150.],
-            Layout::Classic | Layout::Flip => [150., 206.],
+            Layout::Classic | Layout::Flip => {
+                // Turned to Jellyfin, Favorites rise to just under the clock.
+                let j = state.jellyfin_focus();
+                [150. - 40. * j, 206. - 46. * j]
+            }
         };
         out.draw
             .push(Draw::EdgeFade(Some([top, solid, 2000., 2001.])));
@@ -2665,11 +2669,21 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         });
     }
     let widgets_end = (out.draw.len(), out.controls.len());
-    let favorites_top = match layout {
+    let rest_top = match layout {
         Layout::Rail => at(crate::layout::RAIL_FAVORITES_TOP),
         Layout::Dock => at(crate::layout::DOCK_FAVORITES_TOP),
         Layout::Classic | Layout::Flip => FAVORITES_TOP + home_content_offset - s,
     };
+    // Turned to Jellyfin: the headline and widgets give way, Favorites rise
+    // to the top (below the mini-player while music plays).
+    let jellyfin = state.jellyfin_focus();
+    let music = state.music.now.is_some();
+    let jellyfin_top = match layout {
+        Layout::Rail => rest_top,
+        Layout::Dock => at(if music { 266. } else { 176. }),
+        Layout::Classic | Layout::Flip => at(if music { 262. } else { 170. }),
+    };
+    let favorites_top = rest_top + (jellyfin_top - rest_top) * jellyfin;
     let favorites_row = favorites_top + FAVORITES_ROW - FAVORITES_TOP;
     let fav_label_start = out.draw.len();
     let title_w = assets.width(
@@ -2845,6 +2859,18 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             );
         }
         Layout::Classic | Layout::Flip => {}
+    }
+    // Turned to Jellyfin: its rows follow Favorites directly, and the
+    // headline, caption and widgets fade out (and take no focus once gone).
+    if jellyfin > 0. {
+        stacks_y += (favorites_bottom + 47. - stacks_y) * jellyfin;
+        for range in [greeting_start..caption_end.0, widgets_at.0..widgets_end.0] {
+            motion::transform_group(&mut out.draw[range], 0., 0., 1. - jellyfin);
+        }
+        if jellyfin > 0.5 {
+            out.controls.drain(widgets_at.1..widgets_end.1);
+            out.controls.drain(info_controls..caption_end.1);
+        }
     }
     stacks_view::home_stacks(out, state, assets, stacks_y);
     // Edit mode dims the page, so the widgets draw over everything else.

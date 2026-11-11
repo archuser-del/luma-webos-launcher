@@ -4767,3 +4767,95 @@ fn every_layout_returns_up_from_the_jellyfin_rows_to_the_jellyfin_tile() {
         assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()), "{layout:?}");
     }
 }
+
+#[test]
+fn the_jellyfin_tile_moves_like_an_app_and_keeps_its_place() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    let tile = Target::App(JELLYFIN_TILE.into());
+    let place = |state: &State| state.apps().iter().position(|a| a.id == JELLYFIN_TILE);
+    let last = state.apps().len() - 1;
+    assert_eq!(place(&state), Some(last));
+    // Hold OK on it, then Left twice, then OK: two places further left.
+    state.focus = tile.clone();
+    let _ = state.hold();
+    assert_eq!(state.moving.as_deref(), Some(JELLYFIN_TILE));
+    assert_eq!(press(&mut state, Direction::Left), vec![Effect::Save]);
+    assert_eq!(press(&mut state, Direction::Left), vec![Effect::Save]);
+    let _ = state.activate();
+    assert!(state.moving.is_none());
+    assert_eq!(place(&state), Some(last - 2));
+    // Saved with the favorites, so it survives a restart.
+    let saved = state.preferences.favorites.clone().unwrap();
+    assert!(saved.iter().any(|id| id == JELLYFIN_TILE));
+    let again =
+        serde_json::from_value::<Preferences>(serde_json::to_value(&state.preferences).unwrap())
+            .unwrap();
+    assert_eq!(again.favorites, Some(saved));
+    // Still the Jellyfin tile: selecting it shows its row.
+    state.focus = tile;
+    let _ = controls(&state);
+    assert!(state.jellyfin_rows_shown());
+}
+
+#[test]
+fn selecting_jellyfin_hides_the_headline_and_widgets_and_lifts_favorites() {
+    use crate::layout::Layout;
+    use crate::state::JELLYFIN_TILE;
+    for layout in Layout::ALL {
+        let mut state = jellyfin_home(false);
+        state.preferences.background = "video".into();
+        state.preferences.show_weather = true;
+        state.preferences.layout = layout;
+        let first = first_app(&state);
+        state.focus = first.clone();
+        let before = controls(&state);
+        let app_y = |list: &[crate::state::Control]| {
+            list.iter().find(|c| c.target == first).unwrap().rect.y
+        };
+        let info = |list: &[crate::state::Control]| {
+            list.iter()
+                .filter(|c| {
+                    crate::layout::home_band(&c.target) == Some(crate::layout::HomeBand::Info)
+                })
+                .count()
+        };
+        assert!(
+            info(&before) > 0,
+            "{layout:?}: headline and widgets on Home"
+        );
+        state.focus = Target::App(JELLYFIN_TILE.into());
+        let _ = controls(&state); // the selection is noticed while drawing
+        let after = controls(&state);
+        assert_eq!(info(&after), 0, "{layout:?}: nothing of them to focus");
+        if layout == Layout::Rail {
+            assert_eq!(
+                app_y(&after),
+                app_y(&before),
+                "the shelf is already at the top"
+            );
+        } else {
+            assert!(
+                app_y(&after) < app_y(&before) - 100.,
+                "{layout:?}: Favorites rise"
+            );
+            // Under the clock; the dock keeps its clock at the bottom.
+            let top = if layout == Layout::Dock { 100. } else { 150. };
+            assert!(app_y(&after) > top, "{layout:?}: still under the clock");
+        }
+        // The Jellyfin row sits right under Favorites, on screen.
+        let card = after
+            .iter()
+            .find(|c| c.target == Target::StackCard(0, 0))
+            .unwrap_or_else(|| panic!("{layout:?}: Jellyfin row on screen"))
+            .rect;
+        assert!(
+            card.y > app_y(&after) && card.y + card.h < 1080.,
+            "{layout:?}"
+        );
+        // Back on another tile: all of it returns.
+        state.focus = first.clone();
+        let _ = controls(&state);
+        assert!(info(&controls(&state)) > 0, "{layout:?}");
+    }
+}
