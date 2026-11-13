@@ -327,6 +327,10 @@ pub struct Preferences {
     pub weather_day_history: Vec<DayRecord>,
     /// Fingerprints of recently shown Tech headlines, so they do not repeat.
     pub weather_phrase_seen: Vec<u32>,
+    /// Tech headlines written by the on-TV model when one is needed.
+    pub ai_headlines: bool,
+    /// AI headlines written but not shown yet.
+    pub weather_ai_lines: Vec<crate::tech_writer::Line>,
     pub input_modes: BTreeMap<String, InputMode>,
     /// Custom names by input app ID; the TV's port and label stay visible as detail.
     pub input_names: BTreeMap<String, String>,
@@ -397,6 +401,8 @@ impl Default for Preferences {
             greeting_style: GreetingStyle::Rude,
             weather_day_history: Vec::new(),
             weather_phrase_seen: Vec::new(),
+            ai_headlines: true,
+            weather_ai_lines: Vec::new(),
             input_modes: BTreeMap::new(),
             input_names: BTreeMap::new(),
             show_weather: true,

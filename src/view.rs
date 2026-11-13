@@ -3666,8 +3666,15 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                 ),
                 (
                     "Tech",
-                    None,
-                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude,
+                    Some("Built-in headlines"),
+                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude
+                        && !state.preferences.ai_headlines,
+                ),
+                (
+                    "Tech + AI",
+                    Some("New headlines written on the TV by a small AI model when needed"),
+                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude
+                        && state.preferences.ai_headlines,
                 ),
             ],
             Subpage::Temperature => vec![
@@ -4346,12 +4353,13 @@ fn background_settings(out: &mut Scene, state: &State, assets: &Assets) {
 
 fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
-    let style_value =
-        if state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude {
-            "Tech"
-        } else {
-            "Classic"
-        };
+    let style_value = match state.preferences.greeting_style {
+        crate::weather_phrases::GreetingStyle::Classic => "Classic",
+        crate::weather_phrases::GreetingStyle::Rude if state.preferences.ai_headlines => {
+            "Tech + AI"
+        }
+        crate::weather_phrases::GreetingStyle::Rude => "Tech",
+    };
     row(
         out,
         state,

@@ -89,11 +89,15 @@ pub struct Template {
     pub title: String,
     pub subtitle: String,
 }
-/// Every headline Luma can show: each fixed pair, plus every mixable title of
-/// a section with every mixable subtitle of that section.
-pub fn templates() -> &'static [Template] {
-    static TABLE: OnceLock<Vec<Template>> = OnceLock::new();
-    TABLE.get_or_init(|| {
+struct Parsed {
+    table: Vec<Template>,
+    titles: Vec<(Category, &'static str)>,
+    subtitles: Vec<(Category, &'static str)>,
+}
+
+fn parsed() -> &'static Parsed {
+    static PARSED: OnceLock<Parsed> = OnceLock::new();
+    PARSED.get_or_init(|| {
         let mut current = None;
         let mut list = "";
         let mut table = Vec::new();
@@ -136,8 +140,40 @@ pub fn templates() -> &'static [Template] {
                 });
             }
         }
-        table
+        Parsed {
+            table,
+            titles,
+            subtitles,
+        }
     })
+}
+
+/// Every headline Luma can show: each fixed pair, plus every mixable title of
+/// a section with every mixable subtitle of that section.
+pub fn templates() -> &'static [Template] {
+    &parsed().table
+}
+
+/// The mixable subtitles of a weather section (they fit any title).
+pub fn subtitles(category: Category) -> impl Iterator<Item = &'static str> {
+    parsed()
+        .subtitles
+        .iter()
+        .filter(move |(c, _)| *c == category)
+        .map(|(_, s)| *s)
+}
+
+/// Whether a title is one of the built-in ones (any section).
+pub fn known_title(title: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    parsed()
+        .titles
+        .iter()
+        .any(|(_, t)| t.to_lowercase() == title)
+        || parsed()
+            .table
+            .iter()
+            .any(|t| t.title.to_lowercase() == title)
 }
 
 /// How many shown headlines Luma remembers, so none comes back soon.
@@ -208,6 +244,12 @@ pub struct Engine {
     last_reading: Option<Reading>,
     last_update: i64,
     chosen_category: Option<Category>,
+    /// Set when a new headline was needed and no AI line was waiting for this
+    /// weather: the moment to run the model.
+    pub wants_ai: Option<Category>,
+    /// The headline on screen came from the model.
+    pub current_ai: bool,
+    current_since: i64,
     chosen_bucket: i64,
     change_until: i64,
     old_label: String,
@@ -329,6 +371,17 @@ impl Engine {
         if choices.is_empty() {
             return save;
         }
+        let ai = prefs.ai_headlines
+            && prefs.greeting_style == GreetingStyle::Rude
+            && !matches!(category, Category::Still | Category::Change);
+        if ai {
+            if self.take_ai(prefs, category, now) {
+                self.chosen_category = Some(category);
+                self.chosen_bucket = bucket;
+                return true;
+            }
+            self.wants_ai = Some(category);
+        }
         // Headlines not shown lately; once a section has shown them all, its
         // memory starts over (keeping only the last one, so it does not repeat
         // straight away).
@@ -389,7 +442,46 @@ impl Engine {
         self.changed_at = Some(Instant::now());
         self.chosen_category = Some(category);
         self.chosen_bucket = bucket;
+        self.current_ai = false;
+        self.current_since = now;
         save
+    }
+
+    /// Shows a waiting AI line for this weather, if there is one.
+    fn take_ai(&mut self, prefs: &mut Preferences, category: Category, now: i64) -> bool {
+        let Some(at) = prefs
+            .weather_ai_lines
+            .iter()
+            .position(|line| line.category == category.label())
+        else {
+            return false;
+        };
+        let line = prefs.weather_ai_lines.remove(at);
+        self.previous = self.current.replace(Phrase {
+            category,
+            title: line.title,
+            subtitle: line.subtitle,
+        });
+        self.changed_at = Some(Instant::now());
+        self.current_ai = true;
+        self.current_since = now;
+        true
+    }
+
+    /// New AI lines arrived: when the headline on screen is a built-in one
+    /// that went up in the last few minutes (while the model was writing),
+    /// swap in an AI line for the same weather.
+    pub fn offer_ai(&mut self, prefs: &mut Preferences, now: i64) -> bool {
+        let Some(category) = self.current.as_ref().map(|p| p.category) else {
+            return false;
+        };
+        if self.current_ai
+            || now - self.current_since > 300
+            || matches!(category, Category::Still | Category::Change)
+        {
+            return false;
+        }
+        self.take_ai(prefs, category, now)
     }
 }
 

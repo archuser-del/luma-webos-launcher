@@ -90,6 +90,10 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     'lib/libSDL2-2.0.so.0',
     'lib/libluma_hwplayer.so',
     'luma-demux',
+    'luma-llm',
+    'llm/smollm2-360m-instruct-q4_k_m.gguf',
+    'licenses/llama-cpp.txt',
+    'licenses/smollm2.txt',
     'licenses/sdl2.txt',
     'licenses/lucide.txt',
     'assets/font-metrics.json',
@@ -175,6 +179,7 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
       file.type === '5' ||
       file.name.endsWith('/autostart.sh') ||
       file.name.endsWith('/luma-demux') ||
+      file.name.endsWith('/luma-llm') ||
       file.name.endsWith('/home.sh') ||
       file.name.endsWith('/luma-helper') ||
       file.name.endsWith(`/${manifest.main}`);

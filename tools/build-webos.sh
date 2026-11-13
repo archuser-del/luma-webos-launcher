@@ -18,6 +18,8 @@ node "$ROOT/tools/webos-runtime.mjs"
 # demuxer. Both work in native ARM processes, not Chromium or software RGB.
 WEBOS_NDK="$WEBOS_NDK" sh "$ROOT/native/smp/build-hardware.sh"
 WEBOS_NDK="$WEBOS_NDK" sh "$ROOT/native/cinema/build.sh"
+# On-TV headline writer (llama.cpp) and its model; both pinned by SHA-256.
+WEBOS_NDK="$WEBOS_NDK" sh "$ROOT/native/llm/build.sh"
 export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABI_LINKER="$CC"
 # The target's soft-float *calling convention* is required by webOS, but its
 # default software FP codegen is not. Match the NDK's ARMv7/VFP baseline while

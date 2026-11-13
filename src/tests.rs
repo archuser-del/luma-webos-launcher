@@ -1889,6 +1889,12 @@ fn rude_greeting_is_default_and_choice_persists_without_touching_other_preferenc
     assert_eq!(state.focus, Target::GreetingStyle);
     state.activate();
     assert_eq!(state.subpage, Some(crate::state::Subpage::GreetingStyle));
+    // Tech + AI is the default.
+    assert_eq!(state.focus, Target::Choice(2));
+    state.focus = Target::Choice(1);
+    state.activate();
+    assert!(!state.preferences.ai_headlines);
+    state.activate();
     assert_eq!(state.focus, Target::Choice(1));
     state.focus = Target::Choice(0);
     assert_eq!(state.activate(), vec![Effect::Save]);

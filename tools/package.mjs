@@ -144,6 +144,18 @@ if (!(await fs.readdir(path.join(stage, 'lib'))).includes(sdlName)) {
 await copyLibrary(hwDir, 'libluma_hwplayer.so');
 await copyLibrary(hwDir, 'libluma_cinema.so');
 await fs.cp(path.join(root, 'assets/licenses'), path.join(stage, 'licenses'), { recursive: true });
+// AI Tech headlines: luma-llm (llama.cpp) and SmolLM2-360M, loaded only while
+// it writes headlines.
+const llmDir = path.join(out, 'llm');
+const llmModel = 'smollm2-360m-instruct-q4_k_m.gguf';
+await fs.copyFile(path.join(llmDir, 'luma-llm'), path.join(stage, 'luma-llm'));
+await fs.chmod(path.join(stage, 'luma-llm'), 0o755);
+await fs.mkdir(path.join(stage, 'llm'), { recursive: true });
+await fs.copyFile(path.join(llmDir, llmModel), path.join(stage, 'llm', llmModel));
+await fs.copyFile(
+  path.join(llmDir, 'llama.cpp-LICENSE'),
+  path.join(stage, 'licenses', 'llama-cpp.txt'),
+);
 await fs.writeFile(path.join(stage, 'appinfo.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const state = path.join(out, 'cli-state');
 await fs.mkdir(state, { recursive: true });

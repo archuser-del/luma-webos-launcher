@@ -39,6 +39,7 @@ mod stacks;
 mod state;
 mod steam;
 mod storage;
+mod tech_writer;
 mod typography;
 mod ui_sound;
 mod vector;
@@ -1982,10 +1983,78 @@ fn weather_tick(
         local.hour(),
     );
     state.dirty |= previous_phrase != state.rude_weather.current;
+    let mut saved = saved;
+    if let Some(category) = state.rude_weather.wants_ai.take()
+        && state.preferences.ai_headlines
+        && state.preferences.greeting_style == weather_phrases::GreetingStyle::Rude
+    {
+        let seed = now as u64 ^ u64::from(local.nanosecond()).rotate_left(32);
+        if let Some(note) = state.tech_writer.request(category, seed) {
+            debug_log!("{note}");
+        }
+    }
+    if let Some(outcome) = state.tech_writer.poll() {
+        saved |= accept_ai_headlines(state, outcome, now);
+    }
     if saved {
         let _ = storage::save(preferences_path, &state.preferences);
         state.dirty = true;
     }
+}
+
+/// Files the lines a model run wrote, then lets the Home headline use one.
+fn accept_ai_headlines(state: &mut State, outcome: tech_writer::Outcome, now: i64) -> bool {
+    debug_log!(
+        "AI headlines: run took {:.1} s{}{}",
+        outcome.elapsed.as_secs_f32(),
+        if outcome.stats.is_empty() { "" } else { " · " },
+        outcome.stats.join(" · ")
+    );
+    if let Some(error) = &outcome.error {
+        debug_log!("AI headlines: {error}");
+    }
+    let label = outcome.category.label();
+    let builtin: Vec<&str> = weather_phrases::subtitles(outcome.category).collect();
+    let mut kept = 0;
+    for (index, (word, raw)) in outcome.lines.iter().enumerate() {
+        let Some((title, subtitle)) = tech_writer::accept(outcome.category, word, raw) else {
+            debug_log!("AI headline dropped ({word}): {raw}");
+            continue;
+        };
+        let lines = &mut state.preferences.weather_ai_lines;
+        if lines.iter().any(|line| line.title == title) {
+            continue;
+        }
+        let own = subtitle.is_some();
+        let subtitle = subtitle.unwrap_or_else(|| {
+            builtin
+                .get((now as usize).wrapping_add(index * 7) % builtin.len().max(1))
+                .map_or_else(String::new, |s| (*s).to_owned())
+        });
+        if subtitle.is_empty() {
+            continue;
+        }
+        debug_log!(
+            "AI headline kept ({word}): {title} | {subtitle}{}",
+            if own { "" } else { " (built-in subtitle)" }
+        );
+        lines.push(tech_writer::Line {
+            category: label.into(),
+            title,
+            subtitle,
+        });
+        kept += 1;
+        let waiting = lines.iter().filter(|line| line.category == label).count();
+        if waiting > tech_writer::KEEP
+            && let Some(oldest) = lines.iter().position(|line| line.category == label)
+        {
+            lines.remove(oldest);
+        }
+    }
+    if kept > 0 && state.rude_weather.offer_ai(&mut state.preferences, now) {
+        state.dirty = true;
+    }
+    kept > 0
 }
 
 /// Scripted pointer drag steps: mdown:x:y, mmove:x:y, mup:x:y.

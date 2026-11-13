@@ -15,6 +15,9 @@
   Resized to a 2560px JPEG; generated wallpapers/thumbnails retain the source license.
 - `assets/wallpapers/northern-lights.jpg`: Unsplash photo `1531366936337-7c912a4589a7`,
   https://images.unsplash.com/photo-1531366936337-7c912a4589a7, Unsplash License.
+- SmolLM2-360M-Instruct (Q4_K_M GGUF): Hugging Face, Apache License 2.0, `assets/licenses/smollm2.txt`.
+  Run by `luma-llm`, built from llama.cpp (MIT, `licenses/llama-cpp.txt` in the IPK); `native/llm/build.sh`
+  pins both downloads by SHA-256.
 - Inter variable font: Rasmus Andersson, SIL Open Font License 1.1, `assets/fonts/ofl.txt`.
 - Noto Sans SC: copyright 2014–2021 Adobe, SIL OFL 1.1. Source/license in `assets/fonts/`;
   `tools/font-assets.mjs` pins the Google Fonts revision and checksums. Generated regular/medium
