@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.4.1';
+const PLAYER_VERSION = '0.4.2';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -883,7 +883,7 @@ function probe(url) {
   x.onload = () => {
     const text = String(x.responseText || '').slice(0, 4000);
     const lines = /m3u8/.test(url)
-      ? text.split('\n').filter((l) => /^#EXT-X-(STREAM-INF|MEDIA|VERSION)/.test(l))
+      ? text.split('\n').filter((l) => /^#EXT-X-(STREAM-INF|MEDIA|VERSION|MAP)/.test(l))
       : [];
     plog(`server answered HTTP ${x.status}`, lines.slice(0, 4).join(' | '));
   };
@@ -902,12 +902,18 @@ function probe(url) {
 ['loadstart', 'canplay', 'stalled', 'pause', 'seeked', 'emptied', 'abort'].forEach((name) =>
   video.addEventListener(name, () => plog(`video ${name} at ${clock(video.currentTime)}`)),
 );
-video.addEventListener('loadedmetadata', () =>
+video.addEventListener('loadedmetadata', () => {
   plog(
     `video metadata: ${video.videoWidth}x${video.videoHeight}, ${clock(video.duration)},`,
     `${video.audioTracks ? video.audioTracks.length : '?'} audio tracks`,
-  ),
-);
+  );
+  // Copied video keeps the file's size; a much smaller picture means the
+  // server is converting it.
+  const wanted = jf && jf.plan && jf.plan.method !== 'Transcode' && jf.info.video.height;
+  if (wanted && video.videoHeight && video.videoHeight < wanted * 0.75) {
+    plog(`warning: the server sends ${video.videoHeight}p, the file is ${wanted}p (converted?)`);
+  }
+});
 video.addEventListener('playing', () => plog(`video playing at ${clock(video.currentTime)}`));
 video.addEventListener('waiting', () => plog(`video buffering at ${clock(video.currentTime)}`));
 video.addEventListener('ended', () => plog('video ended'));

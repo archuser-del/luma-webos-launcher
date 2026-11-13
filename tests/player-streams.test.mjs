@@ -91,7 +91,7 @@ test('HDR with TrueHD 7.1: the video is copied in HDR, the audio becomes E-AC-3 
   const caps = S.capabilities(tv());
   const p = S.plan(ctx(hdrRemux, caps));
   assert.equal(p.method, 'DirectStream');
-  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
+  assert.match(new URL(p.url).pathname, /main\.m3u8$/);
   const q = params(p.url);
   assert.equal(q.get('VideoCodec'), 'hevc');
   assert.equal(q.get('AllowVideoStreamCopy'), 'true');
@@ -201,7 +201,7 @@ test('a TV that decodes DTS gets DTS directly; supported audio is copied in HLS'
   const p = S.plan(ctx(dts, caps));
   // AVI is no direct-play container: remuxed over HLS, video and DTS copied.
   assert.equal(p.method, 'DirectStream');
-  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
+  assert.match(new URL(p.url).pathname, /main\.m3u8$/);
   assert.equal(params(p.url).get('AudioCodec').split(',')[0], 'dts');
   assert.equal(params(p.url).get('VideoCodec'), 'h264');
 });

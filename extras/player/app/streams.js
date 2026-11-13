@@ -323,7 +323,12 @@
     }
     const method = transcodeVideo ? 'Transcode' : 'DirectStream';
     return {
-      url: `${ctx.base}/Videos/${ctx.item}/master.m3u8?${query(pairs)}`,
+      // main.m3u8, not master.m3u8: for HDR video that is copied, Jellyfin's
+      // master playlist also lists H.264 and HEVC SDR conversions at the same
+      // bandwidth "for compatibility", and the TV may pick one of those (a
+      // 416x234 re-encode of a 4K film). The variant playlist has only the
+      // stream asked for.
+      url: `${ctx.base}/Videos/${ctx.item}/main.m3u8?${query(pairs)}`,
       method,
       reasons,
       audioOut,
