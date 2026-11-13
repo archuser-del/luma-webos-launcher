@@ -18,6 +18,68 @@ pub fn default_path(webos: bool) -> Result<PathBuf, String> {
     Ok(base.join("luma-native/preferences.json"))
 }
 
+/// The app user's uid and gid, when Luma runs as root in place of LG Home and
+/// writes files as that user (see `adopt_app_owner`).
+#[cfg(all(feature = "webos", unix))]
+static APP_OWNER: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+
+/// As LG's Home, Luma runs as root, while its settings folder belongs to the
+/// app user (from running as a normal app). Root's files there would be
+/// refused (the folder check below) or, written anyway, unreadable later for
+/// the normal app. So Luma keeps root but makes the kernel check and own
+/// every file it writes as that user (setfsuid). Must run before any thread
+/// starts: the file identity is per thread and new threads inherit it.
+#[cfg(all(feature = "webos", unix))]
+pub fn adopt_app_owner() {
+    use std::os::unix::fs::MetadataExt;
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        eprintln!("Luma as Home: running as uid {euid}");
+        return;
+    }
+    let folder = PathBuf::from("/media/developer").join(crate::platform::APP_ID);
+    let Ok(metadata) = fs::symlink_metadata(&folder) else {
+        eprintln!("Luma as Home: no app settings folder yet; files are written as root");
+        return;
+    };
+    if !metadata.is_dir() || metadata.uid() == 0 {
+        eprintln!("Luma as Home: {} is not an app folder", folder.display());
+        return;
+    }
+    let (uid, gid) = (metadata.uid(), metadata.gid());
+    unsafe {
+        libc::setfsgid(gid);
+        libc::setfsuid(uid);
+    }
+    // An invalid id changes nothing and returns the current one.
+    let now = unsafe { libc::setfsuid(u32::MAX) } as u32;
+    if now == uid {
+        let _ = APP_OWNER.set((uid, gid));
+        eprintln!("Luma as Home: files are read and written as the app user (uid {uid})");
+    } else {
+        eprintln!("Luma as Home: could not write files as uid {uid}");
+    }
+}
+
+/// Runs `write` with root's file identity, for the few files outside the
+/// app's folder that only root may write (in /var/lib/luma-home).
+pub fn as_root<T>(write: impl FnOnce() -> T) -> T {
+    #[cfg(all(feature = "webos", unix))]
+    if let Some(&(uid, gid)) = APP_OWNER.get() {
+        unsafe {
+            libc::setfsuid(0);
+            libc::setfsgid(0);
+        }
+        let result = write();
+        unsafe {
+            libc::setfsgid(gid);
+            libc::setfsuid(uid);
+        }
+        return result;
+    }
+    write()
+}
+
 #[cfg(all(feature = "webos", unix))]
 fn tv_path() -> Result<PathBuf, String> {
     use std::{
@@ -69,7 +131,11 @@ fn tv_path() -> Result<PathBuf, String> {
         };
         // Do not silently reuse a symlink or root-created debug directory as
         // another process's private app storage.
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        // The user files are written as: the app user also while Luma is Home.
+        let writer = APP_OWNER
+            .get()
+            .map_or_else(|| unsafe { libc::geteuid() }, |&(uid, _)| uid);
+        if !metadata.is_dir() || metadata.uid() != writer {
             failures.push(format!(
                 "{} is not owned by the app user",
                 directory.display()
@@ -134,6 +200,9 @@ fn tv_path() -> Result<PathBuf, String> {
             }
         }
         eprintln!("Luma persistent storage: {}", directory.display());
+        for skipped in &failures {
+            eprintln!("Luma persistent storage skipped {skipped}");
+        }
         return Ok(path);
     }
     Err(format!(
