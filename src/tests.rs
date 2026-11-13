@@ -4926,3 +4926,21 @@ fn system_sets_whether_the_tv_plays_truehd_and_dts() {
         .rect;
     assert!(wake.y >= dts.y + dts.h, "{wake:?} under {dts:?}");
 }
+
+#[test]
+fn auto_resolution_lowered_by_the_launch_bug_gets_1440p_back_once() {
+    let mut old: Preferences =
+        serde_json::from_str(r#"{"ui_resolution":"auto","auto_ui_cap":"1080p"}"#).unwrap();
+    old.sanitize();
+    assert_eq!(old.auto_ui_cap, crate::model::UiResolution::Qhd);
+    let mut again: Preferences = serde_json::from_str(
+        &serde_json::to_string(&Preferences {
+            auto_ui_cap: crate::model::UiResolution::Hd,
+            ..old
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    again.sanitize();
+    assert_eq!(again.auto_ui_cap, crate::model::UiResolution::Hd);
+}

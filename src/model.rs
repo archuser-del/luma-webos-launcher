@@ -318,6 +318,10 @@ pub struct Preferences {
     pub ui_resolution: UiResolution,
     /// Last stable Auto ceiling for this particular TV. Lowered only; no oscillation.
     pub auto_ui_cap: UiResolution,
+    /// 2.6.9 lowered Auto to 1080p on the slow frames of a player launch;
+    /// preferences from before 2.6.11 (0 here) get 1440p back once.
+    #[serde(default)]
+    pub auto_ui_cap_rev: u8,
 
     pub greeting_style: GreetingStyle,
     pub weather_day_history: Vec<DayRecord>,
@@ -388,6 +392,7 @@ impl Default for Preferences {
             screensaver_minutes: 10,
             ui_resolution: UiResolution::Qhd,
             auto_ui_cap: UiResolution::Uhd,
+            auto_ui_cap_rev: 1,
 
             greeting_style: GreetingStyle::Rude,
             weather_day_history: Vec::new(),
@@ -514,6 +519,12 @@ impl Preferences {
     pub fn sanitize(&mut self) {
         if self.auto_ui_cap == UiResolution::Auto {
             self.auto_ui_cap = UiResolution::Uhd;
+        }
+        if self.auto_ui_cap_rev < 1 {
+            if self.auto_ui_cap == UiResolution::Hd {
+                self.auto_ui_cap = UiResolution::Qhd;
+            }
+            self.auto_ui_cap_rev = 1;
         }
         self.heading_size_pct = self.heading_size_pct.clamp(85, 170);
         self.text_size_pct = self.text_size_pct.clamp(90, 150);
