@@ -4881,3 +4881,48 @@ fn a_click_beside_everything_clears_home_and_any_key_brings_it_back() {
     state.moving = Some("netflix".into());
     assert!(!state.home_can_clear());
 }
+
+#[test]
+fn system_sets_whether_the_tv_plays_truehd_and_dts() {
+    use crate::model::AudioSupport;
+    use crate::state::{SYSTEM_SECTION, SettingsLevel};
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    state.focus = Target::Sidebar(SYSTEM_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    for _ in 0..8 {
+        if state.focus == Target::Setting(12) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert_eq!(state.focus, Target::Setting(12), "TrueHD after Debug Log");
+    assert_eq!(
+        state.preferences.truehd,
+        AudioSupport::Auto,
+        "the TV is asked first"
+    );
+    for want in [AudioSupport::On, AudioSupport::Off, AudioSupport::Auto] {
+        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(state.preferences.truehd, want);
+    }
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Setting(13));
+    state.activate();
+    assert_eq!(state.preferences.dts, AudioSupport::On);
+    // Saved as words the player reads.
+    let saved = serde_json::to_value(&state.preferences).unwrap();
+    assert_eq!(saved["truehd"], "auto");
+    assert_eq!(saved["dts"], "on");
+    // Root features stay below every System row.
+    state.root = Some(crate::platform::RootStatus::default());
+    let dts = rect_of(&state, &Target::Setting(13));
+    let wake = controls(&state)
+        .into_iter()
+        .find(|c| c.target == Target::Setting(9))
+        .unwrap()
+        .rect;
+    assert!(wake.y >= dts.y + dts.h, "{wake:?} under {dts:?}");
+}

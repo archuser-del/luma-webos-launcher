@@ -87,13 +87,15 @@ test('a supported MKV plays directly, original file and all', () => {
   assert.equal(p.label, 'Direct Play · E-AC-3');
 });
 
-test('HDR with TrueHD: the video is copied in HDR, only the audio becomes FLAC', () => {
+test('HDR with TrueHD 7.1: the video is copied in HDR, the audio becomes E-AC-3 5.1', () => {
   const caps = S.capabilities(tv());
   const p = S.plan(ctx(hdrRemux, caps));
   assert.equal(p.method, 'DirectStream');
+  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
   const q = params(p.url);
   assert.equal(q.get('VideoCodec'), 'hevc');
   assert.equal(q.get('AllowVideoStreamCopy'), 'true');
+  assert.equal(q.get('SegmentContainer'), 'mp4');
   // No limits that would stop Jellyfin from copying the video.
   for (const key of [
     'VideoBitrate',
@@ -104,11 +106,73 @@ test('HDR with TrueHD: the video is copied in HDR, only the audio becomes FLAC',
   ]) {
     assert.equal(q.get(key), null, key);
   }
-  assert.equal(q.get('AudioCodec').split(',')[0], 'flac');
+  // webOS refuses surround FLAC (Jellyfin's own webOS profile says so too).
+  assert.equal(q.get('AudioCodec'), 'eac3,ac3,aac');
   assert.equal(q.get('AudioStreamIndex'), '1');
-  assert.equal(q.get('TranscodingMaxAudioChannels'), '8');
-  assert.equal(p.audioOut, 'flac');
-  assert.equal(p.label, 'Direct Stream · HDR10 · TrueHD → FLAC');
+  assert.equal(q.get('TranscodingMaxAudioChannels'), '6');
+  assert.equal(p.audioOut, 'eac3');
+  assert.equal(p.fallbackLeft, true);
+  assert.equal(p.label, 'Direct Stream · HDR10 · TrueHD → E-AC-3');
+});
+
+test('a stereo track the TV cannot decode becomes FLAC, lossless', () => {
+  const caps = S.capabilities(tv());
+  const stereo = {
+    ...hdrRemux,
+    MediaStreams: [
+      hdrRemux.MediaStreams[0],
+      stream(1, 'Audio', 'dts', { IsDefault: true, Channels: 2 }),
+    ],
+  };
+  const q = params(S.plan(ctx(stereo, caps)).url);
+  assert.equal(q.get('AudioCodec'), 'flac,eac3,ac3,aac');
+  assert.equal(q.get('TranscodingMaxAudioChannels'), '2');
+});
+
+test('surround FLAC in the file is converted, not played as it is', () => {
+  const caps = S.capabilities(tv());
+  const flac = {
+    ...sdrMovie,
+    MediaStreams: [
+      sdrMovie.MediaStreams[0],
+      stream(1, 'Audio', 'flac', { IsDefault: true, Channels: 6 }),
+    ],
+  };
+  const p = S.plan(ctx(flac, caps));
+  assert.equal(p.method, 'DirectStream');
+  assert.equal(params(p.url).get('AudioCodec'), 'eac3,ac3,aac');
+  const two = {
+    ...flac,
+    MediaStreams: [
+      sdrMovie.MediaStreams[0],
+      stream(1, 'Audio', 'flac', { IsDefault: true, Channels: 2 }),
+    ],
+  };
+  assert.equal(S.plan(ctx(two, caps)).method, 'DirectPlay');
+});
+
+test('when the TV refuses a converted stream, the audio steps down to AC-3, then AAC', () => {
+  const caps = S.capabilities(tv());
+  const first = S.plan(ctx(hdrRemux, caps, { fallback: 1 }));
+  assert.equal(params(first.url).get('AudioCodec'), 'ac3,aac');
+  assert.equal(params(first.url).get('AllowVideoStreamCopy'), 'true', 'still HDR');
+  assert.equal(first.fallbackLeft, true);
+  const last = S.plan(ctx(hdrRemux, caps, { fallback: 2 }));
+  assert.equal(params(last.url).get('AudioCodec'), 'aac');
+  assert.equal(last.fallbackLeft, false);
+});
+
+test('a TV set to play TrueHD gets the file as it is', () => {
+  const caps = S.capabilities(tv(), { truehd: 'on' });
+  assert.equal(caps.audio.truehd, true);
+  const p = S.plan(ctx(hdrRemux, caps));
+  assert.equal(p.method, 'DirectPlay');
+  assert.equal(p.label, 'Direct Play · HDR10 · TrueHD');
+  // And one set to convert it never does, whatever it answers.
+  const off = S.capabilities(tv(['audio/mp4; codecs="mlpa"']), { truehd: 'off' });
+  assert.equal(off.audio.truehd, false);
+  const asked = S.capabilities(tv(['audio/mp4; codecs="mlpa"']), { truehd: 'auto' });
+  assert.equal(asked.audio.truehd, true, 'Ask the TV: its answer counts');
 });
 
 test('picking the AC3 track of the same HDR file plays it directly', () => {
@@ -135,9 +199,9 @@ test('a TV that decodes DTS gets DTS directly; supported audio is copied in HLS'
   };
   const caps = S.capabilities(tv(['audio/mp4; codecs="dts-"']));
   const p = S.plan(ctx(dts, caps));
-  // AVI is no direct-play container: remuxed into MKV, video and DTS copied.
+  // AVI is no direct-play container: remuxed over HLS, video and DTS copied.
   assert.equal(p.method, 'DirectStream');
-  assert.match(new URL(p.url).pathname, /stream\.mkv$/);
+  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
   assert.equal(params(p.url).get('AudioCodec').split(',')[0], 'dts');
   assert.equal(params(p.url).get('VideoCodec'), 'h264');
 });
@@ -201,63 +265,4 @@ test('a failed direct play can be retried as a stream copy', () => {
   const p = S.plan(ctx(sdrMovie, caps, { forceStream: true }));
   assert.equal(p.method, 'DirectStream');
   assert.equal(params(p.url).get('AllowVideoStreamCopy'), 'true');
-});
-
-// From a debug log (webOS, 2026-11): HEVC with FLAC over HLS fails at once
-// with "format error". DTS and TrueHD films now stream as one MKV.
-test('DTS or TrueHD audio streams as one MKV: video copied, audio to FLAC', () => {
-  const caps = S.capabilities(tv());
-  const dts = {
-    ...hdrRemux,
-    MediaStreams: [
-      hdrRemux.MediaStreams[0],
-      stream(1, 'Audio', 'dts', { IsDefault: true, Channels: 6 }),
-    ],
-  };
-  for (const source of [hdrRemux, dts]) {
-    const p = S.plan(ctx(source, caps));
-    assert.equal(p.method, 'DirectStream');
-    assert.equal(p.progressive, true);
-    const url = new URL(p.url);
-    assert.match(url.pathname, /\/Videos\/item1\/stream\.mkv$/);
-    const q = url.searchParams;
-    assert.equal(q.get('static'), 'false');
-    assert.equal(q.get('VideoCodec'), 'hevc');
-    assert.equal(q.get('AllowVideoStreamCopy'), 'true');
-    assert.equal(q.get('AudioCodec').split(',')[0], 'flac');
-    assert.equal(q.get('AudioStreamIndex'), '1');
-    assert.equal(q.get('SegmentContainer'), null, 'not HLS');
-    assert.equal(q.get('StartTimeTicks'), null, 'from the start');
-    assert.equal(p.audioPosition, 0, 'one audio track in the stream');
-    assert.match(p.label, /^Direct Stream · HDR10 · (TrueHD|DTS) → FLAC$/);
-  }
-});
-
-test('a continuous stream starts where the picture is', () => {
-  const caps = S.capabilities(tv());
-  const p = S.plan(ctx(hdrRemux, caps, { start: 674.5 }));
-  assert.equal(params(p.url).get('StartTimeTicks'), String(674.5 * 1e7));
-});
-
-test('when the TV refuses the MKV stream, HLS copies the video and never sends FLAC', () => {
-  const caps = S.capabilities(tv());
-  const p = S.plan(ctx(hdrRemux, caps, { hls: true, start: 60 }));
-  assert.equal(p.method, 'DirectStream');
-  assert.equal(p.progressive, false);
-  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
-  const q = params(p.url);
-  assert.equal(q.get('AllowVideoStreamCopy'), 'true', 'HDR stays HDR');
-  assert.equal(q.get('SegmentContainer'), 'mp4');
-  assert.ok(!q.get('AudioCodec').includes('flac'), q.get('AudioCodec'));
-  assert.equal(q.get('AudioCodec'), 'eac3,ac3,aac');
-  assert.equal(q.get('TranscodingMaxAudioChannels'), '6');
-  assert.equal(p.label, 'Direct Stream (HLS) · HDR10 · TrueHD → E-AC-3');
-});
-
-test('a video re-encode is still HLS, and its audio is never FLAC either', () => {
-  const caps = S.capabilities(tv());
-  const p = S.plan(ctx(sdrMovie, caps, { subtitle: 2 }));
-  assert.equal(p.method, 'Transcode');
-  assert.match(new URL(p.url).pathname, /master\.m3u8$/);
-  assert.ok(!params(p.url).get('AudioCodec').includes('flac'));
 });

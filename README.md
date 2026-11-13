@@ -64,7 +64,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Sign in with a code or a QR code on your phone: no typing with the remote.
 - A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
-- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit and just that audio track is converted to FLAC (lossless, up to 7.1), or to Dolby/AAC on a TV without FLAC. That arrives as one continuous MKV stream, which the TV plays like a file (webOS refuses HEVC with FLAC over HLS); seeking asks Jellyfin for the stream again from the new spot. Should the TV refuse that too, Luma Player tries HLS with the video still copied and the audio in E-AC-3. Jellyfin only transcodes the video for a codec the TV cannot decode, an image subtitle (PGS, VobSub) that has to be burned in, or a lower quality you pick. The player's top line says what is happening, e.g. "Direct Stream · HDR10 · TrueHD → FLAC".
+- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit over HLS (fMP4), as Jellyfin's own webOS app streams, and just that audio track is converted: to E-AC-3 5.1 for surround, or FLAC (lossless) for stereo, since webOS refuses FLAC with more than two channels. Should the TV refuse that, Luma Player steps down to AC-3, then AAC, still with the original video. webOS rarely admits to decoding TrueHD or DTS even where it does: **Settings › System › Dolby TrueHD audio** and **DTS audio** are _Ask the TV_ (default), _TV plays it_ (the file plays untouched) or _Convert it_. If a TV set to play it refuses a film after all, Luma Player converts that one and carries on.
 - **HDR stays HDR.** HDR10, HLG and Dolby Vision video is never re-encoded (Jellyfin would turn it into SDR), so HDR titles offer no lower qualities. Burning an image subtitle into an HDR film is the one exception, and that subtitle is labelled "burned in, SDR" so it is your choice.
 - **Version and Quality pickers** on the title card: choose between a title's versions (for example 4K HDR and 1080p) and between "Original" and lower qualities for SDR files. Audio, subtitles and quality can also be changed while playing.
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
@@ -285,15 +285,15 @@ player keeps up to 400 lines and sends them the next time it starts.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.6.6_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.6.7_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.3.0_all.ipk` plays
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.4.0_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.6.6_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.3.0_all.ipk
+ares-install --device tv com.archbtw.luma_2.6.7_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.4.0_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
@@ -326,7 +326,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.6.6_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.6.7_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

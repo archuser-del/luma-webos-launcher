@@ -3746,6 +3746,16 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
         WEATHER_SECTION => weather_settings(out, state, assets),
         crate::state::SMARTHOME_SECTION => smart_home_settings_view::render(out, state, assets),
         SYSTEM_SECTION => {
+            // The list scrolls inside its glass panel, never over the clock.
+            {
+                use tvos_settings_view::{MAX_HEIGHT, RIGHT, S16, TOP, WIDTH};
+                out.draw.push(Draw::Clip(Some(Rect::new(
+                    RIGHT,
+                    TOP + S16,
+                    WIDTH,
+                    MAX_HEIGHT - 2. * S16,
+                ))));
+            }
             for (position, (index, title, icon)) in [
                 (
                     3,
@@ -3760,6 +3770,8 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                 (7, "Original LG Home", "tv"),
                 (8, "Video library · full screen", "tv"),
                 (11, "Debug Log", "list"),
+                (12, "Dolby TrueHD audio", "volume"),
+                (13, "DTS audio", "volume"),
             ]
             .into_iter()
             .enumerate()
@@ -3773,13 +3785,16 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                         rect: Rect::new(640., 164.8 + position as f32 * 84. - s, 1120., 72.),
                         title,
                         icon: Some(icon),
-                        value: (index == 11).then(|| {
-                            language.t(if state.preferences.debug_log {
+                        value: match index {
+                            11 => Some(language.t(if state.preferences.debug_log {
                                 "stateOn"
                             } else {
                                 "stateOff"
-                            })
-                        }),
+                            })),
+                            12 => Some(state.preferences.truehd.label()),
+                            13 => Some(state.preferences.dts.label()),
+                            _ => None,
+                        },
                         description: None,
                         selected: false,
                         chevron: false,
@@ -3789,6 +3804,7 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
             if let Some(root) = state.root {
                 root_feature_rows(out, state, assets, root);
             }
+            out.draw.push(Draw::Clip(None));
         }
         _ => input_settings_groups(out, state, assets),
     }
@@ -3804,8 +3820,8 @@ fn root_feature_rows(
     let language = state.preferences.language;
     let x = tvos_settings_view::RIGHT + tvos_settings_view::S32;
     let w = tvos_settings_view::WIDTH - 2. * tvos_settings_view::S32;
-    // Under the five System rows.
-    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 5. * 92. + 16. - state.scroll;
+    // Under the seven System rows.
+    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 7. * 92. + 16. - state.scroll;
     out.text(
         "ROOT FEATURES",
         Rect::new(x + 32., y + 6., w - 64., 36.),

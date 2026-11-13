@@ -5374,6 +5374,8 @@ impl State {
                         return vec![];
                     }
                     5 => return vec![Effect::Quit],
+                    12 => self.preferences.truehd = self.preferences.truehd.next(),
+                    13 => self.preferences.dts = self.preferences.dts.next(),
                     11 => {
                         self.preferences.debug_log = !self.preferences.debug_log;
                         self.dirty = true;

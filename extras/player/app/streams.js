@@ -42,8 +42,23 @@
     alac: ['audio/mp4; codecs="alac"'],
     opus: ['audio/mp4; codecs="opus"', 'audio/webm; codecs="opus"'],
     vorbis: ['audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"'],
-    dts: ['audio/mp4; codecs="dts-"', 'audio/mp4; codecs="dtsc"', 'audio/vnd.dts'],
-    truehd: ['audio/mp4; codecs="mlpa"', 'audio/true-hd'],
+    // webOS rarely says yes to these even where it plays them (Jellyfin's
+    // client has manual switches for both); Luma has them in Settings › System.
+    dts: [
+      'audio/mp4; codecs="dts-"',
+      'audio/mp4; codecs="dts+"',
+      'audio/mp4; codecs="dtsc"',
+      'video/mp4; codecs="dts-"',
+      'audio/vnd.dts',
+      'audio/x-dts',
+    ],
+    truehd: [
+      'audio/mp4; codecs="mlpa"',
+      'video/mp4; codecs="mlpa"',
+      'audio/true-hd',
+      'audio/x-truehd',
+      'audio/vnd.dolby.mlp',
+    ],
     pcm: ['audio/wav; codecs="1"', 'audio/wav'],
   };
   const VIDEO_PROBES = {
@@ -106,7 +121,9 @@
   }
 
   /** What this TV can decode, asked of a <video> element. */
-  function capabilities(el) {
+  // `settings`: {truehd, dts} as set in Luma: 'auto' asks the TV, 'on' and
+  // 'off' overrule its answer.
+  function capabilities(el, settings) {
     const ask = (types) =>
       types.some((t) => {
         try {
@@ -122,10 +139,19 @@
     // Every webOS TV decodes these; a cautious probe never turns them off.
     audio.aac = true;
     video.h264 = true;
-    return { audio, video };
+    const asked = { truehd: audio.truehd, dts: audio.dts };
+    ['truehd', 'dts'].forEach((k) => {
+      const set = settings && settings[k];
+      if (set === 'on') audio[k] = true;
+      if (set === 'off') audio[k] = false;
+    });
+    return { audio, video, asked };
   }
 
-  function canAudio(caps, codec) {
+  // webOS plays FLAC in video only as stereo (Jellyfin's own webOS profile
+  // has the same rule); surround FLAC is refused like an unknown codec.
+  function canAudio(caps, codec, channels) {
+    if (family(codec) === 'flac' && channels > 2) return false;
     return !!caps.audio[family(codec)];
   }
   function canVideo(caps, codec) {
@@ -234,7 +260,7 @@
     if (burn) reasons.push('burning in subtitles');
     if (quality) reasons.push(`lower quality (${Math.round(quality.bitrate / 1e6)} Mbps)`);
     const transcodeVideo = reasons.length > 0;
-    const audioOk = !track || canAudio(caps, track.codec);
+    const audioOk = !track || canAudio(caps, track.codec, track.channels);
     const common = {
       MediaSourceId: info.id,
       PlaySessionId: ctx.session,
@@ -247,7 +273,6 @@
       return {
         url: `${ctx.base}/Videos/${ctx.item}/stream.${ext}?${query(Object.assign({ static: 'true' }, common))}`,
         method: 'DirectPlay',
-        progressive: false,
         reasons,
         audioOut: track ? track.codec : '',
         audioPosition: track ? track.position : 0,
@@ -256,52 +281,26 @@
       };
     }
 
-    // Audio the TV decodes is copied; anything else becomes FLAC (lossless),
-    // or Dolby/AAC if the TV has no FLAC.
-    const dolby = ['eac3', 'ac3', 'aac'].filter((c) => caps.audio[c]);
-    const startTicks = ctx.start > 0 ? Math.round(ctx.start * 1e7) : undefined;
-
-    // Direct Stream: one continuous MKV from Jellyfin, the video copied bit
-    // for bit and only the audio converted. To the TV it is the same kind of
-    // file it plays directly (HEVC, HDR and FLAC in MKV). HLS is not used for
-    // this: webOS refuses HEVC with FLAC over HLS ("format error"). Seeking
-    // asks Jellyfin for the stream again from the new position.
-    if (!transcodeVideo && !ctx.hls) {
-      const targets = (caps.audio.flac ? ['flac'] : []).concat(dolby);
-      const audioCodecs = audioOk && track ? [family(track.codec)].concat(targets) : targets;
-      const audioOut = audioOk && track ? track.codec : audioCodecs[0] || 'aac';
-      const pairs = Object.assign({ static: 'false' }, common, {
-        VideoCodec: family(info.video.codec),
-        AllowVideoStreamCopy: 'true',
-        AllowAudioStreamCopy: 'true',
-        AudioStreamIndex: track ? track.index : undefined,
-        AudioCodec: audioCodecs.filter((c, i) => audioCodecs.indexOf(c) === i).join(','),
-        // FLAC keeps 7.1; Dolby and AAC are limited to 5.1 by Jellyfin.
-        TranscodingMaxAudioChannels: audioOut === 'flac' || audioOk ? 8 : 6,
-        StartTimeTicks: startTicks,
-      });
-      return {
-        url: `${ctx.base}/Videos/${ctx.item}/stream.mkv?${query(pairs)}`,
-        method: 'DirectStream',
-        progressive: true,
-        reasons,
-        audioOut,
-        // The stream carries just the one audio track.
-        audioPosition: 0,
-        burn: false,
-        label: label('Direct Stream', info, track, audioOk ? null : audioOut),
-      };
-    }
-
-    // HLS from Jellyfin: for a video re-encode, and as the last try when the
-    // TV refused the MKV stream. Its audio is never FLAC (see above).
-    const audioCodecs = audioOk && track ? [family(track.codec)].concat(dolby) : dolby;
-    const audioOut = audioOk && track ? track.codec : audioCodecs[0] || 'aac';
+    // HLS (fMP4) from Jellyfin, the way Jellyfin's own webOS app streams:
+    // audio the TV decodes is copied; anything else is converted. A stereo
+    // track may become FLAC (lossless); surround becomes E-AC-3 5.1, as webOS
+    // refuses FLAC with more than two channels. ctx.fallback steps down to
+    // AC-3, then AAC, when the TV refuses a stream.
+    const channels = track ? track.channels : 0;
+    const dolby = ['eac3', 'ac3', 'aac']
+      .filter((c) => caps.audio[c])
+      .slice(Math.min(ctx.fallback || 0, 2));
+    const targets = (
+      caps.audio.flac && channels > 0 && channels <= 2 && !ctx.fallback ? ['flac'] : []
+    ).concat(dolby.length ? dolby : ['aac']);
+    const audioCodecs = audioOk && track ? [family(track.codec)].concat(targets) : targets;
+    const audioOut = audioOk && track ? track.codec : audioCodecs[0];
     const pairs = Object.assign({}, common, {
       SegmentContainer: 'mp4',
       AudioStreamIndex: track ? track.index : undefined,
       AudioCodec: audioCodecs.filter((c, i) => audioCodecs.indexOf(c) === i).join(','),
-      TranscodingMaxAudioChannels: audioOk ? 8 : 6,
+      // Jellyfin's Dolby and AAC encoders stop at 5.1, FLAC here at stereo.
+      TranscodingMaxAudioChannels: audioOk ? 8 : audioOut === 'flac' ? 2 : 6,
       BreakOnNonKeyFrames: 'true',
     });
     if (!transcodeVideo) {
@@ -326,14 +325,15 @@
     return {
       url: `${ctx.base}/Videos/${ctx.item}/master.m3u8?${query(pairs)}`,
       method,
-      progressive: false,
       reasons,
       audioOut,
       // A converted or selected HLS rendition has just the one audio track.
       audioPosition: 0,
       burn,
+      // Another, plainer audio codec is left to try when the TV refuses.
+      fallbackLeft: !audioOk && (ctx.fallback || 0) < 2,
       label: label(
-        method === 'DirectStream' ? 'Direct Stream (HLS)' : 'Transcoding',
+        method === 'DirectStream' ? 'Direct Stream' : 'Transcoding',
         info,
         track,
         audioOk ? null : audioOut,

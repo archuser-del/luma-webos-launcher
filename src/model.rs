@@ -81,6 +81,40 @@ pub struct Input {
     pub signal: Option<bool>,
 }
 
+/// Can the TV decode an audio codec: ask it, or overrule its answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSupport {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl AudioSupport {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::On,
+            Self::On => Self::Off,
+            Self::Off => Self::Auto,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Ask the TV",
+            Self::On => "TV plays it",
+            Self::Off => "Convert it",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Inventory {
     pub apps: Vec<App>,
@@ -250,6 +284,10 @@ pub struct Preferences {
     pub layout: crate::layout::Layout,
     /// Settings › System › Debug Log.
     pub debug_log: bool,
+    /// Settings › System: whether this TV decodes Dolby TrueHD and DTS in
+    /// films. webOS rarely says so itself, so it can be set by hand.
+    pub truehd: AudioSupport,
+    pub dts: AudioSupport,
     pub video_index: usize,
     /// Bitset for Apple, Amazon, Aerial Community, RobinFrcd.
     pub video_sources_mask: u8,
@@ -325,6 +363,8 @@ impl Default for Preferences {
             background: "video".into(),
             layout: crate::layout::Layout::default(),
             debug_log: false,
+            truehd: AudioSupport::Auto,
+            dts: AudioSupport::Auto,
             video_index: 0,
             video_sources_mask: crate::video_catalog::ALL_SOURCES,
             video_excluded: BTreeSet::new(),

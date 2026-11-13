@@ -1816,12 +1816,38 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
         "jellyfin": request.jellyfin,
         // While the debug log is on: where the player sends its lines.
         "debugLog": debug_log::player_sink(),
+        // Settings › System: TrueHD and DTS asked of the TV, or set by hand.
+        "audioSupport": {
+            "truehd": state.preferences.truehd.key(),
+            "dts": state.preferences.dts.key(),
+        },
         "accentA": hex(a),
         "accentB": hex(if gradient { b } else { a }),
         "accentKind": if gradient { "gradient" } else { "solid" },
         "accentInk": ink,
     })
 }
+
+/// Signed in to Jellyfin with rows to show, and not one card in them.
+fn jellyfin_rows_empty(state: &State) -> bool {
+    state.preferences.jellyfin.linked()
+        && state
+            .preferences
+            .stacks
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.show && s.source == "jellyfin")
+            .all(|(i, _)| state.stack_items.get(i).is_none_or(Vec::is_empty))
+        && state
+            .preferences
+            .stacks
+            .iter()
+            .any(|s| s.show && s.source == "jellyfin")
+}
+
+/// First retry of empty rows, and the longest wait between retries.
+const STACKS_RETRY: Duration = Duration::from_secs(20);
+const STACKS_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// Home's media rows refresh this often while Luma is on screen.
 const STACKS_EVERY: Duration = Duration::from_secs(30 * 60);
@@ -2989,6 +3015,9 @@ fn run() -> Result<(), String> {
     // Home's media rows (Jellyfin, Plex, Moonlight): loaded at start, again
     // when Luma comes back on screen, and every STACKS_EVERY while shown.
     let mut stacks_at: Option<Instant> = None;
+    // Rows that came back empty (the network not up yet after a cold boot)
+    // are asked for again soon: 20 s, then twice as long, up to 5 minutes.
+    let mut stacks_retry: Option<(Instant, Duration)> = None;
     // Cameras without a picture, logged once until they have one again.
     let mut blank_cameras = std::collections::BTreeSet::new();
     let mut last_ha_view: Option<HaView> = None;
@@ -4618,6 +4647,18 @@ fn run() -> Result<(), String> {
         if visible && stacks_at.is_none_or(|at| at.elapsed() >= STACKS_EVERY) {
             stacks_at = Some(Instant::now());
             stacks_refresh(&mut state);
+            stacks_retry = Some((Instant::now() + STACKS_RETRY, STACKS_RETRY));
+        }
+        if let Some((due, gap)) = stacks_retry
+            && Instant::now() >= due
+        {
+            stacks_retry = None;
+            if visible && jellyfin_rows_empty(&state) {
+                debug_log!("Home rows: Jellyfin rows still empty, asking again");
+                stacks_refresh(&mut state);
+                let gap = (gap * 2).min(STACKS_RETRY_MAX);
+                stacks_retry = Some((Instant::now() + gap, gap));
+            }
         }
         let timeout = if !visible {
             250
