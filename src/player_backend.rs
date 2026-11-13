@@ -459,7 +459,7 @@ impl Backend {
             return self.open_legacy(url);
         }
         let mode = Self::window_mode();
-        let mut option = serde_json::json!({ "appId": "com.archbtw.luma" });
+        let mut option = serde_json::json!({ "appId": crate::platform::surface_id() });
         if mode == "export" {
             self.window = self.native.window_create();
             if let Some(id) = self.window.as_ref() {

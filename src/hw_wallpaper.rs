@@ -405,7 +405,7 @@ impl Player {
         if !playable_source(&entry.url) {
             return Err("Invalid streaming URL".into());
         }
-        let app = CString::new("com.archbtw.luma").unwrap();
+        let app = CString::new(crate::platform::surface_id()).unwrap_or_default();
         let codec = if entry.is_hevc() { "H265" } else { "H264" };
         let codec_c = CString::new(codec).unwrap();
         let tuning = if codec == "H264" {

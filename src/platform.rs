@@ -12,6 +12,20 @@ use std::{collections::HashSet, sync::mpsc, thread};
 mod installation;
 
 pub const APP_ID: &str = "com.archbtw.luma";
+
+/// The app id the TV knows Luma's window by: LG Home's while Luma runs as
+/// Home. Video planes are shown only for the app whose window is on screen,
+/// so media must be opened under this id, not always APP_ID.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+pub fn surface_id() -> String {
+    std::env::var("APPID")
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| APP_ID.to_owned())
+}
 pub const HOME_ID: &str = "com.webos.app.home";
 pub const FULL_HOME_ID: &str = "com.webos.app.fullhome";
 
