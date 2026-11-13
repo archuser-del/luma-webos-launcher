@@ -105,6 +105,13 @@ case "$COMMAND" in
     exit 0 ;;
   disable|restore)
     "$SCRIPT_DIR/luma-helper" home "$COMMAND" "${2:-$SCRIPT_DIR}" "${3:-}" || exit $?
+    # As Home, Luma ran as root and shared the app's settings folder: give the
+    # files it wrote there back to the app user, who owns the folder.
+    APP_DATA=/media/developer/com.archbtw.luma
+    if [ -d "$APP_DATA" ] && [ ! -L "$APP_DATA" ]; then
+      owner=$(stat -c %u:%g "$APP_DATA")
+      case "$owner" in 0:*) ;; *) chown -R "$owner" "$APP_DATA" ;; esac
+    fi
     if [ -f "$AUTO_PREVIOUS" ]; then
       previous=$(cat "$AUTO_PREVIOUS")
       case "$previous" in

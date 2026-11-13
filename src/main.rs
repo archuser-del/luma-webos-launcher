@@ -2328,11 +2328,6 @@ fn run() -> Result<(), String> {
     if options.webos_home && !platform::runs_as_lg_home() {
         log_home_output();
     }
-    // As Home, keep using the normal app's settings (before any thread starts).
-    #[cfg(all(feature = "webos", unix))]
-    if options.webos_home {
-        storage::adopt_app_owner();
-    }
     let webos = cfg!(feature = "webos");
     let startup_stage = |stage: &str| {
         if webos {
@@ -4784,9 +4779,7 @@ fn run() -> Result<(), String> {
                 "Luma lifecycle: a relaunch did not bring Luma to the front; creating {}",
                 platform::HOME_LIFECYCLE_OFF
             );
-            if let Err(error) =
-                storage::as_root(|| std::fs::write(platform::HOME_LIFECYCLE_OFF, b""))
-            {
+            if let Err(error) = std::fs::write(platform::HOME_LIFECYCLE_OFF, b"") {
                 eprintln!("Luma lifecycle: {error}");
             }
             end_registration();
