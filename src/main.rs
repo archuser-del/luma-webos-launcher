@@ -2937,6 +2937,23 @@ fn run() -> Result<(), String> {
     if let Err(error) = video.gl_set_swap_interval(1) {
         eprintln!("VSync: {error}");
     }
+    // Animations run at the screen's own rate (VSync); say what that is.
+    if let Some(mode) = window
+        .display_index()
+        .ok()
+        .and_then(|index| video.current_display_mode(index).ok())
+    {
+        let (dw, dh) = window.drawable_size();
+        let rate = if mode.refresh_rate > 0 {
+            format!("{} Hz", mode.refresh_rate)
+        } else {
+            "an unreported rate".to_owned()
+        };
+        eprintln!(
+            "Luma display: {}x{} at {rate}, drawing {dw}x{dh}",
+            mode.w, mode.h
+        );
+    }
     let mut renderer = renderer::Renderer::new(&assets.root.join("font.ttf"), webos)?;
     renderer.set_fonts(
         state.preferences.heading_font,
@@ -2951,6 +2968,13 @@ fn run() -> Result<(), String> {
     let mut last_working_choice = state.preferences.ui_resolution;
     let mut last_working_auto = state.preferences.auto_ui_cap;
     let mut animation_pacing: VecDeque<(Instant, f64)> = VecDeque::with_capacity(320);
+    // Debug log: each animation's frames, time and slowest frame.
+    let mut burst: Option<(Instant, u32, f64)> = None;
+    // The weather sky draws at the screen's rate unless this TV cannot keep
+    // up; then every 33 ms (30 fps), as before.
+    let mut sky_every = Duration::ZERO;
+    let mut sky_window: Option<(Instant, u32)> = None;
+    let mut sky_logged = false;
     let mut prior_present: Option<Instant> = None;
     let mut auto_downshifts = 0usize;
     let mut resolution_change_count = 0usize;
@@ -3008,7 +3032,6 @@ fn run() -> Result<(), String> {
         view::nav_pill_target(state.preferences.layout, initial_nav.items[0]);
     let mut last_frame = Instant::now();
     let mut last_sky_frame = Instant::now();
-    let mut last_art_frame = Instant::now();
     let mut last_minute = None;
     let mut frame = 0u64;
     let mut visible = true;
@@ -4337,8 +4360,9 @@ fn run() -> Result<(), String> {
             }
             text_active = keyboard;
         }
-        // NOPE sky animates at up to 30fps, only on a visible Home.
-        // Prefer video decoding and remote navigation over decorative weather.
+        // NOPE sky animates at the display rate, only on a visible Home; on a
+        // TV that cannot keep that up it drops to 30 fps (sky_every), as
+        // video decoding and remote navigation come before decorative weather.
         let sky_running = visible
             && state.page == state::Page::Home
             && state.preferences.show_weather
@@ -4350,11 +4374,10 @@ fn run() -> Result<(), String> {
             && state.page == state::Page::Settings
             && state.settings_art_live
             && !state.preferences.reduced_motion;
-        if art_running && last_art_frame.elapsed() >= Duration::from_millis(15) {
-            last_art_frame = Instant::now();
+        if art_running {
             state.dirty = true;
         }
-        if sky_running && last_sky_frame.elapsed() >= Duration::from_millis(33) {
+        if sky_running && last_sky_frame.elapsed() >= sky_every {
             last_sky_frame = Instant::now();
             state.dirty = true;
         }
@@ -4567,6 +4590,45 @@ fn run() -> Result<(), String> {
                         }
                     }
                 }
+                // Debug log: how fast each animation actually ran.
+                if animated {
+                    let gap = prior_present
+                        .map_or(0., |p| present_at.duration_since(p).as_secs_f64() * 1000.);
+                    burst = Some(match burst {
+                        Some((start, frames, slowest)) => (start, frames + 1, slowest.max(gap)),
+                        None => (present_at, 1, 0.),
+                    });
+                } else if let Some((start, frames, slowest)) = burst.take()
+                    && frames >= 8
+                {
+                    let seconds = present_at.duration_since(start).as_secs_f64();
+                    debug_log!(
+                        "animation: {frames} frames in {:.0} ms = {:.0} fps, slowest frame {slowest:.1} ms",
+                        seconds * 1000.,
+                        f64::from(frames) / seconds.max(0.001)
+                    );
+                }
+                // The sky alone on screen: if this TV draws it under 45 fps,
+                // it goes back to 30 fps and leaves the GPU to the rest.
+                if sky_running && !animated && sky_every.is_zero() {
+                    let (start, frames) = sky_window.unwrap_or((present_at, 0));
+                    let elapsed = present_at.duration_since(start).as_secs_f64();
+                    if elapsed >= 2. {
+                        let fps = f64::from(frames) / elapsed;
+                        if fps < 45. {
+                            sky_every = Duration::from_millis(33);
+                            eprintln!("Luma weather sky: {fps:.0} fps on this TV, drawn at 30 fps");
+                        } else if !sky_logged {
+                            debug_log!("weather sky: {fps:.0} fps");
+                        }
+                        sky_logged = true;
+                        sky_window = None;
+                    } else {
+                        sky_window = Some((start, frames + 1));
+                    }
+                } else {
+                    sky_window = None;
+                }
                 prior_present = Some(present_at);
                 if presented == 0 {
                     startup_stage("first frame");
@@ -4667,12 +4729,12 @@ fn run() -> Result<(), String> {
             || state.animating()
             || edge_moving
             || options.profile_frames.is_some()
+            // Settings illustrations draw at the display rate.
+            || art_running
         {
             0
-        } else if art_running {
-            15
         } else if sky_running {
-            33
+            sky_every.as_millis() as u32
         } else if press.is_some()
             || options.frames.is_some()
             || assets.artwork.pending()
