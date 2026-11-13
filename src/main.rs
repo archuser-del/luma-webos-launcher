@@ -259,7 +259,11 @@ fn effects(
     home: &smart_home::Service,
 ) -> bool {
     for effect in effects {
-        debug_log!("effect {}", effect_name(&effect));
+        let name = effect_name(&effect);
+        debug_log!("effect {name}");
+        if matches!(name.as_str(), "MediaDetails" | "MediaPlay") || name.starts_with("Launch") {
+            HEAVY_EFFECT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         match effect {
             Effect::DebugLog(on) => {
                 if on {
@@ -1852,6 +1856,11 @@ const STACKS_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 /// Auto UI resolution judges frames only once the first seconds after
 /// start (fonts loading) are over.
 const AUTO_SETTLE: Duration = Duration::from_secs(5);
+/// Opening a film's page or starting a player or app draws a few slow frames
+/// (artwork, a new surface) that say nothing about steady animation; Auto UI
+/// resolution ignores frames for this long after one.
+const AUTO_HEAVY_PAUSE: Duration = Duration::from_millis(2500);
+static HEAVY_EFFECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Home's media rows refresh this often while Luma is on screen.
 const STACKS_EVERY: Duration = Duration::from_secs(30 * 60);
@@ -2983,6 +2992,7 @@ fn run() -> Result<(), String> {
     let mut last_working_choice = state.preferences.ui_resolution;
     let mut last_working_auto = state.preferences.auto_ui_cap;
     let mut auto_pacing = diagnostics::AutoPacing::default();
+    let mut heavy_until = startup;
     // Debug log: each animation's frames, time and slowest frame.
     let mut burst: Option<(Instant, u32, f64)> = None;
     // The weather sky draws at the screen's rate unless this TV cannot keep
@@ -4562,8 +4572,13 @@ fn run() -> Result<(), String> {
                 {
                     // Animations and the weather sky count; the first
                     // seconds after start (fonts loading) do not.
+                    if HEAVY_EFFECT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        auto_pacing.clear();
+                        heavy_until = present_at + AUTO_HEAVY_PAUSE;
+                    }
                     let measured = (animated || (sky_running && sky_every.is_zero()))
-                        && startup.elapsed() > AUTO_SETTLE;
+                        && startup.elapsed() > AUTO_SETTLE
+                        && present_at >= heavy_until;
                     if let Some((p95, mean, slow)) = auto_pacing.frame(present_at, measured) {
                         observed_resolutions.push((applied_surface, p95));
                         debug_log!(

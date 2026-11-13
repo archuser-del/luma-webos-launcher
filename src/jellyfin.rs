@@ -1428,7 +1428,7 @@ fn static_url(
         .unwrap_or("mkv");
     format!(
         "{}/Videos/{item}/stream.{ext}?static=true&MediaSourceId={source}&PlaySessionId={session}\
-         &DeviceId={}&api_key={}",
+         &DeviceId={}&ApiKey={}",
         link.server, link.device_id, link.token
     )
 }
@@ -1532,7 +1532,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         .map(|s| crate::player::Track {
             name: subtitle_label(s, hdr),
             url: Some(format!(
-                "{}/Videos/{target_id}/{source_id}/Subtitles/{}/0/Stream.vtt?api_key={}",
+                "{}/Videos/{target_id}/{source_id}/Subtitles/{}/0/Stream.vtt?ApiKey={}",
                 link.server,
                 s.get("Index").and_then(Value::as_i64).unwrap_or(0),
                 link.token

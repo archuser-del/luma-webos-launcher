@@ -322,9 +322,77 @@ pub fn video_feed_schedule_ns(decode_ns: u64, is_h264: bool, lead_ms: u64) -> u6
     }
 }
 
+/// The wallpaper's real frame rates over a stretch of playback, for the
+/// debug log: what the clip holds (from its timestamps), what was fed to the
+/// hardware decoder, and what the TV reports showing.
+#[derive(Default)]
+#[cfg_attr(
+    not(any(test, all(feature = "webos", target_os = "linux", target_arch = "arm"))),
+    allow(dead_code)
+)]
+pub struct FeedStats {
+    frames: u32,
+    first_ns: Option<u64>,
+    last_ns: u64,
+    late_total_ms: f64,
+    late_max_ms: f64,
+}
+
+#[cfg_attr(
+    not(any(test, all(feature = "webos", target_os = "linux", target_arch = "arm"))),
+    allow(dead_code)
+)]
+impl FeedStats {
+    /// One frame fed, at its place on the clip's own clock and how late.
+    pub fn push(&mut self, decode_ns: u64, late_ms: f64) {
+        self.frames += 1;
+        self.first_ns.get_or_insert(decode_ns);
+        self.last_ns = decode_ns;
+        self.late_total_ms += late_ms;
+        self.late_max_ms = self.late_max_ms.max(late_ms);
+    }
+
+    /// "source 23.98 fps, fed 24.0 fps, shown 23.9 fps, late 3 ms (max 41)"
+    /// over `seconds` of wall time; `shown` is None when the TV reports no
+    /// frames (NDL on some webOS versions never does).
+    pub fn line(&self, seconds: f64, shown: Option<u64>) -> String {
+        let span = self.last_ns.saturating_sub(self.first_ns.unwrap_or(0)) as f64 / 1e9;
+        let source = if self.frames > 1 && span > 0. {
+            f64::from(self.frames - 1) / span
+        } else {
+            0.
+        };
+        let fed = f64::from(self.frames) / seconds.max(0.001);
+        let shown = shown.map_or_else(
+            || "not reported".to_owned(),
+            |n| format!("{:.1} fps", n as f64 / seconds.max(0.001)),
+        );
+        format!(
+            "source {source:.2} fps, fed {fed:.1} fps, shown {shown}, late {:.0} ms (max {:.0})",
+            self.late_total_ms / f64::from(self.frames.max(1)),
+            self.late_max_ms
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wallpaper_rates_come_from_the_clips_own_clock() {
+        // A 24 fps film (41.7 ms a frame) fed for 5 s, one frame 40 ms late.
+        let mut stats = FeedStats::default();
+        for i in 0..120u64 {
+            stats.push(i * 41_708_333, if i == 7 { 40. } else { 0. });
+        }
+        let line = stats.line(5., Some(100));
+        assert!(
+            line.starts_with("source 23.98 fps, fed 24.0 fps, shown 20.0 fps"),
+            "{line}"
+        );
+        assert!(line.ends_with("late 0 ms (max 40)"), "{line}");
+        assert!(stats.line(5., None).contains("shown not reported"));
+    }
     #[test]
     fn prefetch_duration_metadata_matches_catalog() {
         assert!(duration_seconds(0).is_some_and(|v| v > 60.0));

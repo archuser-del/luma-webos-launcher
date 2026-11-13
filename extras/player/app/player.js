@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.4.0';
+const PLAYER_VERSION = '0.4.1';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;

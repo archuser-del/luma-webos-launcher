@@ -265,7 +265,7 @@
       MediaSourceId: info.id,
       PlaySessionId: ctx.session,
       DeviceId: ctx.deviceId,
-      api_key: ctx.token,
+      ApiKey: ctx.token,
     };
 
     if (!transcodeVideo && audioOk && containerOk(info) && !ctx.forceStream) {
@@ -358,7 +358,7 @@
   /** WebVTT address of a text subtitle; image subtitles have none. */
   function subtitleUrl(ctx, sub) {
     if (!sub || sub.image) return null;
-    return `${ctx.base}/Videos/${ctx.item}/${ctx.info.id}/Subtitles/${sub.index}/0/Stream.vtt?api_key=${encodeURIComponent(ctx.token)}`;
+    return `${ctx.base}/Videos/${ctx.item}/${ctx.info.id}/Subtitles/${sub.index}/0/Stream.vtt?ApiKey=${encodeURIComponent(ctx.token)}`;
   }
 
   const api = {

@@ -83,7 +83,7 @@ test('a supported MKV plays directly, original file and all', () => {
   const p = S.plan(ctx(sdrMovie, caps));
   assert.equal(p.method, 'DirectPlay');
   assert.match(p.url, /\/Videos\/item1\/stream\.mkv\?static=true&MediaSourceId=src2/);
-  assert.equal(params(p.url).get('api_key'), 'tok');
+  assert.equal(params(p.url).get('ApiKey'), 'tok');
   assert.equal(p.label, 'Direct Play · E-AC-3');
 });
 

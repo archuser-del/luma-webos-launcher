@@ -89,17 +89,46 @@ pub struct Template {
     pub title: String,
     pub subtitle: String,
 }
+/// Every headline Luma can show: each fixed pair, plus every mixable title of
+/// a section with every mixable subtitle of that section.
 pub fn templates() -> &'static [Template] {
     static TABLE: OnceLock<Vec<Template>> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut current = None;
+        let mut list = "";
         let mut table = Vec::new();
+        let mut titles: Vec<(Category, &str)> = Vec::new();
+        let mut subtitles: Vec<(Category, &str)> = Vec::new();
         for line in include_str!("weather-phrases.md").lines() {
+            if let Some(heading) = line.strip_prefix("### ") {
+                list = heading.trim();
+                continue;
+            }
             if let Some(heading) = line.strip_prefix("## ") {
                 current = Category::from_label(heading.split_whitespace().next().unwrap_or(""));
-            } else if let (Some(category), Some(phrase)) = (current, line.strip_prefix("- "))
-                && let Some((title, subtitle)) = phrase.split_once(" — ")
-            {
+                list = "";
+                continue;
+            }
+            let (Some(category), Some(item)) = (current, line.strip_prefix("- ")) else {
+                continue;
+            };
+            match list {
+                "Titles" => titles.push((category, item.trim())),
+                "Subtitles" => subtitles.push((category, item.trim())),
+                "Pairs" => {
+                    if let Some((title, subtitle)) = item.split_once(" — ") {
+                        table.push(Template {
+                            category,
+                            title: title.into(),
+                            subtitle: subtitle.into(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        for &(category, title) in &titles {
+            for &(_, subtitle) in subtitles.iter().filter(|(c, _)| *c == category) {
                 table.push(Template {
                     category,
                     title: title.into(),
@@ -109,6 +138,24 @@ pub fn templates() -> &'static [Template] {
         }
         table
     })
+}
+
+/// How many shown headlines Luma remembers, so none comes back soon.
+const SEEN_LIMIT: usize = 600;
+
+/// A short, stable fingerprint of a headline (FNV-1a), for the "shown" list.
+fn fingerprint(template: &Template) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in template
+        .title
+        .bytes()
+        .chain([0])
+        .chain(template.subtitle.bytes())
+    {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 pub fn weather_category(reading: Reading, hour: u8) -> Category {
@@ -160,7 +207,6 @@ pub struct Engine {
     last_category: Option<Category>,
     last_reading: Option<Reading>,
     last_update: i64,
-    last_choice: Option<usize>,
     chosen_category: Option<Category>,
     chosen_bucket: i64,
     change_until: i64,
@@ -248,7 +294,7 @@ impl Engine {
         } else {
             base
         };
-        let bucket = now.div_euclid(3 * 3600);
+        let bucket = now.div_euclid(3600);
         if self
             .current
             .as_ref()
@@ -283,18 +329,46 @@ impl Engine {
         if choices.is_empty() {
             return save;
         }
+        // Headlines not shown lately; once a section has shown them all, its
+        // memory starts over (keeping only the last one, so it does not repeat
+        // straight away).
+        let mut fresh: Vec<_> = choices
+            .iter()
+            .copied()
+            .filter(|t| !prefs.weather_phrase_seen.contains(&fingerprint(t)))
+            .collect();
+        if fresh.is_empty() {
+            let last = self
+                .current
+                .as_ref()
+                .map(|p| (p.title.clone(), p.subtitle.clone()));
+            prefs
+                .weather_phrase_seen
+                .retain(|seen| !choices.iter().any(|t| fingerprint(t) == *seen));
+            fresh = choices
+                .iter()
+                .copied()
+                .filter(|t| {
+                    choices.len() == 1
+                        || last.as_ref().is_none_or(|(title, subtitle)| {
+                            &t.title != title || &t.subtitle != subtitle
+                        })
+                })
+                .collect();
+        }
         // Pseudorandom across category and elapsed time, but deterministic until the next rotation.
         let seed = (now as u64).rotate_left(17)
             ^ ((reading.temperature.to_bits() >> 16).wrapping_mul(0x9e3779b97f4a7c15))
             ^ (category as u64).wrapping_mul(0xbf58476d1ce4e5b9);
-        let mut index = (seed as usize) % choices.len();
-        if self.chosen_category == Some(category)
-            && self.last_choice == Some(index)
-            && choices.len() > 1
-        {
-            index = (index + 1) % choices.len();
+        let seed = seed ^ (seed >> 29).wrapping_mul(0x94d049bb133111eb);
+        let index = (seed as usize) % fresh.len();
+        let selected = fresh[index];
+        prefs.weather_phrase_seen.push(fingerprint(selected));
+        if prefs.weather_phrase_seen.len() > SEEN_LIMIT {
+            let extra = prefs.weather_phrase_seen.len() - SEEN_LIMIT;
+            prefs.weather_phrase_seen.drain(..extra);
         }
-        let selected = choices[index];
+        save = true;
         let title = selected
             .title
             .replace("{N}", &run.to_string())
@@ -313,7 +387,6 @@ impl Engine {
             subtitle,
         });
         self.changed_at = Some(Instant::now());
-        self.last_choice = Some(index);
         self.chosen_category = Some(category);
         self.chosen_bucket = bucket;
         save
@@ -335,7 +408,11 @@ mod tests {
     }
     #[test]
     fn all_approved_phrases_are_loaded() {
-        assert_eq!(templates().len(), 60);
+        let count = |c| templates().iter().filter(|t| t.category == c).count();
+        assert!(templates().len() > 650, "{}", templates().len());
+        assert!(count(Category::ClearNice) >= 100);
+        assert_eq!(count(Category::Still), 4);
+        assert_eq!(count(Category::Change), 4);
         for row in templates() {
             assert!(!row.title.is_empty() && !row.subtitle.is_empty());
         }
@@ -387,6 +464,30 @@ mod tests {
         engine.sync(&mut prefs, Some((changed, 90010)), 90010, 11, 12);
         assert_eq!(engine.current.as_ref().unwrap().category, Category::Change);
         assert!(!engine.current.as_ref().unwrap().subtitle.contains("{"));
+    }
+    #[test]
+    fn headlines_do_not_repeat_until_the_section_runs_out() {
+        let mut prefs = Preferences::default();
+        let mut engine = Engine::default();
+        let total = templates()
+            .iter()
+            .filter(|t| t.category == Category::Fog)
+            .count();
+        let mut shown = std::collections::HashSet::new();
+        for hour in 0..total as i64 {
+            let now = 1_000_000 + hour * 3600;
+            engine.sync(&mut prefs, Some((reading(10., 45), now)), now, 10, 12);
+            let phrase = engine.current.clone().unwrap();
+            assert!(
+                shown.insert((phrase.title, phrase.subtitle)),
+                "repeat at {hour}"
+            );
+        }
+        let before = engine.current.clone().unwrap();
+        let now = 1_000_000 + total as i64 * 3600;
+        engine.sync(&mut prefs, Some((reading(10., 45), now)), now, 10, 12);
+        assert_ne!(engine.current, Some(before));
+        assert!(prefs.weather_phrase_seen.len() <= SEEN_LIMIT);
     }
     #[test]
     fn no_weather_is_classic_fallback() {
