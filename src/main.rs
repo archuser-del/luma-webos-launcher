@@ -1849,6 +1849,10 @@ fn jellyfin_rows_empty(state: &State) -> bool {
 const STACKS_RETRY: Duration = Duration::from_secs(20);
 const STACKS_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
+/// Auto UI resolution judges frames only once the first seconds after
+/// start (fonts loading) are over.
+const AUTO_SETTLE: Duration = Duration::from_secs(5);
+
 /// Home's media rows refresh this often while Luma is on screen.
 const STACKS_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Coming back on screen refreshes them when the last load is this old.
@@ -2949,9 +2953,20 @@ fn run() -> Result<(), String> {
         } else {
             "an unreported rate".to_owned()
         };
+        let setting = state.preferences.ui_resolution;
         eprintln!(
-            "Luma display: {}x{} at {rate}, drawing {dw}x{dh}",
-            mode.w, mode.h
+            "Luma display: {}x{} at {rate}, drawing {dw}x{dh} (UI resolution: {}{})",
+            mode.w,
+            mode.h,
+            setting.label(),
+            if setting == model::UiResolution::Auto {
+                format!(
+                    ", now {}",
+                    state.preferences.resolved_ui_resolution().short()
+                )
+            } else {
+                String::new()
+            }
         );
     }
     let mut renderer = renderer::Renderer::new(&assets.root.join("font.ttf"), webos)?;
@@ -2967,7 +2982,7 @@ fn run() -> Result<(), String> {
     let mut applied_surface = requested;
     let mut last_working_choice = state.preferences.ui_resolution;
     let mut last_working_auto = state.preferences.auto_ui_cap;
-    let mut animation_pacing: VecDeque<(Instant, f64)> = VecDeque::with_capacity(320);
+    let mut auto_pacing = diagnostics::AutoPacing::default();
     // Debug log: each animation's frames, time and slowest frame.
     let mut burst: Option<(Instant, u32, f64)> = None;
     // The weather sky draws at the screen's rate unless this TV cannot keep
@@ -4388,7 +4403,7 @@ fn run() -> Result<(), String> {
             let target = state.preferences.resolved_ui_size();
             if target != applied_surface {
                 // Do not request a second resize while the previous SDL event is queued.
-                animation_pacing.clear();
+                auto_pacing.clear();
                 prior_present = None;
                 match window.set_size(target.width, target.height) {
                     Ok(()) => {
@@ -4545,48 +4560,30 @@ fn run() -> Result<(), String> {
                     && state.preferences.resolved_ui_resolution() != model::UiResolution::Hd
                     && options.profile_frames.is_none()
                 {
-                    if let Some(previous) = prior_present {
-                        let delta = present_at.duration_since(previous).as_secs_f64() * 1000.;
-                        if animated && (0.0..250.0).contains(&delta) {
-                            animation_pacing.push_back((present_at, delta));
-                            while animation_pacing.front().is_some_and(|(t, _)| {
-                                present_at.duration_since(*t) > Duration::from_secs(5)
-                            }) {
-                                animation_pacing.pop_front();
-                            }
-                        } else if !animated {
-                            animation_pacing.clear();
-                        }
-                    }
-                    if animation_pacing.len() >= 55
-                        && animation_pacing.front().is_some_and(|(t, _)| {
-                            present_at.duration_since(*t) >= Duration::from_secs(3)
-                        })
-                    {
-                        let mut sorted = animation_pacing
-                            .iter()
-                            .map(|(_, dt)| *dt)
-                            .collect::<Vec<_>>();
-                        sorted.sort_by(f64::total_cmp);
-                        let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
-                        let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+                    // Animations and the weather sky count; the first
+                    // seconds after start (fonts loading) do not.
+                    let measured = (animated || (sky_running && sky_every.is_zero()))
+                        && startup.elapsed() > AUTO_SETTLE;
+                    if let Some((p95, mean, slow)) = auto_pacing.frame(present_at, measured) {
                         observed_resolutions.push((applied_surface, p95));
-                        if p95 > 18.5 && mean > 17.5 {
+                        debug_log!(
+                            "Auto UI resolution: {} p95 {p95:.1} ms, mean {mean:.1} ms over {} frames",
+                            state.preferences.resolved_ui_resolution().short(),
+                            diagnostics::AutoPacing::SAMPLES
+                        );
+                        if slow {
                             let new_cap = state.preferences.resolved_ui_resolution().lower();
                             eprintln!(
                                 "LUMA_AUTO_RESOLUTION_DOWNGRADE {} -> {} p95_ms={p95:.2} mean_ms={mean:.2} samples={}",
                                 state.preferences.resolved_ui_resolution().short(),
                                 new_cap.short(),
-                                sorted.len()
+                                diagnostics::AutoPacing::SAMPLES
                             );
                             state.preferences.auto_ui_cap = new_cap;
                             auto_downshifts += 1;
                             state.dirty = true;
                             let _ = storage::save(&preferences_path, &state.preferences);
-                            animation_pacing.clear();
-                        } else {
-                            // Stable Auto tier. Recheck only if a new animation window begins.
-                            animation_pacing.clear();
+                            auto_pacing.clear();
                         }
                     }
                 }
