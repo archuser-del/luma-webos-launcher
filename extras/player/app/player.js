@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.5.0';
+const PLAYER_VERSION = '0.5.1';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -132,6 +132,73 @@ function applyAccent() {
   s.setProperty('--accent-ink', hex(p.accentInk, '#121519'));
 }
 
+// ---------- TV screensaver ----------
+// webOS asks every app that registered before it starts its own screensaver,
+// at the TV's own idle time (com.webos.service.tvpower, the same calls Kodi
+// and Jellyfin's webOS clients use). The player lets it start while a film is
+// paused, stopped or failed, and holds it off while one plays.
+const SAVER_CLIENT = 'com.archbtw.luma.player';
+const TVPOWER = 'luna://com.webos.service.tvpower/power/';
+// Backup for a TV that never asks during a long pause: start it ourselves.
+const SAVER_BACKUP_MS = 10 * 60 * 1000;
+let saverBridge = null;
+let saverAskedAt = 0;
+let pausedAt = 0;
+let saverStarted = false;
+function playingNow() {
+  return !document.hidden && !video.paused && !video.ended && video.readyState >= 2;
+}
+function watchScreensaver() {
+  if (saverBridge || typeof PalmServiceBridge === 'undefined') return;
+  try {
+    // The bridge must stay referenced: the subscription lives as long as it.
+    saverBridge = new PalmServiceBridge();
+    saverBridge.onservicecallback = (text) => {
+      let m = null;
+      try {
+        m = JSON.parse(text);
+      } catch {
+        m = null;
+      }
+      if (!m) return;
+      if (m.returnValue === false) {
+        plog('TV screensaver: not available here', m.errorText || '');
+        return;
+      }
+      if (m.state !== 'Active' || m.timestamp === undefined) return;
+      saverAskedAt = Date.now();
+      const allow = !playingNow();
+      plog(`TV screensaver asked: ${allow ? 'allowed (not playing)' : 'held off (playing)'}`);
+      luna(`${TVPOWER}responseScreenSaverRequest`, {
+        clientName: SAVER_CLIENT,
+        ack: allow,
+        timestamp: m.timestamp,
+      });
+    };
+    saverBridge.call(
+      `${TVPOWER}registerScreenSaverRequest`,
+      JSON.stringify({ subscribe: true, clientName: SAVER_CLIENT }),
+    );
+  } catch (e) {
+    plog('TV screensaver: no access', e && e.message);
+  }
+}
+function screensaverTick() {
+  if (!pausedAt || saverStarted || playingNow()) return;
+  const idle = Date.now() - Math.max(pausedAt, lastInput);
+  if (idle < SAVER_BACKUP_MS || saverAskedAt > pausedAt) return;
+  saverStarted = true;
+  plog(`paused ${Math.round(idle / 60000)} min and the TV never asked: starting its screensaver`);
+  luna(`${TVPOWER}turnOnScreenSaver`, {});
+}
+video.addEventListener('pause', () => {
+  pausedAt = Date.now();
+  saverStarted = false;
+});
+video.addEventListener('playing', () => {
+  pausedAt = 0;
+});
+
 // ---------- controls visibility ----------
 function reveal() {
   lastInput = Date.now();
@@ -142,6 +209,7 @@ function tick() {
   if (!keep && Date.now() - lastInput > HIDE_MS) document.body.classList.remove('controls');
   render();
   renderMusic();
+  screensaverTick();
   if (playing && !video.paused && Date.now() - lastMark > MARK_EVERY_MS) mark();
 }
 
@@ -1740,6 +1808,7 @@ loadIcons(
     'shuffle',
   ],
   () => {
+    watchScreensaver();
     start();
     setInterval(tick, 250);
   },
