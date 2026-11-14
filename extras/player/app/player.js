@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.4.4';
+const PLAYER_VERSION = '0.5.0';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -35,7 +35,7 @@ let p = {}; // launch params from Luma
 let icons = {}; // name -> svg text
 let focus = 'bar'; // 'close' | 'bar' | 'row:N' | 'panelClose' | 'opt:KIND:N'
 let rowItems = []; // [{id, icon, label, trailing, act}]
-let panel = null; // null | 'tracks' | 'quality'
+let panel = null; // null | 'tracks' | 'quality' | 'chapters'
 let audioIndex = 0;
 let subtitleIndex = -1;
 let qualityIndex = 0;
@@ -51,6 +51,9 @@ let leaving = false;
 // Jellyfin: what the TV decodes, the file's streams, the choices made and
 // the stream chosen from them (streams.js). null for other sources.
 let jf = null;
+let ticksKey = '';
+let previewKey = '';
+let previewUntil = 0; // the preview stays up a moment after D-pad seeks
 
 // ---------- helpers ----------
 function clock(sec) {
@@ -161,8 +164,10 @@ function render() {
   $('clock').textContent = hm(date);
   $('ends').textContent = d ? 'Ends at ' + hm(new Date(date.getTime() + (d - t) * 1000)) : '';
   $('bar').classList.toggle('focused', focus === 'bar' && !panel);
+  drawTicks(d);
+  const previewing = drawPreview(d);
   const chip = $('chip');
-  if (hoverSec !== null && d) {
+  if (hoverSec !== null && d && !previewing) {
     chip.classList.remove('hidden');
     chip.textContent = clock(hoverSec);
     chip.style.left = Math.min(WIDE - 40, Math.max(40, (hoverSec / d) * WIDE)) + 'px';
@@ -184,6 +189,120 @@ function render() {
   $('badgeTime').textContent = clock(t);
   $('badgeIcon').innerHTML = icon(video.paused ? 'pause' : 'play');
   paintFocus();
+}
+// ---------- chapters and trickplay ----------
+function drawTicks(d) {
+  const list = (jf && jf.chapters) || [];
+  const key = list.length && d ? `${list.length}:${Math.round(d)}` : '';
+  if (key === ticksKey) return;
+  ticksKey = key;
+  const box = $('ticks');
+  box.innerHTML = '';
+  if (!key) return;
+  list.forEach((c) => {
+    if (c.start < 1 || c.start >= d - 1) return;
+    const t = el('div', 'tick');
+    t.style.left = (c.start / d) * WIDE + 'px';
+    box.appendChild(t);
+  });
+}
+// While seeking (D-pad, pointer hover or drag): the frame at that point from
+// Jellyfin's trickplay images, with the time and the chapter's name.
+function drawPreview(d) {
+  const box = $('preview');
+  const sec =
+    hoverSec !== null
+      ? hoverSec
+      : pendingSeek !== null
+        ? pendingSeek
+        : Date.now() < previewUntil
+          ? pos()
+          : null;
+  const S = window.LumaStreams;
+  const have = jf && (jf.trickplay || (jf.chapters && jf.chapters.length));
+  if (!have || sec === null || !d || panel) {
+    box.classList.add('hidden');
+    previewKey = '';
+    return false;
+  }
+  box.classList.remove('hidden');
+  box.style.left = Math.min(WIDE - 168, Math.max(168, (sec / d) * WIDE)) + 'px';
+  $('previewTime').textContent = clock(sec);
+  const at = S.chapterAt(jf.chapters || [], sec);
+  $('previewName').textContent = at >= 0 ? jf.chapters[at].name : '';
+  box.classList.toggle('textOnly', !jf.trickplay);
+  if (jf.trickplay) {
+    const f = S.trickplayFrame(jf.trickplay, sec, 320);
+    const key = `${f.url} ${f.position}`;
+    if (key !== previewKey) {
+      previewKey = key;
+      const img = $('previewImg');
+      img.style.height = f.height + 'px';
+      img.style.backgroundImage = `url("${f.url}")`;
+      img.style.backgroundSize = f.size;
+      img.style.backgroundPosition = f.position;
+    }
+  }
+  return true;
+}
+// Chapters and trickplay are on the item, not the media source Luma passed:
+// ask Jellyfin once per title. Without them the player works as before.
+function jfExtras() {
+  const j = p.jellyfin;
+  const r = p.report || {};
+  const want = jf;
+  const x = new XMLHttpRequest();
+  const path = r.user ? `/Users/${encodeURIComponent(r.user)}/Items/${j.item}` : `/Items/${j.item}`;
+  x.open('GET', `${j.base}${path}?Fields=Chapters,Trickplay`);
+  x.setRequestHeader(
+    'Authorization',
+    `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${j.deviceId || r.deviceId || ''}", Version="${r.version || '1'}", Token="${j.token}"`,
+  );
+  x.onload = () => {
+    if (jf !== want || x.status >= 300) {
+      if (x.status >= 300) plog(`chapters and trickplay: HTTP ${x.status}`);
+      return;
+    }
+    let item = null;
+    try {
+      item = JSON.parse(x.responseText || 'null');
+    } catch {
+      item = null;
+    }
+    const S = window.LumaStreams;
+    const ctx = { base: j.base, item: j.item, token: j.token };
+    jf.chapters = S.chapters(item, ctx);
+    jf.trickplay = S.trickplay(item, ctx, jf.info.id);
+    const tp = jf.trickplay;
+    plog(
+      `chapters: ${jf.chapters.length}`,
+      tp
+        ? `· trickplay: ${tp.width}x${tp.height} every ${tp.interval / 1000} s`
+        : '· trickplay: none',
+    );
+    ticksKey = '';
+    buildRow();
+    render();
+  };
+  x.onerror = () => plog('chapters and trickplay: no answer');
+  x.send();
+}
+// Channel up/down: the next chapter, or the start of this one (the previous
+// one when this one has only just begun).
+function chapterStep(dir) {
+  const list = (jf && jf.chapters) || [];
+  if (!list.length) return false;
+  const S = window.LumaStreams;
+  const t = now();
+  const at = S.chapterAt(list, t);
+  let to;
+  if (dir > 0) to = at + 1 < list.length ? at + 1 : -1;
+  else to = at >= 0 && t - list[at].start > 3 ? at : Math.max(0, at - 1);
+  if (to < 0) return true;
+  plog(`chapter ${to + 1}:`, list[to].name);
+  previewUntil = Date.now() + 1500;
+  seekTo(list[to].start, true);
+  return true;
 }
 function paintFocus() {
   document.querySelectorAll('.focus').forEach((e) => e.classList.remove('focus'));
@@ -224,6 +343,13 @@ function buildRow() {
       icon: 'quality',
       label: p.qualities[qualityIndex].name,
       act: () => openPanel('quality', 'quality'),
+    });
+  }
+  if (jf && jf.chapters && jf.chapters.length) {
+    rowItems.push({
+      icon: 'list',
+      label: `Chapters · ${jf.chapters.length}`,
+      act: () => openPanel('chapters', 'chapter'),
     });
   }
   const right = [];
@@ -404,42 +530,57 @@ function setQuality(i) {
 function openPanel(kind, column) {
   panel = kind;
   $('tracks').classList.remove('hidden');
-  $('panelTitle').textContent = kind === 'quality' ? 'Quality' : 'Audio and subtitles';
+  $('panelTitle').textContent =
+    kind === 'quality' ? 'Quality' : kind === 'chapters' ? 'Chapters' : 'Audio and subtitles';
   const cols = $('cols');
   cols.innerHTML = '';
   const inner = 1120 - 96;
+  const current = kind === 'chapters' ? window.LumaStreams.chapterAt(jf.chapters, now()) : -1;
   const defs =
-    kind === 'quality'
+    kind === 'chapters'
       ? [
           {
-            key: 'quality',
-            title: 'QUALITY',
-            rows: p.qualities.map((q) => q.name),
-            chosen: qualityIndex,
+            key: 'chapter',
+            title: 'CHAPTERS',
+            rows: jf.chapters.map((c) => c.name),
+            times: jf.chapters.map((c) => clock(c.start)),
+            images: jf.chapters.map((c) => c.image),
+            chosen: current,
             x: 48,
             w: inner,
           },
         ]
-      : [
-          {
-            key: 'audio',
-            title: 'AUDIO',
-            rows: audioList(),
-            chosen: audioIndex,
-            x: 48,
-            w: (inner - 40) / 2,
-          },
-          {
-            key: 'sub',
-            title: 'SUBTITLES',
-            rows: ['Off'].concat((p.subtitles || []).map((s) => s.name)),
-            chosen: subtitleIndex + 1,
-            x: 48 + (inner - 40) / 2 + 40,
-            w: (inner - 40) / 2,
-          },
-        ];
+      : kind === 'quality'
+        ? [
+            {
+              key: 'quality',
+              title: 'QUALITY',
+              rows: p.qualities.map((q) => q.name),
+              chosen: qualityIndex,
+              x: 48,
+              w: inner,
+            },
+          ]
+        : [
+            {
+              key: 'audio',
+              title: 'AUDIO',
+              rows: audioList(),
+              chosen: audioIndex,
+              x: 48,
+              w: (inner - 40) / 2,
+            },
+            {
+              key: 'sub',
+              title: 'SUBTITLES',
+              rows: ['Off'].concat((p.subtitles || []).map((s) => s.name)),
+              chosen: subtitleIndex + 1,
+              x: 48 + (inner - 40) / 2 + 40,
+              w: (inner - 40) / 2,
+            },
+          ];
   defs.forEach((d) => {
-    if (kind !== 'quality' && d.key === 'sub' && !(p.subtitles || []).length) return;
+    if (kind === 'tracks' && d.key === 'sub' && !(p.subtitles || []).length) return;
     const col = el('div', 'col');
     col.style.left = d.x + 'px';
     col.style.width = d.w + 'px';
@@ -449,7 +590,14 @@ function openPanel(kind, column) {
     list.style.maxHeight = 68 * 8 + 'px';
     list.style.overflow = 'hidden';
     d.rows.forEach((name, i) => {
-      const o = el('div', 'opt', `<span>${esc(name)}</span>${i === d.chosen ? icon('check') : ''}`);
+      const o = d.times
+        ? el(
+            'div',
+            'opt chapter',
+            (d.images[i] ? `<img src="${esc(d.images[i])}" alt="">` : '<i class="noimg"></i>') +
+              `<span>${esc(name)}</span><em>${d.times[i]}</em>${i === d.chosen ? icon('check') : ''}`,
+          )
+        : el('div', 'opt', `<span>${esc(name)}</span>${i === d.chosen ? icon('check') : ''}`);
       o.dataset.focus = `opt:${d.key}:${i}`;
       list.appendChild(o);
     });
@@ -457,7 +605,13 @@ function openPanel(kind, column) {
     cols.appendChild(col);
   });
   const chosen =
-    column === 'sub' ? subtitleIndex + 1 : column === 'quality' ? qualityIndex : audioIndex;
+    column === 'sub'
+      ? subtitleIndex + 1
+      : column === 'quality'
+        ? qualityIndex
+        : column === 'chapter'
+          ? Math.max(0, current)
+          : audioIndex;
   focus = `opt:${column}:${chosen}`;
   scrollToFocus();
   reveal();
@@ -468,13 +622,26 @@ function closePanel() {
   panel = null;
   $('tracks').classList.add('hidden');
   const at = rowItems.findIndex((r) =>
-    was === 'quality' ? r.icon === 'quality' : r.icon === 'volume' || r.icon === 'captions',
+    was === 'quality'
+      ? r.icon === 'quality'
+      : was === 'chapters'
+        ? r.icon === 'list'
+        : r.icon === 'volume' || r.icon === 'captions',
   );
   focus = at >= 0 ? 'row:' + at : 'bar';
   reveal();
   render();
 }
 function chooseOption(kind, i) {
+  if (kind === 'chapter') {
+    const c = jf && jf.chapters[i];
+    closePanel();
+    if (c) {
+      plog(`chapter ${i + 1}:`, c.name);
+      seekTo(c.start, true);
+    }
+    return;
+  }
   if (kind === 'audio') setAudio(i);
   else if (kind === 'sub') setSubtitle(i - 1);
   else setQuality(i);
@@ -510,7 +677,12 @@ function jfStart(at) {
     forceStream: false,
     fallback: 0,
     plan: null,
+    chapters: [],
+    trickplay: null,
   };
+  ticksKey = '';
+  previewKey = '';
+  jfExtras();
   const chosenAudio = info.audio.findIndex((a) => a.index === jf.audio);
   audioIndex =
     chosenAudio >= 0
@@ -722,6 +894,7 @@ function showNote(title, sub) {
   $('noteSub').textContent = sub || '';
 }
 function seekBy(delta) {
+  previewUntil = Date.now() + 1500;
   const d = duration();
   const base = now();
   seekTo(Math.max(0, Math.min(d ? d - 1 : base + delta, base + delta)), false);
@@ -1020,7 +1193,13 @@ function move(dir) {
 }
 function movePanel(dir) {
   if (focus === 'panelClose') {
-    if (dir === 'down') focus = panel === 'quality' ? 'opt:quality:0' : 'opt:audio:0';
+    if (dir === 'down')
+      focus =
+        panel === 'quality'
+          ? 'opt:quality:0'
+          : panel === 'chapters'
+            ? 'opt:chapter:0'
+            : 'opt:audio:0';
     return;
   }
   const [, kind, n] = focus.split(':');
@@ -1087,6 +1266,12 @@ document.addEventListener('keydown', (e) => {
     leave('stop');
     return;
   } // Stop
+  if ((k === 33 || k === 34) && !panel && chapterStep(k === 33 ? 1 : -1)) {
+    e.preventDefault();
+    reveal();
+    render();
+    return;
+  } // Channel up / down: next or previous chapter
   if (hidden && !panel) {
     // The first press shows the controls; left/right already seek.
     if (k === 37 || k === 39) {

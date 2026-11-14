@@ -416,6 +416,81 @@
     return `${ctx.base}/Videos/${ctx.item}/${ctx.info.id}/Subtitles/${sub.index}/0/Stream.vtt?ApiKey=${encodeURIComponent(ctx.token)}`;
   }
 
+  /**
+   * Jellyfin's chapter markers for the item, sorted, each with its image
+   * (when Jellyfin made one). Empty for a single "chapter".
+   */
+  function chapters(item, ctx) {
+    const list = ((item && item.Chapters) || [])
+      .map((c, i) => ({
+        start: (c.StartPositionTicks || 0) / 1e7,
+        name: (c.Name && String(c.Name).trim()) || `Chapter ${i + 1}`,
+        image: c.ImageTag
+          ? `${ctx.base}/Items/${ctx.item}/Images/Chapter/${i}?tag=${encodeURIComponent(c.ImageTag)}&maxWidth=320&quality=85`
+          : null,
+      }))
+      .filter((c) => isFinite(c.start) && c.start >= 0)
+      .sort((a, b) => a.start - b.start);
+    return list.length > 1 ? list : [];
+  }
+
+  /** The chapter playing at `sec` (index), or -1. */
+  function chapterAt(list, sec) {
+    let at = -1;
+    for (let i = 0; i < list.length; i++) if (list[i].start <= sec + 0.5) at = i;
+    return at;
+  }
+
+  /**
+   * Jellyfin's trickplay thumbnails for this media source: the set closest
+   * to 320 px wide. Each tile image holds cols x rows thumbnails, one every
+   * `interval` ms. Null when Jellyfin has none.
+   */
+  function trickplay(item, ctx, sourceId) {
+    const all = item && item.Trickplay;
+    if (!all) return null;
+    const byWidth = all[sourceId] || all[Object.keys(all)[0]];
+    if (!byWidth) return null;
+    const widths = Object.keys(byWidth)
+      .map(Number)
+      .filter((w) => w > 0 && byWidth[w]);
+    if (!widths.length) return null;
+    widths.sort((a, b) => Math.abs(a - 320) - Math.abs(b - 320) || b - a);
+    const key = widths[0];
+    const t = byWidth[key];
+    if (!t.TileWidth || !t.TileHeight || !t.Interval || !t.ThumbnailCount) return null;
+    const width = t.Width || key;
+    const source = sourceId ? `MediaSourceId=${encodeURIComponent(sourceId)}&` : '';
+    return {
+      width,
+      height: t.Height || Math.round((width * 9) / 16),
+      cols: t.TileWidth,
+      rows: t.TileHeight,
+      count: t.ThumbnailCount,
+      interval: t.Interval,
+      // Images cannot send a header: the token goes in the address.
+      tile: (i) =>
+        `${ctx.base}/Videos/${ctx.item}/Trickplay/${key}/${i}.jpg?${source}ApiKey=${encodeURIComponent(ctx.token)}`,
+    };
+  }
+
+  /** The thumbnail for `sec`, as CSS for a box `shown` px wide. */
+  function trickplayFrame(tp, sec, shown) {
+    const n = Math.max(0, Math.min(tp.count - 1, Math.floor((sec * 1000) / tp.interval)));
+    const per = tp.cols * tp.rows;
+    const k = n % per;
+    const scale = shown / tp.width;
+    const w = tp.width * scale;
+    const h = tp.height * scale;
+    return {
+      url: tp.tile(Math.floor(n / per)),
+      width: Math.round(w),
+      height: Math.round(h),
+      size: `${tp.cols * w}px ${tp.rows * h}px`,
+      position: `${-(k % tp.cols) * w}px ${-Math.floor(k / tp.cols) * h}px`,
+    };
+  }
+
   const api = {
     capabilities,
     sourceInfo,
@@ -424,6 +499,10 @@
     subtitleUrl,
     plan,
     fallbackTrack,
+    chapters,
+    chapterAt,
+    trickplay,
+    trickplayFrame,
     codecName,
     family,
   };

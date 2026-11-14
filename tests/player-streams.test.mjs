@@ -329,3 +329,59 @@ test('dual-layer Dolby Vision streams (to strip the layer) with the AC-3 compani
   assert.equal(q.get('AudioCodec').split(',')[0], 'ac3', 'the AC-3 track is copied');
   assert.equal(p.audioSwappedFrom, 'TrueHD');
 });
+
+const jfCtx = { base: 'http://jf:8096', item: 'item1', token: 'tok' };
+
+test('chapters come sorted with their images, and a single chapter is no list', () => {
+  const list = S.chapters(
+    {
+      Chapters: [
+        { StartPositionTicks: 6000000000, Name: 'The Iceberg', ImageTag: 'b' },
+        { StartPositionTicks: 0, Name: '', ImageTag: 'a' },
+        { StartPositionTicks: 12000000000, Name: 'Sinking' },
+      ],
+    },
+    jfCtx,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(list.map((c) => [c.start, c.name]))), [
+    [0, 'Chapter 2'],
+    [600, 'The Iceberg'],
+    [1200, 'Sinking'],
+  ]);
+  assert.match(list[1].image, /\/Items\/item1\/Images\/Chapter\/0\?tag=b/);
+  assert.equal(list[2].image, null);
+  assert.equal(S.chapterAt(list, 599), 0);
+  assert.equal(S.chapterAt(list, 600), 1);
+  assert.equal(S.chapterAt(list, 5000), 2);
+  assert.equal(S.chapters({ Chapters: [{ StartPositionTicks: 0 }] }, jfCtx).length, 0);
+  assert.equal(S.chapters(null, jfCtx).length, 0);
+});
+
+test('trickplay picks the set nearest 320 px and finds the frame in its tile', () => {
+  const info = (Width) => ({
+    Width,
+    Height: Math.round((Width * 9) / 16),
+    TileWidth: 10,
+    TileHeight: 10,
+    ThumbnailCount: 500,
+    Interval: 10000,
+  });
+  const tp = S.trickplay(
+    { Trickplay: { src1: { 160: info(160), 320: info(320), 640: info(640) } } },
+    jfCtx,
+    'src1',
+  );
+  assert.equal(tp.width, 320);
+  // 1234 s = frame 123: tile 1, frame 23 in it (row 2, column 3).
+  const f = S.trickplayFrame(tp, 1234, 320);
+  assert.equal(
+    f.url,
+    'http://jf:8096/Videos/item1/Trickplay/320/1.jpg?MediaSourceId=src1&ApiKey=tok',
+  );
+  assert.equal(f.position, '-960px -360px');
+  assert.equal(f.size, '3200px 1800px');
+  assert.equal(f.height, 180);
+  // Past the end: the last frame, never a tile that does not exist.
+  assert.match(S.trickplayFrame(tp, 999999, 320).url, /\/4\.jpg/);
+  assert.equal(S.trickplay({}, jfCtx, 'src1'), null);
+});
