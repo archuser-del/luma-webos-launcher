@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.4.3';
+const PLAYER_VERSION = '0.4.4';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -559,6 +559,7 @@ function jfStart(at) {
   cues = [];
   jf.plan = S.plan(jfContext());
   logPlan('plan');
+  showSwap();
   header();
   buildRow();
   if (sub >= 0) {
@@ -567,6 +568,14 @@ function jfStart(at) {
     if (track.url) setSubtitle(sub);
   }
   open(jf.plan.url, at);
+}
+// The default track gave way to a playable one: show that one as chosen.
+function showSwap() {
+  if (!jf || !jf.plan || !jf.plan.audioSwappedFrom) return;
+  const playing = jf.info.audio.findIndex((a) => a.index === jf.plan.audioIndex);
+  if (playing >= 0) audioIndex = playing;
+  plog(`audio: ${jf.plan.audioSwappedFrom} is not playable here, playing`, audioName(audioIndex));
+  buildRow();
 }
 function jfContext() {
   const j = p.jellyfin;
@@ -926,14 +935,25 @@ video.addEventListener('error', () => {
   const detail = video.error && video.error.message ? `: ${video.error.message}` : '';
   plog(`video error ${code} (${MEDIA_ERRORS[code] || 'unknown'})${detail}`);
   if (jf && jf.plan && jf.plan.method === 'DirectPlay' && !jf.forceStream && code >= 3) {
-    jf.forceStream = true;
-    // Set to "TV plays it", but this TV refused: convert that codec now.
+    // Set to "TV plays it" (or the TV said yes), but this TV refused.
     const track = jf.info.audio.find((a) => a.index === jf.audio) || jf.info.audio[audioIndex];
     const kind = track && window.LumaStreams.family(track.codec);
     if (kind === 'truehd' || kind === 'dts') {
       jf.caps.audio[kind] = false;
-      plog(`${kind === 'truehd' ? 'TrueHD' : 'DTS'} refused after all: converting it`);
+      const name = kind === 'truehd' ? 'TrueHD' : 'DTS';
+      // Not picked by the viewer: play the file's own playable companion
+      // track (AC-3, E-AC-3) directly before converting anything.
+      const companion =
+        jf.audio === null && window.LumaStreams.fallbackTrack(jf.info, jf.caps, track);
+      if (companion) {
+        plog(`${name} refused after all: switching to`, companion.name);
+        jfReplan();
+        showSwap();
+        return;
+      }
+      plog(`${name} refused after all: converting it`);
     }
+    jf.forceStream = true;
     plog('Direct Play refused: retrying as Direct Stream');
     jfReplan();
     return;

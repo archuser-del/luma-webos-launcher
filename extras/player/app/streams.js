@@ -154,6 +154,33 @@
     if (family(codec) === 'flac' && channels > 2) return false;
     return !!caps.audio[family(codec)];
   }
+  // Preferred replacements for a track the TV cannot decode, best first.
+  const FALLBACK_RANK = ['eac3', 'ac3', 'aac', 'opus', 'flac', 'mp3', 'vorbis', 'mp2', 'pcm'];
+
+  /**
+   * The track to play in place of `track` when the TV cannot decode it (a
+   * DTS-HD MA or TrueHD default with an AC-3 or E-AC-3 companion): another
+   * track of the same language, not a commentary, that the TV decodes. Most
+   * channels win, then E-AC-3 over AC-3 over the rest. Null when none fits.
+   */
+  function fallbackTrack(info, caps, track) {
+    if (!track || canAudio(caps, track.codec, track.channels)) return null;
+    const rank = (a) => {
+      const i = FALLBACK_RANK.indexOf(family(a.codec));
+      return i < 0 ? FALLBACK_RANK.length : i;
+    };
+    const candidates = info.audio.filter(
+      (a) =>
+        a !== track &&
+        !a.commentary &&
+        !a.external &&
+        canAudio(caps, a.codec, a.channels) &&
+        (!track.language || !a.language || a.language === track.language),
+    );
+    candidates.sort((a, b) => b.channels - a.channels || rank(a) - rank(b));
+    return candidates[0] || null;
+  }
+
   function canVideo(caps, codec) {
     return !!caps.video[family(codec)];
   }
@@ -173,6 +200,10 @@
         isDefault: !!s.IsDefault,
         channels: s.Channels || 0,
         external: !!s.IsExternal,
+        language: lower(s.Language),
+        commentary: /commentary|kommentar|comentario|commentaire/i.test(
+          `${s.Title || ''} ${s.DisplayTitle || ''}`,
+        ),
       }));
     const subtitles = streams
       .filter((s) => s.Type === 'Subtitle')
@@ -241,11 +272,13 @@
   function plan(ctx) {
     const info = ctx.info;
     const caps = ctx.caps;
-    const track =
-      info.audio.find((a) => a.index === ctx.audio) ||
-      info.audio.find((a) => a.isDefault) ||
-      info.audio[0] ||
-      null;
+    const chosen = info.audio.find((a) => a.index === ctx.audio) || null;
+    const preferred = chosen || info.audio.find((a) => a.isDefault) || info.audio[0] || null;
+    // A track the viewer picked is played as picked (converted if need be);
+    // a default the TV cannot decode gives way to a playable companion track.
+    const replacement = chosen ? null : fallbackTrack(info, caps, preferred);
+    const track = replacement || preferred;
+    const swapped = replacement ? codecName(preferred.codec) : null;
     const sub =
       ctx.subtitle === null || ctx.subtitle === undefined
         ? null
@@ -268,7 +301,10 @@
       ApiKey: ctx.token,
     };
 
-    if (!transcodeVideo && audioOk && containerOk(info) && !ctx.forceStream) {
+    // Dual-layer Dolby Vision is never sent as the file: only a stream lets
+    // Jellyfin strip the enhancement layer the TV cannot use (see rangetype).
+    const dualLayer = /WithEL/i.test(info.video.range || '');
+    if (!transcodeVideo && audioOk && containerOk(info) && !ctx.forceStream && !dualLayer) {
       const ext = lower(info.container).split(',')[0] || 'mkv';
       return {
         url: `${ctx.base}/Videos/${ctx.item}/stream.${ext}?${query(Object.assign({ static: 'true' }, common))}`,
@@ -276,8 +312,10 @@
         reasons,
         audioOut: track ? track.codec : '',
         audioPosition: track ? track.position : 0,
+        audioIndex: track ? track.index : null,
+        audioSwappedFrom: swapped,
         burn: false,
-        label: label('Direct Play', info, track, null),
+        label: label('Direct Play', info, track, null, false, swapped),
       };
     }
 
@@ -342,6 +380,8 @@
       audioOut,
       // A converted or selected HLS rendition has just the one audio track.
       audioPosition: 0,
+      audioIndex: track ? track.index : null,
+      audioSwappedFrom: swapped,
       burn,
       // Another, plainer audio codec is left to try when the TV refuses.
       fallbackLeft: !audioOk && (ctx.fallback || 0) < 2,
@@ -351,12 +391,13 @@
         track,
         audioOk ? null : audioOut,
         transcodeVideo,
+        swapped,
       ),
     };
   }
 
   /** "Direct Play · HDR10 · TrueHD → FLAC" for the player's info line. */
-  function label(method, info, track, convertedTo, videoReencoded) {
+  function label(method, info, track, convertedTo, videoReencoded, swappedFrom) {
     const parts = [method];
     if (info.video.hdr) {
       parts.push(
@@ -365,6 +406,7 @@
     }
     if (track && convertedTo) parts.push(`${codecName(track.codec)} → ${codecName(convertedTo)}`);
     else if (track) parts.push(codecName(track.codec));
+    if (track && swappedFrom) parts[parts.length - 1] += ` (in place of ${swappedFrom})`;
     return parts.join(' · ');
   }
 
@@ -381,6 +423,7 @@
     subtitleLabel,
     subtitleUrl,
     plan,
+    fallbackTrack,
     codecName,
     family,
   };

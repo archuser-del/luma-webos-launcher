@@ -87,9 +87,9 @@ test('a supported MKV plays directly, original file and all', () => {
   assert.equal(p.label, 'Direct Play · E-AC-3');
 });
 
-test('HDR with TrueHD 7.1: the video is copied in HDR, the audio becomes E-AC-3 5.1', () => {
+test('HDR with TrueHD 7.1 picked: the video is copied in HDR, the audio becomes E-AC-3 5.1', () => {
   const caps = S.capabilities(tv());
-  const p = S.plan(ctx(hdrRemux, caps));
+  const p = S.plan(ctx(hdrRemux, caps, { audio: 1 }));
   assert.equal(p.method, 'DirectStream');
   assert.match(new URL(p.url).pathname, /main\.m3u8$/);
   const q = params(p.url);
@@ -97,12 +97,7 @@ test('HDR with TrueHD 7.1: the video is copied in HDR, the audio becomes E-AC-3 
   assert.equal(q.get('AllowVideoStreamCopy'), 'true');
   assert.equal(q.get('SegmentContainer'), 'mp4');
   // No limits that would stop Jellyfin from copying the video.
-  for (const key of [
-    'VideoBitrate',
-    'MaxHeight',
-    'MaxWidth',
-    'SubtitleStreamIndex',
-  ]) {
+  for (const key of ['VideoBitrate', 'MaxHeight', 'MaxWidth', 'SubtitleStreamIndex']) {
     assert.equal(q.get(key), null, key);
   }
   // HDR10 is accepted as it is (copied); dual-layer Dolby Vision is not, so
@@ -157,11 +152,11 @@ test('surround FLAC in the file is converted, not played as it is', () => {
 
 test('when the TV refuses a converted stream, the audio steps down to AC-3, then AAC', () => {
   const caps = S.capabilities(tv());
-  const first = S.plan(ctx(hdrRemux, caps, { fallback: 1 }));
+  const first = S.plan(ctx(hdrRemux, caps, { audio: 1, fallback: 1 }));
   assert.equal(params(first.url).get('AudioCodec'), 'ac3,aac');
   assert.equal(params(first.url).get('AllowVideoStreamCopy'), 'true', 'still HDR');
   assert.equal(first.fallbackLeft, true);
-  const last = S.plan(ctx(hdrRemux, caps, { fallback: 2 }));
+  const last = S.plan(ctx(hdrRemux, caps, { audio: 1, fallback: 2 }));
   assert.equal(params(last.url).get('AudioCodec'), 'aac');
   assert.equal(last.fallbackLeft, false);
 });
@@ -189,7 +184,7 @@ test('picking the AC3 track of the same HDR file plays it directly', () => {
 
 test('without FLAC on the TV, unsupported audio becomes Dolby instead', () => {
   const caps = S.capabilities(tv([], ['audio/mp4; codecs="flac"']));
-  const p = S.plan(ctx(hdrRemux, caps));
+  const p = S.plan(ctx(hdrRemux, caps, { audio: 1 }));
   assert.equal(params(p.url).get('AudioCodec'), 'eac3,ac3,aac');
   assert.equal(params(p.url).get('TranscodingMaxAudioChannels'), '6');
   assert.match(p.label, /TrueHD → E-AC-3/);
@@ -269,4 +264,68 @@ test('a failed direct play can be retried as a stream copy', () => {
   const p = S.plan(ctx(sdrMovie, caps, { forceStream: true }));
   assert.equal(p.method, 'DirectStream');
   assert.equal(params(p.url).get('AllowVideoStreamCopy'), 'true');
+});
+
+test('a TrueHD default the TV cannot decode gives way to its AC-3 companion, played directly', () => {
+  const caps = S.capabilities(tv());
+  const p = S.plan(ctx(hdrRemux, caps));
+  assert.equal(p.method, 'DirectPlay');
+  assert.equal(p.audioIndex, 2);
+  assert.equal(p.audioPosition, 1);
+  assert.equal(p.audioSwappedFrom, 'TrueHD');
+  assert.equal(p.label, 'Direct Play · HDR10 · AC-3 (in place of TrueHD)');
+});
+
+const withTracks = (video, ...audio) => ({
+  Id: 'src3',
+  Container: 'mkv',
+  MediaStreams: [video].concat(audio.map((a, i) => stream(i + 1, 'Audio', a[0], a[1]))),
+});
+const hevc = stream(0, 'Video', 'hevc', { VideoRange: 'HDR', VideoRangeType: 'HDR10' });
+
+test('the fallback keeps the language, skips commentary and prefers more channels, then E-AC-3', () => {
+  const caps = S.capabilities(tv());
+  const film = withTracks(
+    hevc,
+    ['dts', { IsDefault: true, Channels: 8, Language: 'eng', DisplayTitle: 'DTS-HD MA 7.1' }],
+    ['eac3', { Channels: 6, Language: 'ger' }],
+    ['ac3', { Channels: 2, Language: 'eng', Title: 'Director Commentary' }],
+    ['ac3', { Channels: 6, Language: 'eng' }],
+    ['eac3', { Channels: 6, Language: 'eng' }],
+    ['aac', { Channels: 2, Language: 'eng' }],
+  );
+  const p = S.plan(ctx(film, caps));
+  assert.equal(p.audioIndex, 5, 'English E-AC-3 5.1');
+  assert.equal(p.method, 'DirectPlay');
+  assert.match(p.label, /E-AC-3 \(in place of DTS\)/);
+});
+
+test('with no playable track in the language, the default is converted as before', () => {
+  const caps = S.capabilities(tv());
+  const film = withTracks(
+    hevc,
+    ['truehd', { IsDefault: true, Channels: 8, Language: 'eng' }],
+    ['ac3', { Channels: 6, Language: 'fre' }],
+    ['ac3', { Channels: 2, Language: 'eng', Title: 'Commentary' }],
+  );
+  const p = S.plan(ctx(film, caps));
+  assert.equal(p.audioSwappedFrom, null);
+  assert.equal(p.method, 'DirectStream');
+  assert.equal(params(p.url).get('AudioStreamIndex'), '1');
+  assert.match(p.label, /TrueHD → E-AC-3/);
+});
+
+test('dual-layer Dolby Vision streams (to strip the layer) with the AC-3 companion copied', () => {
+  const caps = S.capabilities(tv());
+  const film = withTracks(
+    stream(0, 'Video', 'hevc', { VideoRange: 'HDR', VideoRangeType: 'DOVIWithEL' }),
+    ['truehd', { IsDefault: true, Channels: 8, Language: 'eng' }],
+    ['ac3', { Channels: 6, Language: 'eng' }],
+  );
+  const p = S.plan(ctx(film, caps));
+  assert.equal(p.method, 'DirectStream');
+  const q = params(p.url);
+  assert.equal(q.get('AudioStreamIndex'), '2');
+  assert.equal(q.get('AudioCodec').split(',')[0], 'ac3', 'the AC-3 track is copied');
+  assert.equal(p.audioSwappedFrom, 'TrueHD');
 });
