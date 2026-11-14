@@ -1,6 +1,6 @@
 {
   "id": "com.archbtw.luma.player",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "vendor": "Luma",
   "type": "web",
   "main": "index.html",

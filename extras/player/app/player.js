@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.4.2';
+const PLAYER_VERSION = '0.4.3';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -1497,7 +1497,22 @@ function start() {
   reveal();
   render();
 }
-document.addEventListener('webOSRelaunch', start);
+// With handlesRelaunch, webOS leaves a relaunched app where it is: a player
+// left running in the background (Home pressed during a film) must bring
+// itself to the front, or it opens the next film hidden and video never starts.
+function bringToFront() {
+  try {
+    const system = window.webOSSystem || window.PalmSystem;
+    if (system && typeof system.activate === 'function') system.activate();
+  } catch (e) {
+    plog(`could not come to the front: ${e && e.message}`);
+  }
+}
+document.addEventListener('webOSRelaunch', () => {
+  plog('relaunched: coming to the front');
+  bringToFront();
+  start();
+});
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     mark();

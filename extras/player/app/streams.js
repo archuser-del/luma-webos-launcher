@@ -308,6 +308,14 @@
       // limits makes Jellyfin copy the video stream: HDR stays HDR.
       pairs.VideoCodec = family(info.video.codec);
       pairs.AllowVideoStreamCopy = 'true';
+      // The HDR kinds the TV takes. Dual-layer Dolby Vision (profile 7, an
+      // enhancement layer) is left out: Jellyfin then strips the Dolby Vision
+      // layers and copies the HDR10 base instead of sending a stream the TV
+      // cannot start. Other Dolby Vision (LG TVs play it) is copied as is.
+      if (['hevc', 'av1'].includes(pairs.VideoCodec)) {
+        pairs[`${pairs.VideoCodec}-rangetype`] =
+          'SDR,HDR10,HDR10Plus,HLG,DOVI,DOVIWithHDR10,DOVIWithHLG,DOVIWithSDR';
+      }
     } else {
       pairs.VideoCodec = caps.video.hevc && info.video.hdr ? 'hevc,h264' : 'h264';
       pairs.AllowVideoStreamCopy = 'false';

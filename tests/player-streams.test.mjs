@@ -101,11 +101,15 @@ test('HDR with TrueHD 7.1: the video is copied in HDR, the audio becomes E-AC-3 
     'VideoBitrate',
     'MaxHeight',
     'MaxWidth',
-    'hevc-rangetype',
     'SubtitleStreamIndex',
   ]) {
     assert.equal(q.get(key), null, key);
   }
+  // HDR10 is accepted as it is (copied); dual-layer Dolby Vision is not, so
+  // Jellyfin strips it to the HDR10 base.
+  const ranges = q.get('hevc-rangetype').split(',');
+  assert.ok(ranges.includes('HDR10') && ranges.includes('DOVIWithHDR10'));
+  assert.ok(ranges.includes('DOVI') && !ranges.includes('DOVIWithEL'));
   // webOS refuses surround FLAC (Jellyfin's own webOS profile says so too).
   assert.equal(q.get('AudioCodec'), 'eac3,ac3,aac');
   assert.equal(q.get('AudioStreamIndex'), '1');
