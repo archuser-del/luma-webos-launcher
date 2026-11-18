@@ -2309,6 +2309,11 @@ fn draw_rude_phrase(
                 .iter()
                 .any(|key| token.to_ascii_lowercase().contains(key))
             })
+            // "Router: water-cooled." The thing before the colon is the tech word.
+            .or_else(|| {
+                let (head, _) = phrase.title.split_once(':')?;
+                head.split_whitespace().last()
+            })
             .unwrap_or("")
     };
     let mut x = 84.;
@@ -3666,15 +3671,8 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                 ),
                 (
                     "Tech",
-                    Some("Built-in headlines"),
-                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude
-                        && !state.preferences.ai_headlines,
-                ),
-                (
-                    "Tech + AI",
-                    Some("New headlines written on the TV by a small AI model when needed"),
-                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude
-                        && state.preferences.ai_headlines,
+                    None,
+                    state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude,
                 ),
             ],
             Subpage::Temperature => vec![
@@ -4355,9 +4353,6 @@ fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let style_value = match state.preferences.greeting_style {
         crate::weather_phrases::GreetingStyle::Classic => "Classic",
-        crate::weather_phrases::GreetingStyle::Rude if state.preferences.ai_headlines => {
-            "Tech + AI"
-        }
         crate::weather_phrases::GreetingStyle::Rude => "Tech",
     };
     row(

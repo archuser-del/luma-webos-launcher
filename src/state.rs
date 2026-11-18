@@ -645,7 +645,6 @@ pub struct State {
     pub panel_started: Option<Instant>,
     pub weather: weather::Weather,
     pub rude_weather: weather_phrases::Engine,
-    pub tech_writer: crate::tech_writer::Writer,
     pub keyboard_field: TextField,
     pub greeting_name_draft: String,
     pub input_name: String,
@@ -854,7 +853,6 @@ impl State {
             panel_started: None,
             weather: weather::Weather::default(),
             rude_weather: weather_phrases::Engine::default(),
-            tech_writer: crate::tech_writer::Writer::default(),
             keyboard_field: TextField::Apps,
             greeting_name_draft: String::new(),
             input_name: String::new(),
@@ -3314,7 +3312,12 @@ impl State {
             }
             if let Target::Choice(index) = self.focus {
                 let count = match self.subpage {
-                    Some(Subpage::ClockFormat | Subpage::TimeFormat | Subpage::Temperature) => 2,
+                    Some(
+                        Subpage::ClockFormat
+                        | Subpage::TimeFormat
+                        | Subpage::Temperature
+                        | Subpage::GreetingStyle,
+                    ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
                     _ => 3,
                 };
@@ -5242,11 +5245,9 @@ impl State {
             Target::WeatherQuery => self.open_keyboard(TextField::Location),
             Target::GreetingStyle => {
                 self.subpage = Some(Subpage::GreetingStyle);
-                self.focus = Target::Choice(match self.preferences.greeting_style {
-                    GreetingStyle::Classic => 0,
-                    GreetingStyle::Rude if self.preferences.ai_headlines => 2,
-                    GreetingStyle::Rude => 1,
-                });
+                self.focus = Target::Choice(usize::from(
+                    self.preferences.greeting_style == GreetingStyle::Rude,
+                ));
                 self.scroll = 0.;
                 if !self.preferences.reduced_motion {
                     self.panel_started = Some(Instant::now());
@@ -5564,14 +5565,11 @@ impl State {
             Target::Choice(index) => {
                 match self.subpage.clone() {
                     Some(Subpage::GreetingStyle) => {
-                        self.preferences.greeting_style = if index >= 1 {
+                        self.preferences.greeting_style = if index == 1 {
                             GreetingStyle::Rude
                         } else {
                             GreetingStyle::Classic
                         };
-                        if index >= 1 {
-                            self.preferences.ai_headlines = index == 2;
-                        }
                     }
                     Some(Subpage::ClockFormat) => self.preferences.hour_24 = index == 1,
                     Some(Subpage::TimeFormat) => self.preferences.show_seconds = index == 1,
