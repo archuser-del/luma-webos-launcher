@@ -2364,9 +2364,14 @@ fn draw_rude_phrase(
     // Treat the subtitle as part of the headline, not a separate date row.
     // Subtitle hugs the headline; the video caption keeps its own distance.
     let subtitle_y = y + line_step - 4.;
-    let subtitle_lines = assets
-        .lines(&phrase.subtitle, subtitle_style, subtitle_wrap)
-        .clamp(1, 2) as f32;
+    // A headline may have no subtitle: it then ends at the title.
+    let subtitle_lines = if phrase.subtitle.is_empty() {
+        0.
+    } else {
+        assets
+            .lines(&phrase.subtitle, subtitle_style, subtitle_wrap)
+            .clamp(1, 2) as f32
+    };
     // Swear words in the subtitle take the accent, the rest stays soft white.
     let subtitle_words: Vec<&str> = phrase.subtitle.split_whitespace().collect();
     let (mut sx, mut sy) = (84.0f32, subtitle_y);

@@ -60,9 +60,18 @@ pub enum Category {
     Thanksgiving,
     Christmas,
     Friday13,
+    /// Our own days and our weekly line (tools/couple-headlines.py).
+    FirstKiss,
+    Dating,
+    Proposal,
+    Us,
 }
 /// The special kinds, label first, for the headline list and its tests.
-const SPECIAL_LABELS: [(&str, Category); 23] = [
+const SPECIAL_LABELS: [(&str, Category); 27] = [
+    ("first_kiss", Category::FirstKiss),
+    ("dating", Category::Dating),
+    ("proposal", Category::Proposal),
+    ("us", Category::Us),
     ("rain_soon", Category::RainSoon),
     ("clearing", Category::Clearing),
     ("heatwave", Category::Heatwave),
@@ -171,8 +180,9 @@ pub fn templates() -> &'static [Template] {
                 );
                 let category = Category::from_label(label)?;
                 let title = parts.next()?.trim();
-                let subtitle = parts.next()?.trim();
-                (!title.is_empty() && !subtitle.is_empty()).then(|| Template {
+                // A headline may stand alone, with no subtitle.
+                let subtitle = parts.next().unwrap_or("").trim();
+                (!title.is_empty()).then(|| Template {
                     category,
                     tag: tag.into(),
                     title: title.into(),
@@ -338,12 +348,21 @@ impl Engine {
         // holiday every other hour, a streak two hours in three, a time of
         // the week one hour in three. A sudden change and a forecast speak
         // while they last.
+        // Our own days take every other hour; a holiday on the same day
+        // (New Year's Eve) the hours between.
+        let ours = date.and_then(couple_day);
         let category = if now < self.change_until {
             Category::Change
-        } else if let Some(holiday) = date.and_then(|d| holiday(d, hour))
+        } else if let Some((day, _)) = ours
             && bucket % 2 == 0
         {
+            day
+        } else if let Some(holiday) = date.and_then(|d| holiday(d, hour))
+            && bucket % 2 == i64::from(ours.is_some())
+        {
             holiday
+        } else if date.is_some_and(|d| weekly_slot(d) == (d, hour)) {
+            Category::Us
         } else if run >= 2 && bucket % 3 != 2 {
             Category::Still
         } else if let Some((case, _)) = forecast {
@@ -447,6 +466,13 @@ impl Engine {
                 .replace("{temp}", &degrees(reading.temperature, unit))
                 .replace("{time}", &format!("{hour:02}:00"))
                 .replace(
+                    "{years}",
+                    &match ours.map_or(0, |(_, years)| years) {
+                        1 => "1 year".to_owned(),
+                        years => format!("{years} years"),
+                    },
+                )
+                .replace(
                     "{soon}",
                     &forecast.map_or_else(String::new, |(_, at)| format!("{at:02}:00")),
                 )
@@ -519,6 +545,32 @@ fn holiday(date: time::Date, hour: u8) -> Option<Category> {
     })
 }
 
+/// Our own days: the first kiss (2023-10-16), the day we started dating
+/// (2024-03-27) and the proposal (2024-12-31), with the years since.
+fn couple_day(date: time::Date) -> Option<(Category, i32)> {
+    use time::Month;
+    let (category, since) = match (date.month(), date.day()) {
+        (Month::October, 16) => (Category::FirstKiss, 2023),
+        (Month::March, 27) => (Category::Dating, 2024),
+        (Month::December, 31) => (Category::Proposal, 2024),
+        _ => return None,
+    };
+    let years = date.year() - since;
+    (years >= 1).then_some((category, years))
+}
+
+/// The one hour each week (day and hour) for a line about us: a different
+/// day and hour every week, between 10:00 and 21:59.
+fn weekly_slot(date: time::Date) -> (time::Date, u8) {
+    let monday = date.to_julian_day() - i32::from(date.weekday().number_days_from_monday());
+    let mut z = (monday as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    let day = time::Date::from_julian_day(monday + (z % 7) as i32).unwrap_or(date);
+    (day, 10 + ((z >> 8) % 12) as u8)
+}
+
 /// Monday morning, Friday evening, weekend daytime, the small hours.
 fn time_of_week(date: time::Date, hour: u8) -> Option<Category> {
     use time::Weekday;
@@ -552,7 +604,9 @@ mod tests {
         assert!(count(Category::Still) >= 30);
         assert!(count(Category::Change) >= 15);
         for row in templates() {
-            assert!(!row.title.is_empty() && !row.subtitle.is_empty());
+            // Only a line about us may stand without a subtitle.
+            assert!(!row.title.is_empty());
+            assert!(!row.subtitle.is_empty() || row.category == Category::Us);
         }
     }
     #[test]
@@ -694,7 +748,8 @@ mod tests {
                 .replace("{delta}", "")
                 .replace("{temp}", "")
                 .replace("{time}", "")
-                .replace("{soon}", "");
+                .replace("{soon}", "")
+                .replace("{years}", "");
             assert!(!text.contains('{') && !text.contains('—'), "{text}");
         }
     }
@@ -755,6 +810,53 @@ mod tests {
             Some(Category::SmallHours)
         );
         assert_eq!(time_of_week(on(2026, November, 18), 12), None);
+    }
+    #[test]
+    fn our_days_and_one_line_a_week() {
+        use time::Month::*;
+        assert_eq!(
+            couple_day(on(2026, October, 16)),
+            Some((Category::FirstKiss, 3))
+        );
+        assert_eq!(couple_day(on(2027, March, 27)), Some((Category::Dating, 3)));
+        assert_eq!(
+            couple_day(on(2025, December, 31)),
+            Some((Category::Proposal, 1))
+        );
+        // Not before the day itself happened.
+        assert_eq!(couple_day(on(2024, December, 31)), None);
+        assert_eq!(couple_day(on(2026, November, 18)), None);
+        // One slot a week, inside that week, 10:00 to 21:59; weeks differ.
+        let mut slots = std::collections::HashSet::new();
+        let start = on(2026, November, 16);
+        for week in 0..52 {
+            let monday = start + time::Duration::weeks(week);
+            let (slot, hour) = weekly_slot(monday);
+            for d in 0..7 {
+                assert_eq!(weekly_slot(monday + time::Duration::days(d)), (slot, hour));
+            }
+            assert!((0..7).contains(&(slot - monday).whole_days()));
+            assert!((10..=21).contains(&hour));
+            slots.insert((slot.weekday(), hour));
+        }
+        assert!(slots.len() > 20, "{}", slots.len());
+        // The anniversary fills {years}; on New Year's Eve the proposal and
+        // the holiday take turns.
+        let mut prefs = Preferences::default();
+        let mut engine = Engine::default();
+        let eve = on(2026, December, 31).to_julian_day();
+        engine.sync(&mut prefs, Some((reading(5., 0), 7200)), 7200, eve, 20);
+        let phrase = engine.current.clone().unwrap();
+        assert_eq!(phrase.category, Category::Proposal);
+        assert!(!format!("{} {}", phrase.title, phrase.subtitle).contains('{'));
+        engine.sync(&mut prefs, Some((reading(5., 0), 10800)), 10800, eve, 21);
+        assert_eq!(engine.current.unwrap().category, Category::NewYearsEve);
+        // A headline can stand alone.
+        assert!(
+            templates()
+                .iter()
+                .any(|t| t.category == Category::Us && t.subtitle.is_empty())
+        );
     }
     #[test]
     fn forecasts_name_the_hour_in_24_hour_time() {

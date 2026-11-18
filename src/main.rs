@@ -1981,6 +1981,17 @@ fn weather_tick(
         local.date().to_julian_day(),
         local.hour(),
     );
+    // Desktop preview of one headline: LUMA_HEADLINE_PREVIEW="Title|Subtitle".
+    if !cfg!(feature = "webos")
+        && let Ok(preview) = std::env::var("LUMA_HEADLINE_PREVIEW")
+    {
+        let (title, subtitle) = preview.split_once('|').unwrap_or((&preview, ""));
+        state.rude_weather.current = Some(weather_phrases::Phrase {
+            category: weather_phrases::Category::Us,
+            title: title.into(),
+            subtitle: subtitle.into(),
+        });
+    }
     state.dirty |= previous_phrase != state.rude_weather.current;
     if saved {
         let _ = storage::save(preferences_path, &state.preferences);

@@ -182,10 +182,16 @@ def handwritten():
 
 def specials():
     """The special cases (streaks, changes, forecasts, holidays ...) from
-    tools/special-headlines.py, each under its own label."""
+    tools/special-headlines.py and tools/couple-headlines.py, each under its
+    own label."""
+    here = Path(__file__).resolve().parent
     scope = {}
-    exec((Path(__file__).resolve().parent / "special-headlines.py").read_text(), scope)
-    return [(key, t, sub) for key, lines in scope["SPECIAL"].items() for t, sub in lines]
+    exec((here / "special-headlines.py").read_text(), scope)
+    special = dict(scope["SPECIAL"])
+    # Our own lines; the same key replaces the general one (Valentine's Day).
+    exec((here / "couple-headlines.py").read_text(), scope)
+    special.update(scope["COUPLE"])
+    return [(key, t, sub) for key, lines in special.items() for t, sub in lines]
 
 
 def main():
