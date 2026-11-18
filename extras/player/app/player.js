@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.5.2';
+const PLAYER_VERSION = '0.5.3';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -137,7 +137,9 @@ function applyAccent() {
 // at the TV's own idle time (com.webos.service.tvpower, the same calls Kodi
 // and Jellyfin's webOS clients use). The player lets it start while a film is
 // paused, stopped or failed, and holds it off while one plays.
-const SAVER_CLIENT = 'com.archbtw.luma.player';
+// Its own name per start: a player left running (or relaunched) is refused
+// with "The client is already registered" under the same name.
+const SAVER_CLIENT = `com.archbtw.luma.player.${Date.now().toString(36)}`;
 const TVPOWER = 'luna://com.webos.service.tvpower/power/';
 // Backup for a TV that never asks during a long pause: start it ourselves.
 const SAVER_BACKUP_MS = 10 * 60 * 1000;
@@ -197,6 +199,8 @@ video.addEventListener('pause', () => {
 });
 video.addEventListener('playing', () => {
   pausedAt = 0;
+  // Playing again: a later break may be reopened again.
+  if (jf && pos() > 5) jf.reopened = 0;
 });
 
 // ---------- controls visibility ----------
@@ -300,6 +304,7 @@ function drawPreview(d) {
   $('previewName').textContent = at >= 0 ? jf.chapters[at].name : '';
   box.classList.toggle('textOnly', !jf.trickplay);
   if (jf.trickplay) {
+    wantTilesAround(jf.trickplay, sec);
     const f = S.trickplayFrame(jf.trickplay, sec, 320);
     const key = `${f.url} ${f.position}`;
     if (key !== previewKey) {
@@ -351,6 +356,11 @@ function jfExtras() {
           ? `· trickplay: none for this version (Jellyfin has ${Object.keys(item.Trickplay).length})`
           : '· trickplay: none (Jellyfin made no trickplay images for this title)',
     );
+    if (tp && tp.reported !== tp.count) {
+      plog(
+        `trickplay: Jellyfin reports ${tp.reported} thumbnails, the film needs ${tp.count}: using ${tp.count}`,
+      );
+    }
     if (tp) preloadTiles(tp);
     ticksKey = '';
     buildRow();
@@ -359,42 +369,49 @@ function jfExtras() {
   x.onerror = () => plog('chapters and trickplay: no answer');
   x.send();
 }
-// A tile holds up to 100 frames and is a large image: fetched while seeking
-// it arrives after the preview has gone. Load them all when the film starts,
-// nearest to the current position first, and keep them (the browser keeps
-// a decoded image while something holds it).
-let tiles = [];
-function preloadTiles(tp) {
-  const per = tp.cols * tp.rows;
-  const count = Math.ceil(tp.count / per);
-  const here = Math.min(count - 1, Math.floor((pos() * 1000) / tp.interval / per));
-  const order = [];
-  for (let d = 0; order.length < count; d++) {
-    if (here + d < count) order.push(here + d);
-    if (d > 0 && here - d >= 0) order.push(here - d);
+// A tile holds up to 100 frames and is a large image (3200x1800 decoded is
+// ~23 MB): keep only the tiles around where the preview is, at most
+// TILES_KEPT, loading the next ones before they are needed.
+const TILES_KEPT = 6;
+let tiles = new Map(); // tile index -> Image, oldest first
+let tileReported = false;
+function wantTile(tp, i) {
+  const last = Math.ceil(tp.count / (tp.cols * tp.rows)) - 1;
+  if (i < 0 || i > last) return;
+  if (tiles.has(i)) {
+    const img = tiles.get(i);
+    tiles.delete(i);
+    tiles.set(i, img);
+    return;
   }
+  const img = new Image();
   const want = jf;
-  tiles = [];
-  let reported = false;
-  const next = (k) => {
-    if (k >= order.length || jf !== want) return;
-    const img = new Image();
-    img.onload = () => {
-      if (!reported) {
-        reported = true;
-        plog(`trickplay: tile ${order[k]} loaded, ${img.naturalWidth}x${img.naturalHeight}`);
-      }
-      next(k + 1);
-    };
-    img.onerror = () => {
-      plog(`trickplay: tile ${order[k]} did not load`);
-      next(k + 1);
-    };
-    img.src = tp.tile(order[k]);
-    tiles.push(img);
+  img.onload = () => {
+    if (!tileReported && jf === want) {
+      tileReported = true;
+      plog(`trickplay: tile ${i} loaded, ${img.naturalWidth}x${img.naturalHeight}`);
+    }
   };
-  plog(`trickplay: loading ${count} tile${count === 1 ? '' : 's'}`);
-  next(0);
+  img.onerror = () => plog(`trickplay: tile ${i} did not load`);
+  img.src = tp.tile(i);
+  tiles.set(i, img);
+  while (tiles.size > TILES_KEPT) tiles.delete(tiles.keys().next().value);
+}
+// The tile for this moment and its neighbours.
+function wantTilesAround(tp, sec) {
+  const i = window.LumaStreams.trickplayTile(tp, sec);
+  wantTile(tp, i);
+  wantTile(tp, i + 1);
+  wantTile(tp, i - 1);
+}
+function preloadTiles(tp) {
+  tiles = new Map();
+  tileReported = false;
+  const tileCount = Math.ceil(tp.count / (tp.cols * tp.rows));
+  plog(
+    `trickplay: ${tileCount} tile${tileCount === 1 ? '' : 's'}, loading those near ${clock(pos())}`,
+  );
+  wantTilesAround(tp, pos());
 }
 // Channel up/down: the next chapter, or the start of this one (the previous
 // one when this one has only just begun).
@@ -1238,6 +1255,23 @@ video.addEventListener('error', () => {
     jf.forceStream = true;
     plog('Direct Play refused: retrying as Direct Stream');
     jfReplan();
+    return;
+  }
+  // A stream that played and then broke (Jellyfin ends a stream left paused
+  // for a while): open it again where it was, paused if it was paused.
+  if (jf && jf.plan && jf.plan.method !== 'DirectPlay' && pos() > 5 && (jf.reopened || 0) < 2) {
+    jf.reopened = (jf.reopened || 0) + 1;
+    const at = pos();
+    const wasPaused = video.paused;
+    plog(`stream broke off at ${clock(at)}: opening it again there`);
+    open(jf.plan.url, at);
+    if (wasPaused) {
+      const hold = () => {
+        video.removeEventListener('canplay', hold);
+        video.pause();
+      };
+      video.addEventListener('canplay', hold);
+    }
     return;
   }
   if (jfFallback('refused')) return;

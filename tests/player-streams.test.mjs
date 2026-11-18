@@ -385,3 +385,46 @@ test('trickplay picks the set nearest 320 px and finds the frame in its tile', (
   assert.match(S.trickplayFrame(tp, 999999, 320).url, /\/4\.jpg/);
   assert.equal(S.trickplay({}, jfCtx, 'src1'), null);
 });
+
+test('trickplay imported by Jellyfin counts tiles, not frames: the film length decides', () => {
+  const tp = S.trickplay(
+    {
+      RunTimeTicks: 8178 * 1e7,
+      Trickplay: {
+        src1: {
+          320: { Width: 320, TileWidth: 10, TileHeight: 10, ThumbnailCount: 41, Interval: 2000 },
+        },
+      },
+    },
+    jfCtx,
+    'src1',
+  );
+  assert.equal(tp.reported, 41);
+  assert.equal(tp.count, 4089);
+  assert.equal(tp.height, 180, '16:9 when Jellyfin stores no height');
+  // 1:43:53 is frame 3116: tile 31, not stuck on the first tiles.
+  assert.equal(S.trickplayTile(tp, 6233), 31);
+  assert.match(S.trickplayFrame(tp, 6233, 320).url, /\/31\.jpg/);
+  // A correct count is left alone.
+  const ok = S.trickplay(
+    {
+      RunTimeTicks: 8178 * 1e7,
+      Trickplay: {
+        src1: {
+          320: {
+            Width: 320,
+            Height: 136,
+            TileWidth: 10,
+            TileHeight: 10,
+            ThumbnailCount: 4089,
+            Interval: 2000,
+          },
+        },
+      },
+    },
+    jfCtx,
+    'src1',
+  );
+  assert.equal(ok.count, 4089);
+  assert.equal(ok.reported, 4089);
+});

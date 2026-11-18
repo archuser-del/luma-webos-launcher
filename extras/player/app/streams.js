@@ -460,18 +460,35 @@
     const t = byWidth[key];
     if (!t.TileWidth || !t.TileHeight || !t.Interval || !t.ThumbnailCount) return null;
     const width = t.Width || key;
+    // Jellyfin imports trickplay it finds on disk with ThumbnailCount set to
+    // the number of tile FILES (TrickplayManager: existingFiles.Length): 41
+    // for a film of 41 tiles and ~4,100 frames. When the count covers less
+    // than half the film, the film's length says how many frames there are.
+    const runMs = (item.RunTimeTicks || 0) / 1e4;
+    let count = t.ThumbnailCount;
+    const reported = count;
+    if (runMs > 0 && count * t.Interval < runMs / 2) {
+      count = Math.ceil(runMs / t.Interval);
+    }
     const source = sourceId ? `MediaSourceId=${encodeURIComponent(sourceId)}&` : '';
     return {
       width,
       height: t.Height || Math.round((width * 9) / 16),
       cols: t.TileWidth,
       rows: t.TileHeight,
-      count: t.ThumbnailCount,
+      count,
+      reported,
       interval: t.Interval,
       // Images cannot send a header: the token goes in the address.
       tile: (i) =>
         `${ctx.base}/Videos/${ctx.item}/Trickplay/${key}/${i}.jpg?${source}ApiKey=${encodeURIComponent(ctx.token)}`,
     };
+  }
+
+  /** The tile holding the frame for `sec`. */
+  function trickplayTile(tp, sec) {
+    const n = Math.max(0, Math.min(tp.count - 1, Math.floor((sec * 1000) / tp.interval)));
+    return Math.floor(n / (tp.cols * tp.rows));
   }
 
   /** The thumbnail for `sec`, as CSS for a box `shown` px wide. */
@@ -503,6 +520,7 @@
     chapterAt,
     trickplay,
     trickplayFrame,
+    trickplayTile,
     codecName,
     family,
   };
