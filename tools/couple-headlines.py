@@ -44,7 +44,7 @@ COUPLE = {
         ("Pairing successful.", "Valentine's Day. Bluetooth wishes it was this connected."),
         ("Movie night unlocked.", "Titanic or The Notebook? Valentine's rules: wifey picks."),
     ],
-    # Two evening hours a week (starting 17:00 to 20:00), on different days each week.
+    # Two evening hours a week (starting 17:00 to 21:00, gone by 22:00), on different days each week.
     "us": [
         ("Incoming ping from Cali.", "\"Why can't you just live in California?\""),
         ("Packet received: I miss you.", "Long-distance latency, short-distance love."),
