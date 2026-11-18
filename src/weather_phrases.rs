@@ -871,6 +871,17 @@ mod tests {
                 .any(|t| t.category == Category::Us && t.subtitle.is_empty())
         );
     }
+    /// The weekly slots for the coming weeks:
+    /// cargo test --all-features weekly_slot_calendar -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn weekly_slot_calendar() {
+        let today = time::OffsetDateTime::now_utc().date();
+        for week in 0..8 {
+            let [a, b] = weekly_slots(today + time::Duration::weeks(week));
+            println!("{} {:02}:00 · {} {:02}:00", a.0, a.1, b.0, b.1);
+        }
+    }
     #[test]
     fn forecasts_name_the_hour_in_24_hour_time() {
         let hour = |hour, code| {

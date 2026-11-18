@@ -1971,8 +1971,19 @@ fn weather_tick(
     } else {
         None
     };
-    let local =
+    let mut local =
         time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let mut now = now;
+    // Desktop check of the headline rules at another moment:
+    // LUMA_HEADLINE_TIME=2026-12-31T20:30:00-06:00 (the weather stays real).
+    if !cfg!(feature = "webos")
+        && let Some(at) = std::env::var("LUMA_HEADLINE_TIME").ok().and_then(|value| {
+            OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339).ok()
+        })
+    {
+        local = at;
+        now = at.unix_timestamp();
+    }
     let previous_phrase = state.rude_weather.current.clone();
     let saved = state.rude_weather.sync(
         &mut state.preferences,
@@ -1981,6 +1992,16 @@ fn weather_tick(
         local.date().to_julian_day(),
         local.hour(),
     );
+    if previous_phrase != state.rude_weather.current
+        && let Some(phrase) = &state.rude_weather.current
+    {
+        debug_log!(
+            "headline ({:?}): {} | {}",
+            phrase.category,
+            phrase.title,
+            phrase.subtitle
+        );
+    }
     // Desktop preview of one headline: LUMA_HEADLINE_PREVIEW="Title|Subtitle".
     if !cfg!(feature = "webos")
         && let Ok(preview) = std::env::var("LUMA_HEADLINE_PREVIEW")
