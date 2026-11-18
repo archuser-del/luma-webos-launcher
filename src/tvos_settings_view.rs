@@ -352,8 +352,8 @@ pub(super) fn page_head(
         && state.subpage.is_none()
         && state.root.is_some()
     {
-        // Four rows, the ROOT FEATURES heading and two described rows.
-        2. * S32 + 4. * 92. + 16. + 48. + 2. * 104. + 12.
+        // Four rows, the ROOT FEATURES heading and three described rows.
+        2. * S32 + 4. * 92. + 16. + 48. + 3. * 104. + 2. * 12.
     } else if state.section == crate::state::INPUTS_SECTION && state.subpage.is_none() {
         let groups = [true, false]
             .into_iter()

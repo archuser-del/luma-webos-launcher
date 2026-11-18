@@ -35,9 +35,58 @@ pub enum Category {
     Wind,
     Fog,
     Night,
+    /// The same weather two or more days running (tagged by weather).
     Still,
+    /// A sudden change (tagged colder, warmer or any).
     Change,
+    RainSoon,
+    Clearing,
+    Heatwave,
+    DeepFreeze,
+    Monday,
+    Friday,
+    Weekend,
+    SmallHours,
+    NewYear,
+    NewYearsEve,
+    Valentine,
+    LeapDay,
+    PiDay,
+    AprilFools,
+    StarWars,
+    Independence,
+    ProgrammersDay,
+    Halloween,
+    Thanksgiving,
+    Christmas,
+    Friday13,
 }
+/// The special kinds, label first, for the headline list and its tests.
+const SPECIAL_LABELS: [(&str, Category); 23] = [
+    ("rain_soon", Category::RainSoon),
+    ("clearing", Category::Clearing),
+    ("heatwave", Category::Heatwave),
+    ("deep_freeze", Category::DeepFreeze),
+    ("monday", Category::Monday),
+    ("friday", Category::Friday),
+    ("weekend", Category::Weekend),
+    ("small_hours", Category::SmallHours),
+    ("new_year", Category::NewYear),
+    ("new_years_eve", Category::NewYearsEve),
+    ("valentine", Category::Valentine),
+    ("leap_day", Category::LeapDay),
+    ("pi_day", Category::PiDay),
+    ("april_fools", Category::AprilFools),
+    ("star_wars", Category::StarWars),
+    ("independence", Category::Independence),
+    ("programmers_day", Category::ProgrammersDay),
+    ("halloween", Category::Halloween),
+    ("thanksgiving", Category::Thanksgiving),
+    ("christmas", Category::Christmas),
+    ("friday_13", Category::Friday13),
+    ("still", Category::Still),
+    ("change", Category::Change),
+];
 impl Category {
     fn from_label(s: &str) -> Option<Self> {
         Some(match s {
@@ -53,9 +102,12 @@ impl Category {
             "wind" => Self::Wind,
             "fog" => Self::Fog,
             "night" => Self::Night,
-            "still" => Self::Still,
-            "change" => Self::Change,
-            _ => return None,
+            other => {
+                return SPECIAL_LABELS
+                    .iter()
+                    .find(|(label, _)| *label == other)
+                    .map(|(_, category)| *category);
+            }
         })
     }
     pub fn label(self) -> &'static str {
@@ -72,20 +124,33 @@ impl Category {
             Self::Wind => "windy",
             Self::Fog => "fog",
             Self::Night => "night",
-            Self::Still => "still",
-            Self::Change => "change",
+            other => SPECIAL_LABELS
+                .iter()
+                .find(|(_, category)| *category == other)
+                .map_or("special", |(label, _)| label),
         }
     }
+    /// Weather worth remarking on when it lasts, and the tag of its streak lines.
     pub fn harsh(self) -> bool {
-        matches!(
-            self,
-            Self::Cold | Self::Frost | Self::Rain | Self::Cloudy | Self::Hot
-        )
+        self.still_tag().is_some()
+    }
+    fn still_tag(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Cold | Self::Frost => "cold",
+            Self::Rain => "rain",
+            Self::Cloudy => "grey",
+            Self::Hot => "hot",
+            Self::Snow => "snow",
+            Self::Fog => "fog",
+            _ => return None,
+        })
     }
 }
 #[derive(Clone, Debug)]
 pub struct Template {
     pub category: Category,
+    /// Which streak or change a Still/Change line is for ("rain", "colder").
+    pub tag: String,
     pub title: String,
     pub subtitle: String,
 }
@@ -100,11 +165,16 @@ pub fn templates() -> &'static [Template] {
             .filter(|line| !line.starts_with('#'))
             .filter_map(|line| {
                 let mut parts = line.splitn(3, '\t');
-                let category = Category::from_label(parts.next()?)?;
+                let (label, tag) = parts.next()?.split_once(':').map_or_else(
+                    || (line.split('\t').next().unwrap_or(""), ""),
+                    |(l, t)| (l, t),
+                );
+                let category = Category::from_label(label)?;
                 let title = parts.next()?.trim();
                 let subtitle = parts.next()?.trim();
                 (!title.is_empty() && !subtitle.is_empty()).then(|| Template {
                     category,
+                    tag: tag.into(),
                     title: title.into(),
                     subtitle: subtitle.into(),
                 })
@@ -185,7 +255,8 @@ pub struct Engine {
     change_until: i64,
     old_label: String,
     new_label: String,
-    delta: i32,
+    /// Degrees Celsius changed (negative: colder).
+    delta: f64,
 }
 impl Engine {
     pub fn sync(
@@ -215,16 +286,16 @@ impl Engine {
                 self.new_label = base.label().into();
                 self.delta = self
                     .last_reading
-                    .map_or(0, |r| (reading.temperature - r.temperature).round() as i32);
+                    .map_or(0., |r| reading.temperature - r.temperature);
             }
             if let Some(three_hours_ago) = reading.temperature_3h_ago
                 && (reading.temperature - three_hours_ago).abs() >= 6.0
                 && (now - updated_at).abs() < 3600
             {
                 self.change_until = now + 3600;
-                self.old_label = format!("{three_hours_ago:.0}°");
-                self.new_label = format!("{:.0}°", reading.temperature);
-                self.delta = (reading.temperature - three_hours_ago).round() as i32;
+                self.old_label = degrees(three_hours_ago, prefs.temperature_unit);
+                self.new_label = degrees(reading.temperature, prefs.temperature_unit);
+                self.delta = reading.temperature - three_hours_ago;
             }
             self.last_reading = Some(reading);
             self.last_category = Some(base);
@@ -260,14 +331,34 @@ impl Engine {
                 }
             }
         }
+        let bucket = now.div_euclid(3600);
+        let date = time::Date::from_julian_day(day).ok();
+        let forecast = forecast_case(reading, base);
+        // Specials take turns with the weather so neither wears out: a
+        // holiday every other hour, a streak two hours in three, a time of
+        // the week one hour in three. A sudden change and a forecast speak
+        // while they last.
         let category = if now < self.change_until {
             Category::Change
-        } else if run >= 2 {
+        } else if let Some(holiday) = date.and_then(|d| holiday(d, hour))
+            && bucket % 2 == 0
+        {
+            holiday
+        } else if run >= 2 && bucket % 3 != 2 {
             Category::Still
+        } else if let Some((case, _)) = forecast {
+            case
+        } else if reading.temperature >= 35. && bucket % 2 == 0 {
+            Category::Heatwave
+        } else if reading.temperature <= -15. && bucket % 2 == 0 {
+            Category::DeepFreeze
+        } else if let Some(time) = date.and_then(|d| time_of_week(d, hour))
+            && bucket % 3 == 0
+        {
+            time
         } else {
             base
         };
-        let bucket = now.div_euclid(3600);
         if self
             .current
             .as_ref()
@@ -277,26 +368,25 @@ impl Engine {
         {
             return save;
         }
+        // Streak lines are for this weather; change lines say colder or
+        // warmer only for a real swing (3 °C or more).
+        let still_tag = base.still_tag().unwrap_or("");
+        let change_tag = if self.delta <= -3. {
+            "colder"
+        } else if self.delta >= 3. {
+            "warmer"
+        } else {
+            ""
+        };
         let choices: Vec<_> = templates()
             .iter()
             .filter(|t| {
-                if t.category != category {
-                    return false;
-                }
-                if category == Category::Still {
-                    let keyword = match base {
-                        Category::Cold | Category::Frost => "cold",
-                        Category::Rain => "raining",
-                        Category::Cloudy => "grey",
-                        Category::Hot => "hot",
-                        _ => return false,
-                    };
-                    return t.title.to_ascii_lowercase().contains(keyword);
-                }
-                if category == Category::Change && t.title.contains("colder") {
-                    return self.delta < 0;
-                }
-                true
+                t.category == category
+                    && match category {
+                        Category::Still => t.tag == still_tag,
+                        Category::Change => t.tag == "any" || t.tag == change_tag,
+                        _ => true,
+                    }
             })
             .collect();
         if choices.is_empty() {
@@ -344,18 +434,25 @@ impl Engine {
             prefs.weather_phrase_seen.drain(..extra);
         }
         save = true;
-        let title = selected
-            .title
-            .replace("{N}", &run.to_string())
-            .replace("{old}", &self.old_label)
-            .replace("{new}", &self.new_label)
-            .replace("{delta}", &self.delta.abs().to_string());
-        let subtitle = selected
-            .subtitle
-            .replace("{N}", &run.to_string())
-            .replace("{old}", &self.old_label)
-            .replace("{new}", &self.new_label)
-            .replace("{delta}", &self.delta.abs().to_string());
+        let unit = prefs.temperature_unit;
+        let delta = match unit {
+            crate::weather::Unit::Celsius => self.delta.abs(),
+            crate::weather::Unit::Fahrenheit => self.delta.abs() * 9. / 5.,
+        };
+        let fill = |text: &str| {
+            text.replace("{N}", &run.to_string())
+                .replace("{old}", &self.old_label)
+                .replace("{new}", &self.new_label)
+                .replace("{delta}", &format!("{delta:.0}"))
+                .replace("{temp}", &degrees(reading.temperature, unit))
+                .replace("{time}", &format!("{hour:02}:00"))
+                .replace(
+                    "{soon}",
+                    &forecast.map_or_else(String::new, |(_, at)| format!("{at:02}:00")),
+                )
+        };
+        let title = fill(&selected.title);
+        let subtitle = fill(&selected.subtitle);
         self.previous = self.current.replace(Phrase {
             category,
             title,
@@ -366,6 +463,72 @@ impl Engine {
         self.chosen_bucket = bucket;
         save
     }
+}
+
+/// A temperature as shown in headlines ("21°"), in the unit set in Luma.
+fn degrees(celsius: f64, unit: crate::weather::Unit) -> String {
+    match unit {
+        crate::weather::Unit::Celsius => format!("{celsius:.0}°"),
+        crate::weather::Unit::Fahrenheit => format!("{:.0}°", celsius * 9. / 5. + 32.),
+    }
+}
+
+fn wet(code: u8) -> bool {
+    matches!(
+        code,
+        51 | 53 | 55 | 56 | 57 | 61 | 63 | 65 | 66 | 67 | 80 | 81 | 82 | 95 | 96 | 99
+    )
+}
+
+/// Rain due in the next three hours while it is dry, or the end of rain
+/// that is falling now, with the hour it happens.
+fn forecast_case(reading: Reading, base: Category) -> Option<(Category, u8)> {
+    let mut next = reading.hours.iter().take(3).flatten();
+    if matches!(base, Category::Rain | Category::Thunder) {
+        next.find(|h| !wet(h.code) && !matches!(h.code, 71..=77 | 85 | 86))
+            .map(|h| (Category::Clearing, h.hour))
+    } else if base != Category::Snow && !wet(reading.code) {
+        next.find(|h| wet(h.code))
+            .map(|h| (Category::RainSoon, h.hour))
+    } else {
+        None
+    }
+}
+
+/// A holiday or a day worth a line (US calendar for Thanksgiving and the
+/// Fourth of July).
+fn holiday(date: time::Date, hour: u8) -> Option<Category> {
+    use time::{Month, Weekday};
+    Some(match (date.month(), date.day()) {
+        (Month::January, 1) => Category::NewYear,
+        (Month::December, 31) if hour >= 17 => Category::NewYearsEve,
+        (Month::February, 14) => Category::Valentine,
+        (Month::February, 29) => Category::LeapDay,
+        (Month::March, 14) => Category::PiDay,
+        (Month::April, 1) => Category::AprilFools,
+        (Month::May, 4) => Category::StarWars,
+        (Month::July, 4) => Category::Independence,
+        (Month::October, 31) => Category::Halloween,
+        (Month::December, 24 | 25) => Category::Christmas,
+        // The fourth Thursday of November.
+        (Month::November, 22..=28) if date.weekday() == Weekday::Thursday => Category::Thanksgiving,
+        (_, 13) if date.weekday() == Weekday::Friday => Category::Friday13,
+        // The 256th day of the year.
+        _ if date.ordinal() == 256 => Category::ProgrammersDay,
+        _ => return None,
+    })
+}
+
+/// Monday morning, Friday evening, weekend daytime, the small hours.
+fn time_of_week(date: time::Date, hour: u8) -> Option<Category> {
+    use time::Weekday;
+    Some(match (date.weekday(), hour) {
+        (_, 1..=4) => Category::SmallHours,
+        (Weekday::Monday, 5..=11) => Category::Monday,
+        (Weekday::Friday, 16..=23) => Category::Friday,
+        (Weekday::Saturday | Weekday::Sunday, 8..=20) => Category::Weekend,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -386,8 +549,8 @@ mod tests {
         let count = |c| templates().iter().filter(|t| t.category == c).count();
         assert!(templates().len() > 10_000, "{}", templates().len());
         assert!(count(Category::ClearNice) >= 900);
-        assert_eq!(count(Category::Still), 4);
-        assert_eq!(count(Category::Change), 4);
+        assert!(count(Category::Still) >= 30);
+        assert!(count(Category::Change) >= 15);
         for row in templates() {
             assert!(!row.title.is_empty() && !row.subtitle.is_empty());
         }
@@ -450,9 +613,16 @@ mod tests {
             .count()
             .min(SEEN_LIMIT);
         let mut shown = std::collections::HashSet::new();
+        let wednesday = day(2026, time::Month::November, 18);
         for hour in 0..total as i64 {
             let now = 1_000_000 + hour * 3600;
-            engine.sync(&mut prefs, Some((reading(10., 45), now)), now, 10, 12);
+            engine.sync(
+                &mut prefs,
+                Some((reading(10., 45), now)),
+                now,
+                wednesday,
+                12,
+            );
             let phrase = engine.current.clone().unwrap();
             assert!(
                 shown.insert((phrase.title, phrase.subtitle)),
@@ -461,9 +631,194 @@ mod tests {
         }
         let before = engine.current.clone().unwrap();
         let now = 1_000_000 + total as i64 * 3600;
-        engine.sync(&mut prefs, Some((reading(10., 45), now)), now, 10, 12);
+        engine.sync(
+            &mut prefs,
+            Some((reading(10., 45), now)),
+            now,
+            wednesday,
+            12,
+        );
         assert_ne!(engine.current, Some(before));
         assert!(prefs.weather_phrase_seen.len() <= SEEN_LIMIT);
+    }
+    fn day(year: i32, month: time::Month, day: u8) -> i32 {
+        time::Date::from_calendar_date(year, month, day)
+            .unwrap()
+            .to_julian_day()
+    }
+    fn on(year: i32, month: time::Month, d: u8) -> time::Date {
+        time::Date::from_calendar_date(year, month, d).unwrap()
+    }
+    #[test]
+    fn every_special_case_and_streak_has_lines() {
+        for (label, category) in SPECIAL_LABELS {
+            let count = templates()
+                .iter()
+                .filter(|t| t.category == category)
+                .count();
+            assert!(count >= 3, "{label}: {count}");
+            assert_eq!(Category::from_label(label), Some(category));
+        }
+        for base in [
+            Category::Cold,
+            Category::Frost,
+            Category::Rain,
+            Category::Cloudy,
+            Category::Hot,
+            Category::Snow,
+            Category::Fog,
+        ] {
+            let tag = base.still_tag().unwrap();
+            assert!(
+                templates()
+                    .iter()
+                    .filter(|t| t.category == Category::Still && t.tag == tag)
+                    .count()
+                    >= 4,
+                "{tag}"
+            );
+        }
+        for tag in ["any", "colder", "warmer"] {
+            assert!(
+                templates()
+                    .iter()
+                    .any(|t| t.category == Category::Change && t.tag == tag)
+            );
+        }
+        // No headline is left with a placeholder nothing fills.
+        for t in templates() {
+            let text = format!("{} {}", t.title, t.subtitle)
+                .replace("{N}", "")
+                .replace("{old}", "")
+                .replace("{new}", "")
+                .replace("{delta}", "")
+                .replace("{temp}", "")
+                .replace("{time}", "")
+                .replace("{soon}", "");
+            assert!(!text.contains('{') && !text.contains('—'), "{text}");
+        }
+    }
+    #[test]
+    fn holidays_and_times_of_the_week() {
+        use time::Month::*;
+        assert_eq!(holiday(on(2027, January, 1), 9), Some(Category::NewYear));
+        assert_eq!(holiday(on(2026, December, 31), 12), None);
+        assert_eq!(
+            holiday(on(2026, December, 31), 20),
+            Some(Category::NewYearsEve)
+        );
+        assert_eq!(
+            holiday(on(2027, February, 14), 9),
+            Some(Category::Valentine)
+        );
+        assert_eq!(holiday(on(2028, February, 29), 9), Some(Category::LeapDay));
+        assert_eq!(holiday(on(2026, October, 31), 9), Some(Category::Halloween));
+        assert_eq!(
+            holiday(on(2026, December, 24), 9),
+            Some(Category::Christmas)
+        );
+        // Thanksgiving moves: the fourth Thursday of November.
+        assert_eq!(
+            holiday(on(2026, November, 26), 9),
+            Some(Category::Thanksgiving)
+        );
+        assert_eq!(
+            holiday(on(2027, November, 25), 9),
+            Some(Category::Thanksgiving)
+        );
+        assert_eq!(holiday(on(2026, November, 19), 9), None);
+        // Friday the 13th; Programmers' Day is day 256 (13 Sept, 12 in leap years).
+        assert_eq!(holiday(on(2026, November, 13), 9), Some(Category::Friday13));
+        assert_eq!(
+            holiday(on(2026, September, 13), 9),
+            Some(Category::ProgrammersDay)
+        );
+        assert_eq!(
+            holiday(on(2028, September, 12), 9),
+            Some(Category::ProgrammersDay)
+        );
+        assert_eq!(holiday(on(2026, November, 18), 9), None);
+        assert_eq!(
+            time_of_week(on(2026, November, 16), 8),
+            Some(Category::Monday)
+        );
+        assert_eq!(
+            time_of_week(on(2026, November, 20), 19),
+            Some(Category::Friday)
+        );
+        assert_eq!(
+            time_of_week(on(2026, November, 21), 12),
+            Some(Category::Weekend)
+        );
+        assert_eq!(
+            time_of_week(on(2026, November, 18), 3),
+            Some(Category::SmallHours)
+        );
+        assert_eq!(time_of_week(on(2026, November, 18), 12), None);
+    }
+    #[test]
+    fn forecasts_name_the_hour_in_24_hour_time() {
+        let hour = |hour, code| {
+            Some(crate::weather::HourForecast {
+                hour,
+                temperature: 10.,
+                code,
+                is_day: true,
+            })
+        };
+        let dry = Reading {
+            hours: [hour(15, 2), hour(16, 61), hour(17, 61), None, None],
+            ..reading(14., 2)
+        };
+        assert_eq!(
+            forecast_case(dry, Category::Cloudy),
+            Some((Category::RainSoon, 16))
+        );
+        let wet = Reading {
+            hours: [hour(9, 61), hour(10, 3), None, None, None],
+            ..reading(14., 61)
+        };
+        assert_eq!(
+            forecast_case(wet, Category::Rain),
+            Some((Category::Clearing, 10))
+        );
+        assert_eq!(forecast_case(reading(14., 2), Category::Cloudy), None);
+        // The engine fills {soon} as "16:00".
+        let mut prefs = Preferences::default();
+        let mut engine = Engine::default();
+        let wednesday = day(2026, time::Month::November, 18);
+        engine.sync(&mut prefs, Some((dry, 7200)), 7200, wednesday, 14);
+        let phrase = engine.current.unwrap();
+        assert_eq!(phrase.category, Category::RainSoon);
+        assert!(format!("{} {}", phrase.title, phrase.subtitle).contains("16:00"));
+    }
+    #[test]
+    fn temperatures_follow_the_unit() {
+        let mut prefs = Preferences {
+            temperature_unit: crate::weather::Unit::Fahrenheit,
+            ..Preferences::default()
+        };
+        let mut engine = Engine::default();
+        let wednesday = day(2026, time::Month::November, 18);
+        engine.sync(&mut prefs, Some((reading(12., 0), 100)), 100, wednesday, 12);
+        let swing = Reading {
+            temperature_3h_ago: Some(2.),
+            ..reading(12., 0)
+        };
+        engine.sync(&mut prefs, Some((swing, 200)), 200, wednesday, 12);
+        let phrase = engine.current.unwrap();
+        assert_eq!(phrase.category, Category::Change);
+        let text = format!("{} {}", phrase.title, phrase.subtitle);
+        // 2 °C → 36 °F, 12 °C → 54 °F, a 10 °C swing is 18 °F.
+        assert!(
+            text.contains("36°")
+                || text.contains("54°")
+                || text.contains("18°")
+                || !text.contains('°'),
+            "{text}"
+        );
+        assert!(!text.contains("12°") && !text.contains("10°"), "{text}");
+        assert_eq!(degrees(-15., crate::weather::Unit::Fahrenheit), "5°");
     }
     #[test]
     fn no_weather_is_classic_fallback() {

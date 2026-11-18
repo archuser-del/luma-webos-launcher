@@ -3463,7 +3463,9 @@ fn root_status_reads_the_homebrew_exec_reply() {
     )
     .unwrap();
     assert!(status.wake);
+    assert!(!status.home);
     assert_eq!(status.home_auto_launch, Some(false));
+    assert!(parse_root_status("root\nhome\n").unwrap().home);
     let status = parse_root_status("root\n").unwrap();
     assert!(!status.wake);
     assert_eq!(status.home_auto_launch, None);

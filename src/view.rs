@@ -3865,6 +3865,22 @@ fn root_feature_rows(
         out,
         state,
         assets,
+        Target::Setting(14),
+        Rect::new(x, y, w, 104.),
+        tvos_settings_view::CellContent {
+            name: "Luma as Home screen",
+            value: Some(state_text(root.home)),
+            desc: Some("Replaces LG Home: the Home button and power on open Luma"),
+            chevron: false,
+            checked: false,
+            partial: false,
+        },
+    );
+    y += 116.;
+    tvos_settings_view::cell(
+        out,
+        state,
+        assets,
         Target::Setting(9),
         Rect::new(x, y, w, 104.),
         tvos_settings_view::CellContent {

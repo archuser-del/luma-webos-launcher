@@ -5381,6 +5381,20 @@ impl State {
                         self.dirty = true;
                         return vec![Effect::Save, Effect::DebugLog(self.preferences.debug_log)];
                     }
+                    14 => {
+                        let Some(root) = self.root.as_mut() else {
+                            return vec![];
+                        };
+                        root.home = !root.home;
+                        let on = root.home;
+                        self.notify(if on {
+                            "Making Luma the Home screen. Luma restarts as Home."
+                        } else {
+                            "Going back to LG Home. Luma closes."
+                        });
+                        self.dirty = true;
+                        return vec![Effect::Root(Some(crate::platform::RootSet::Home(on)))];
+                    }
                     9 | 10 => {
                         let Some(root) = self.root.as_mut() else {
                             return vec![];

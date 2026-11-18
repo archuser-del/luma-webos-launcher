@@ -227,12 +227,16 @@ pub struct RootStatus {
     pub wake: bool,
     /// LG «Home Auto Launch»; `None` when the TV did not answer.
     pub home_auto_launch: Option<bool>,
+    /// Luma replaces LG Home (home.sh enable), as saved in /var/lib/luma-home.
+    pub home: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RootSet {
     Wake(bool),
     HomeAutoLaunch(bool),
+    /// Make Luma the Home screen (home.sh enable) or go back to LG Home.
+    Home(bool),
 }
 
 pub struct Platform {
@@ -264,6 +268,7 @@ impl Platform {
                         Ok(std::env::var_os("LUMA_ROOT_PREVIEW").map(|_| RootStatus {
                             wake: true,
                             home_auto_launch: Some(false),
+                            home: false,
                         }))
                     }),
                     Request::WebPlayer(params) => Response::Launched(if webos {
@@ -550,6 +555,8 @@ fn inventory_payload(envelope: &Value, field: &str) -> Result<Value, String> {
 }
 
 const WAKE_SCRIPT: &str = "/var/lib/webosbrew/init.d/71-luma-wake";
+/// Where home.sh keeps Luma-as-Home's saved state and its own copy.
+const HOME_STATE: &str = "/var/lib/luma-home";
 const WAKE_OFF: &str = "/var/lib/webosbrew/luma-autostart-disabled";
 
 fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> {
@@ -563,6 +570,28 @@ fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> 
             quote(include_str!("../tv/luma-wake.sh"))
         ),
         Some(RootSet::Wake(false)) => format!("touch {WAKE_OFF}; {stop}; "),
+        // Detached: enabling closes this Luma (it comes back as Home) and
+        // disabling ends Luma as Home, so the switch must outlive the call.
+        // home.sh asks to confirm on a terminal; the switch is that answer.
+        Some(RootSet::Home(on)) => {
+            let app = install_dir().map_or_else(
+                |_| "/media/developer/apps/usr/palm/applications/com.archbtw.luma".to_owned(),
+                |dir| dir.display().to_string(),
+            );
+            let run = if on {
+                format!("printf 'y\\n' | sh {}/home.sh enable", quote(&app))
+            } else {
+                format!(
+                    "if [ -f {HOME_STATE}/home.sh ]; then sh {HOME_STATE}/home.sh disable; \
+                     else sh {}/home.sh disable; fi",
+                    quote(&app)
+                )
+            };
+            format!(
+                "nohup sh -c {} > /tmp/luma-home-switch.log 2>&1 < /dev/null & ",
+                quote(&format!("sleep 1; {run}"))
+            )
+        }
         Some(RootSet::HomeAutoLaunch(on)) => format!(
             "/usr/bin/luna-send -n 1 -w 4000 luna://com.webos.settingsservice/setSystemSettings '{{\"category\":\"general\",\"settings\":{{\"homeAutoLaunch\":\"{}\"}}}}' >/dev/null; ",
             if on { "on" } else { "off" }
@@ -580,6 +609,7 @@ fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> 
     let command = format!(
         "if [ \"$(id -u)\" != 0 ]; then echo noroot; exit 0; fi; {apply}{pad}echo root; \
          if [ -f {WAKE_SCRIPT} ] && [ ! -e {WAKE_OFF} ]; then echo wake; fi; \
+         if grep -Eq '\"enabled\" *: *true' {HOME_STATE}/state.json 2>/dev/null; then echo home; fi; \
          /usr/bin/luna-send -n 1 -w 4000 luna://com.webos.settingsservice/getSystemSettings '{{\"category\":\"general\",\"keys\":[\"homeAutoLaunch\"]}}'"
     );
     // Without Homebrew Channel the exec service does not exist: no root.
@@ -604,6 +634,7 @@ pub fn parse_root_status(stdout: &str) -> Option<RootStatus> {
     let compact: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
     Some(RootStatus {
         wake: lines.contains(&"wake"),
+        home: lines.contains(&"home"),
         home_auto_launch: if compact.contains("\"homeAutoLaunch\":\"on\"") {
             Some(true)
         } else if compact.contains("\"homeAutoLaunch\":\"off\"") {

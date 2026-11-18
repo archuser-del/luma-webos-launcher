@@ -11039,11 +11039,153 @@ night	Patch: dreaming in code.	It's late. Sleep is a feature.
 night	Clipboard: running nightly builds.	Late night. The backups can run without you.
 night	Hotfix: in low-power mode.	Late night. One more episode?
 night	Bitrate: in quiet hours.	Dark outside. The world is idle. You could be too.
-still	Still cold, still no patch.	Day {N}. Spring is still in beta.
-still	Still raining. Infinite loop.	Day {N}. Build an ark. Or a server rack.
-still	Still grey. Error 404: sun.	The sun is still in development.
-still	Still hot. CPU still throttling.	Day {N}. The AC is your only friend.
-change	Unexpected weather update.	Was {old} an hour ago.
-change	Hot-swapped forecast.	{old} → {new}.
-change	Breaking changes detected.	Dress for every version.
-change	It got colder: rollback.	{delta}° down since this morning.
+still:cold	Still cold, still no patch.	Day {N}. Spring is still in beta.
+still:cold	Day {N} of cold mode.	The heating is now your main process.
+still:cold	Cold loop detected.	Day {N}. Same frost, different morning.
+still:cold	Winter.exe won't close.	Day {N}. Have you tried turning it off and on?
+still:cold	Still frozen. Not responding.	Day {N}. Waiting for a warmer update.
+still:cold	Cold streak: {N} days.	Thermal paste weather continues.
+still:cold	No warm patch yet.	Day {N}. Blankets remain the recommended hardware.
+still:cold	Same cold, new day.	Day {N}. Coffee consumption: critical.
+still:rain	Still raining. Infinite loop.	Day {N}. Build an ark. Or a server rack.
+still:rain	Rain: day {N}.	The sky forgot to close the tap.
+still:rain	Drip mode, day {N}.	Waterproofing is now a core feature.
+still:rain	Still wet. Still here.	Day {N}. Umbrellas have earned overtime.
+still:rain	Rain loop never ends.	Day {N}. Someone add a break statement.
+still:rain	Rainy streak: {N} days.	Liquid cooling, now with extra liquid.
+still:rain	Same rain, new day.	Day {N}. The couch thanks you for your loyalty.
+still:grey	Still grey. Error 404: sun.	The sun is still in development.
+still:grey	Day {N} of grey mode.	Brightness locked at 20%.
+still:grey	Sun.dll still missing.	Day {N}. Reinstalling the sky.
+still:grey	Overcast, day {N}.	The default theme is sticking around.
+still:grey	Grey streak: {N} days.	Low contrast, high patience.
+still:grey	Still cloudy. Still syncing.	Day {N}. The cloud is very much in the cloud.
+still:hot	Still hot. CPU still throttling.	Day {N}. The AC is your only friend.
+still:hot	Day {N} of thermal throttling.	Hydrate like your uptime depends on it.
+still:hot	Heat loop detected.	Day {N}. The fans have filed a complaint.
+still:hot	Still melting.	Day {N}. Shade remains the best firewall.
+still:hot	Hot streak: {N} days.	Not the good kind of hot streak.
+still:hot	Same heat, new day.	Day {N}. Ice cubes are a critical resource.
+still:snow	Still snowing. Buffering forever.	Day {N}. The render just keeps going.
+still:snow	Day {N} of white noise.	The snow shader is stuck on.
+still:snow	Snowed in, day {N}.	Perfect uptime for indoor projects.
+still:snow	Snow streak: {N} days.	Plows in safe mode, people in blankets.
+still:snow	Still white outside.	Day {N}. Particle effects maxed out.
+still:fog	Still foggy. Still 240p.	Day {N}. Draw distance unchanged.
+still:fog	Day {N} of low resolution.	Someone wipe the lens.
+still:fog	Fog loop detected.	Day {N}. Visibility patch still pending.
+still:fog	Haze streak: {N} days.	Rendering the world one meter at a time.
+change:any	Unexpected weather update.	Was {old} an hour ago.
+change:any	Hot-swapped forecast.	{old} → {new}.
+change:any	Breaking changes detected.	Dress for every version.
+change:any	Weather hotfix deployed.	From {old} to {new}. No restart needed.
+change:any	Sky changed its config.	{old} out, {new} in.
+change:any	New weather build.	Changelog: {old} → {new}.
+change:any	Plot twist outside.	It was {old}. Now it's {new}.
+change:any	Forecast merged a surprise.	{old} has been replaced by {new}.
+change:colder	It got colder: rollback.	{delta}° down in a few hours.
+change:colder	Temperature dropped {delta}°.	Grab another layer.
+change:colder	Cooling event detected.	{delta}° colder than a few hours ago.
+change:colder	Rollback to winter.	Down {delta}°. Someone reverted the heat.
+change:colder	Sudden cool-down.	{delta}° lower. The fans can rest.
+change:warmer	Warm patch applied.	{delta}° up in a few hours.
+change:warmer	Temperature spike.	Up {delta}°. Shed a layer.
+change:warmer	Heat upgrade installed.	{delta}° warmer than earlier.
+change:warmer	Overclocked afternoon.	{delta}° up. The sun pushed an update.
+change:warmer	Warming trend detected.	Up {delta}° since earlier. Nice.
+rain_soon	Rain incoming.	Expected around {soon}. Umbrella pre-loaded.
+rain_soon	Precipitation queued.	Rain due by {soon}.
+rain_soon	Weather update downloading.	Rain arriving around {soon}.
+rain_soon	Incoming packets: rain.	Due around {soon}. Bring things inside.
+rain_soon	Rain on the roadmap.	ETA {soon}.
+rain_soon	Umbrella: prefetch.	Rain expected at about {soon}.
+clearing	Rain ending soon.	Clearing around {soon}.
+clearing	Drip mode ending.	Dry skies expected by {soon}.
+clearing	Weather patch incoming.	The rain should stop around {soon}.
+clearing	Rain: finishing up.	ETA dry: {soon}.
+clearing	Light at the end of the stream.	Clearer by {soon}.
+heatwave	Thermal emergency.	{temp} outside. Stay in, stay cool.
+heatwave	Heatwave mode.	{temp}. Even the router wants a fan.
+heatwave	Outside: {temp}.	That's GPU-under-load territory.
+heatwave	Sun overclocked.	{temp} and climbing. Hydrate.
+heatwave	Critical temperature.	{temp} out there. AC is mandatory.
+deep_freeze	Deep freeze.	{temp}. Nothing should be outside, including you.
+deep_freeze	Cryogenic conditions.	{temp} outside. Stay in and stream.
+deep_freeze	Absolute zero speedrun.	{temp}. Cars and people both struggle to start.
+deep_freeze	Kernel panic: cold.	{temp} outside. Layers on layers.
+deep_freeze	Liquid nitrogen weather.	{temp}. The heating is a critical service.
+monday	Monday.exe is starting.	Coffee first, then commits.
+monday	New sprint, who dis.	It's Monday. Ease into it.
+monday	Weekly reboot complete.	Monday morning. Patience loading.
+monday	Monday patch deployed.	Expect a few bugs today.
+monday	Booting into the week.	Slow start allowed. It's Monday.
+monday	Week 0% complete.	Monday. One task at a time.
+friday	Weekend.exe loading.	It's Friday evening. Log off.
+friday	Deploy freeze in effect.	Friday night. Nothing ships now.
+friday	Friday: build passed.	Time to queue up something good.
+friday	Week 100% complete.	Friday evening. You earned the couch.
+friday	Shutting down work processes.	It's Friday. Movie night unlocked.
+friday	Never deploy on a Friday.	Deploy snacks instead.
+weekend	Weekend mode: on.	No meetings detected.
+weekend	Offline for maintenance.	It's the weekend. So are you.
+weekend	Low-priority day.	Weekend rules apply.
+weekend	Calendar: empty.	Perfect conditions for a long series.
+weekend	Sleep-in patch applied.	It's the weekend. Breakfast at any hour.
+weekend	Background tasks only.	Weekend. Nothing urgent, nothing due.
+small_hours	Small hours detected.	It's after {time}. Sleep is a feature.
+small_hours	Late-night build running.	After {time}. The bugs can wait till morning.
+small_hours	Insomnia mode.	It's after {time}. One more episode is a lie.
+small_hours	Uptime: too long.	Past {time}. Even servers have maintenance windows.
+small_hours	Night owl detected.	It's after {time}. Your future self says go to bed.
+small_hours	Cron job: bedtime.	Overdue. It's after {time}.
+new_year	Year++.	Happy New Year. Fresh changelog, same you.
+new_year	New year, new version.	Happy New Year. Release notes to follow.
+new_year	Calendar overflow handled.	Happy New Year. The counter rolled over fine.
+new_year	Happy New Year.	Resolutions loaded. Execution pending.
+new_year	Year rollover complete.	Happy New Year. No Y2K this time.
+new_years_eve	Year ending soon.	New Year's Eve. Countdown process started.
+new_years_eve	Final commit of the year.	Happy New Year's Eve. Push it before midnight.
+new_years_eve	Year-end release candidate.	New Year's Eve. Ship it at 00:00.
+new_years_eve	Countdown.exe running.	It's New Year's Eve. Snacks are mandatory.
+valentine	Love.exe is running.	Happy Valentine's Day.
+valentine	Compatibility check: passed.	Happy Valentine's Day.
+valentine	Heart rate: elevated.	It's Valentine's Day. Treat someone nice.
+valentine	<3 merged to main.	Happy Valentine's Day.
+valentine	Pairing successful.	Valentine's Day. Bluetooth would be proud.
+leap_day	Bonus day unlocked.	February 29th. A free extra day.
+leap_day	Leap day patch.	Rare build: only every four years.
+leap_day	Calendar edge case.	It's February 29th. Enjoy the bonus.
+pi_day	Pi Day: 3.14159…	Eat something round.
+pi_day	Happy Pi Day.	Irrational, but delicious.
+pi_day	Infinite digits detected.	It's Pi Day. Pie is the correct answer.
+april_fools	All systems normal.	April 1st. Trust no headline today.
+april_fools	Wi-Fi is now solar powered.	Happy April Fools' Day.
+april_fools	Weather forecast: yes.	It's April Fools'. Believe nothing.
+april_fools	Router achieved sentience.	Probably. It's April 1st.
+star_wars	May the Fourth be with you.	Star Wars Day. Queue the saga.
+star_wars	Not the bugs you're looking for.	Happy Star Wars Day.
+star_wars	Hyperdrive: online.	May the Fourth. Marathon recommended.
+independence	Happy Fourth of July.	Fireworks tonight. Keep the pets inside.
+independence	Independence Day.	Grill on, devices charged, fireworks later.
+independence	Freedom.exe launched.	Happy Fourth. Stay safe with the sparklers.
+programmers_day	Day 256.	Happy Programmers' Day. 0x100 days in.
+programmers_day	Programmers' Day.	The 256th day of the year. Celebrate in binary.
+programmers_day	11111111 + 1.	Day 256: Programmers' Day.
+halloween	Ghost process detected.	Happy Halloween.
+halloween	Spooky action at a distance.	It's Halloween. Candy is a dependency.
+halloween	Zombie threads everywhere.	Happy Halloween. Lock the doors.
+halloween	Boo.exe has started.	Halloween night. Horror movie queue ready.
+halloween	Haunted hardware.	Happy Halloween.
+thanksgiving	Gratitude.log updated.	Happy Thanksgiving.
+thanksgiving	Thanks for all the packets.	Happy Thanksgiving. Seconds are allowed.
+thanksgiving	Turkey render complete.	Happy Thanksgiving. Nap mode at 15:00.
+thanksgiving	Feast mode: enabled.	Happy Thanksgiving.
+christmas	Merry Christmas.	Presents unpacked, cables everywhere.
+christmas	Holiday build shipped.	Merry Christmas.
+christmas	Sleigh telemetry: nominal.	It's Christmas. Movie marathon recommended.
+christmas	Gift wrap deployed.	Merry Christmas. Batteries included, hopefully.
+christmas	Peace on earth, zero errors.	Merry Christmas.
+christmas	Snow optional, cheer mandatory.	Merry Christmas.
+friday_13	Friday the 13th.	Back up everything. Just in case.
+friday_13	Unlucky build number.	Friday the 13th. Avoid deploys.
+friday_13	Superstition mode.	It's Friday the 13th. Mind the black cat on the keyboard.
