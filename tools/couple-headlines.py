@@ -1,4 +1,4 @@
-"""Headlines for the two of us: anniversaries, Valentine's Day and one line
+"""Headlines for the two of us: anniversaries, Valentine's Day and two lines
 a week. Read by generate-headlines.py; a key here replaces the same key in
 special-headlines.py (Valentine's Day uses only these lines).
 
@@ -44,7 +44,7 @@ COUPLE = {
         ("Pairing successful.", "Valentine's Day. Bluetooth wishes it was this connected."),
         ("Movie night unlocked.", "Titanic or The Notebook? Valentine's rules: wifey picks."),
     ],
-    # One hour a week, at a different time each week.
+    # Two evening hours a week (starting 17:00 to 20:00), on different days each week.
     "us": [
         ("Incoming ping from Cali.", "\"Why can't you just live in California?\""),
         ("Packet received: I miss you.", "Long-distance latency, short-distance love."),

@@ -361,7 +361,7 @@ impl Engine {
             && bucket % 2 == i64::from(ours.is_some())
         {
             holiday
-        } else if date.is_some_and(|d| weekly_slot(d) == (d, hour)) {
+        } else if date.is_some_and(|d| weekly_slots(d).contains(&(d, hour))) {
             Category::Us
         } else if run >= 2 && bucket % 3 != 2 {
             Category::Still
@@ -559,16 +559,25 @@ fn couple_day(date: time::Date) -> Option<(Category, i32)> {
     (years >= 1).then_some((category, years))
 }
 
-/// The one hour each week (day and hour) for a line about us: a different
-/// day and hour every week, between 10:00 and 21:59.
-fn weekly_slot(date: time::Date) -> (time::Date, u8) {
+/// The two hours each week for a line about us: two different days (any
+/// day of the week), each an evening hour starting 17:00 to 20:00, so the
+/// line is gone by 21:00. Different days and hours every week.
+fn weekly_slots(date: time::Date) -> [(time::Date, u8); 2] {
     let monday = date.to_julian_day() - i32::from(date.weekday().number_days_from_monday());
     let mut z = (monday as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 31;
-    let day = time::Date::from_julian_day(monday + (z % 7) as i32).unwrap_or(date);
-    (day, 10 + ((z >> 8) % 12) as u8)
+    let first = (z % 7) as i32;
+    // The second day is one to six days after the first, wrapping in the week.
+    let second = (first + 1 + ((z >> 8) % 6) as i32) % 7;
+    let slot = |offset: i32, bits: u64| {
+        (
+            time::Date::from_julian_day(monday + offset).unwrap_or(date),
+            17 + (bits % 4) as u8,
+        )
+    };
+    [slot(first, z >> 16), slot(second, z >> 24)]
 }
 
 /// Monday morning, Friday evening, weekend daytime, the small hours.
@@ -826,20 +835,24 @@ mod tests {
         // Not before the day itself happened.
         assert_eq!(couple_day(on(2024, December, 31)), None);
         assert_eq!(couple_day(on(2026, November, 18)), None);
-        // One slot a week, inside that week, 10:00 to 21:59; weeks differ.
-        let mut slots = std::collections::HashSet::new();
+        // Two evening slots a week on two different days, inside that week,
+        // starting 17:00 to 20:00; every day of the week gets its turn.
+        let mut days = std::collections::HashSet::new();
         let start = on(2026, November, 16);
         for week in 0..52 {
             let monday = start + time::Duration::weeks(week);
-            let (slot, hour) = weekly_slot(monday);
+            let slots = weekly_slots(monday);
             for d in 0..7 {
-                assert_eq!(weekly_slot(monday + time::Duration::days(d)), (slot, hour));
+                assert_eq!(weekly_slots(monday + time::Duration::days(d)), slots);
             }
-            assert!((0..7).contains(&(slot - monday).whole_days()));
-            assert!((10..=21).contains(&hour));
-            slots.insert((slot.weekday(), hour));
+            assert_ne!(slots[0].0, slots[1].0, "two different days");
+            for (day, hour) in slots {
+                assert!((0..7).contains(&(day - monday).whole_days()));
+                assert!((17..=20).contains(&hour), "{hour}");
+                days.insert(day.weekday());
+            }
         }
-        assert!(slots.len() > 20, "{}", slots.len());
+        assert_eq!(days.len(), 7, "every day of the week");
         // The anniversary fills {years}; on New Year's Eve the proposal and
         // the holiday take turns.
         let mut prefs = Preferences::default();
