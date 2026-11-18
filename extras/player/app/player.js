@@ -23,7 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.5.1';
+const PLAYER_VERSION = '0.5.2';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -320,8 +320,9 @@ function jfExtras() {
   const r = p.report || {};
   const want = jf;
   const x = new XMLHttpRequest();
-  const path = r.user ? `/Users/${encodeURIComponent(r.user)}/Items/${j.item}` : `/Items/${j.item}`;
-  x.open('GET', `${j.base}${path}?Fields=Chapters,Trickplay`);
+  // The current item address; the user's id narrows it to their library.
+  const user = r.user ? `&userId=${encodeURIComponent(r.user)}` : '';
+  x.open('GET', `${j.base}/Items/${j.item}?Fields=Chapters,Trickplay${user}`);
   x.setRequestHeader(
     'Authorization',
     `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${j.deviceId || r.deviceId || ''}", Version="${r.version || '1'}", Token="${j.token}"`,
@@ -345,15 +346,55 @@ function jfExtras() {
     plog(
       `chapters: ${jf.chapters.length}`,
       tp
-        ? `· trickplay: ${tp.width}x${tp.height} every ${tp.interval / 1000} s`
-        : '· trickplay: none',
+        ? `· trickplay: ${tp.width}x${tp.height} every ${tp.interval / 1000} s, ${tp.count} frames`
+        : item && item.Trickplay
+          ? `· trickplay: none for this version (Jellyfin has ${Object.keys(item.Trickplay).length})`
+          : '· trickplay: none (Jellyfin made no trickplay images for this title)',
     );
+    if (tp) preloadTiles(tp);
     ticksKey = '';
     buildRow();
     render();
   };
   x.onerror = () => plog('chapters and trickplay: no answer');
   x.send();
+}
+// A tile holds up to 100 frames and is a large image: fetched while seeking
+// it arrives after the preview has gone. Load them all when the film starts,
+// nearest to the current position first, and keep them (the browser keeps
+// a decoded image while something holds it).
+let tiles = [];
+function preloadTiles(tp) {
+  const per = tp.cols * tp.rows;
+  const count = Math.ceil(tp.count / per);
+  const here = Math.min(count - 1, Math.floor((pos() * 1000) / tp.interval / per));
+  const order = [];
+  for (let d = 0; order.length < count; d++) {
+    if (here + d < count) order.push(here + d);
+    if (d > 0 && here - d >= 0) order.push(here - d);
+  }
+  const want = jf;
+  tiles = [];
+  let reported = false;
+  const next = (k) => {
+    if (k >= order.length || jf !== want) return;
+    const img = new Image();
+    img.onload = () => {
+      if (!reported) {
+        reported = true;
+        plog(`trickplay: tile ${order[k]} loaded, ${img.naturalWidth}x${img.naturalHeight}`);
+      }
+      next(k + 1);
+    };
+    img.onerror = () => {
+      plog(`trickplay: tile ${order[k]} did not load`);
+      next(k + 1);
+    };
+    img.src = tp.tile(order[k]);
+    tiles.push(img);
+  };
+  plog(`trickplay: loading ${count} tile${count === 1 ? '' : 's'}`);
+  next(0);
 }
 // Channel up/down: the next chapter, or the start of this one (the previous
 // one when this one has only just begun).
@@ -368,7 +409,7 @@ function chapterStep(dir) {
   else to = at >= 0 && t - list[at].start > 3 ? at : Math.max(0, at - 1);
   if (to < 0) return true;
   plog(`chapter ${to + 1}:`, list[to].name);
-  previewUntil = Date.now() + 1500;
+  previewUntil = Date.now() + 2500;
   seekTo(list[to].start, true);
   return true;
 }
@@ -962,7 +1003,7 @@ function showNote(title, sub) {
   $('noteSub').textContent = sub || '';
 }
 function seekBy(delta) {
-  previewUntil = Date.now() + 1500;
+  previewUntil = Date.now() + 2500;
   const d = duration();
   const base = now();
   seekTo(Math.max(0, Math.min(d ? d - 1 : base + delta, base + delta)), false);
