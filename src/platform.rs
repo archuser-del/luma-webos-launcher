@@ -211,10 +211,14 @@ pub enum Request {
     Root(Option<RootSet>),
     /// Which HDMI ports carry a picture right now.
     Signals,
+    /// Uninstall an app (its id, and whether it is a developer install).
+    Uninstall(String, bool),
 }
 pub enum Response {
     Inventory(Result<(Inventory, Option<String>), String>),
     Launched(Result<(), String>),
+    /// An uninstall finished (the app's id).
+    Uninstalled(String, Result<(), String>),
     /// `None` when Homebrew Channel has no root: Luma runs as a plain app.
     Root(Result<Option<RootStatus>, String>),
     /// (HDMI port number, picture present).
@@ -257,6 +261,14 @@ impl Platform {
                     } else {
                         Ok((demo_inventory(), None))
                     }),
+                    Request::Uninstall(id, developer) => Response::Uninstalled(
+                        id.clone(),
+                        if webos {
+                            uninstall(&id, developer)
+                        } else {
+                            Ok(())
+                        },
+                    ),
                     Request::Signals => Response::Signals(if webos {
                         hdmi_signals().unwrap_or_default()
                     } else {
@@ -427,6 +439,51 @@ fn inventory_read(uri: &str, field: &str) -> Result<Value, String> {
             .and_then(|reply| reply.get(field).cloned())
             .ok_or(root_error)
     })
+}
+
+/// Removes an app through LG's install service: as root through Homebrew
+/// Channel when it can (the service answers root for any app the TV lets be
+/// removed), else as Luma itself. Developer-mode and Homebrew installs go
+/// through its developer method.
+fn uninstall(id: &str, developer: bool) -> Result<(), String> {
+    if !valid_app_id(id) || id == APP_ID || id.starts_with("com.archbtw.luma") {
+        return Err("This app cannot be uninstalled from Luma".into());
+    }
+    let uri = format!(
+        "luna://com.webos.appInstallService/{}",
+        if developer { "dev/remove" } else { "remove" }
+    );
+    let payload = json!({ "id": id, "subscribe": false });
+    let command = format!(
+        "if [ \"$(id -u)\" = 0 ]; then /usr/bin/luna-send -n 1 -w 20000 {uri} '{payload}'; \
+         else echo noroot; fi"
+    );
+    if let Ok(envelope) = call(
+        "luna://org.webosbrew.hbchannel.service/exec",
+        json!({ "command": command }),
+    ) {
+        let out = envelope
+            .get("stdoutString")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !out.trim().starts_with("noroot") {
+            let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact.contains("\"returnValue\":true") {
+                return Ok(());
+            }
+            let reason = serde_json::from_str::<Value>(out.trim())
+                .ok()
+                .and_then(|v| {
+                    v.get("errorText")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| out.trim().chars().take(160).collect());
+            return Err(reason);
+        }
+    }
+    call(&uri, payload).map(|_| ())
 }
 
 fn root_inventory_read(uri: &str, field: &str) -> Result<Value, String> {
@@ -770,6 +827,12 @@ pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
         }
         let mut app = App::new(id, &title(entry.get("title").and_then(Value::as_str), id));
         app.icon = Some(app_artwork::Source::new(id, entry));
+        app.removable = entry.get("removable") == Some(&json!(true))
+            && entry.get("systemApp") != Some(&json!(true));
+        app.developer = entry
+            .get("folderPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.starts_with("/media/developer/"));
         apps.push(app);
     }
     apps.sort_by_key(|a| a.title.to_lowercase());

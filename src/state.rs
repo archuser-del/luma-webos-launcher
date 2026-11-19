@@ -359,6 +359,8 @@ pub enum Direction {
 pub enum Effect {
     /// Settings › System › Debug Log switched on or off.
     DebugLog(bool),
+    /// Uninstall this app (from the app menu of a hidden app).
+    Uninstall(String),
     Save,
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
@@ -664,6 +666,8 @@ pub struct State {
     pub ha_detail: Option<String>,
     /// The camera whose long-press menu (Hide/Show camera) is open.
     pub ha_camera_menu: Option<String>,
+    /// The app whose "Uninstall" was pressed once: a second press confirms.
+    pub uninstall_armed: Option<String>,
     /// The scene just run from the tab and when, for a short confirmation.
     pub ha_scene_fired: Option<(String, Instant)>,
     /// Open title card, and one fading out after closing.
@@ -869,6 +873,7 @@ impl State {
             ha_discovery_since: Instant::now(),
             ha_detail: None,
             ha_camera_menu: None,
+            uninstall_armed: None,
             ha_scene_fired: None,
             movie: None,
             playback: None,
@@ -3931,10 +3936,55 @@ impl State {
         vec![]
     }
 
+    /// Uninstall is offered only for an app hidden first, that the TV lets
+    /// be removed (never Luma itself or its companions).
+    pub fn can_uninstall(&self, id: &str) -> bool {
+        self.preferences.hidden.iter().any(|item| item == id)
+            && !id.starts_with("com.archbtw.luma")
+            && self
+                .inventory
+                .apps
+                .iter()
+                .any(|app| app.id == id && app.removable)
+    }
+
+    /// An uninstall finished: the app leaves Luma's lists, or the menu says why not.
+    pub fn uninstalled(&mut self, id: &str, result: Result<(), String>) -> bool {
+        let title = self
+            .inventory
+            .apps
+            .iter()
+            .find(|app| app.id == id)
+            .map_or(id.to_owned(), |app| app.title.clone());
+        self.dirty = true;
+        match result {
+            Ok(()) => {
+                self.inventory.apps.retain(|app| app.id != id);
+                self.preferences.hidden.retain(|item| item != id);
+                if let Some(favorites) = self.preferences.favorites.as_mut() {
+                    favorites.retain(|item| item != id);
+                }
+                if self.focus == Target::App(id.to_owned()) {
+                    self.focus = self.first_content();
+                }
+                if self.filter == 5 && self.hidden_count() == 0 {
+                    self.filter = 0;
+                }
+                self.notify(format!("{title} uninstalled"));
+                true
+            }
+            Err(error) => {
+                self.notify(format!("{title} could not be uninstalled: {error}"));
+                false
+            }
+        }
+    }
+
     pub fn options(&mut self) {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
+        self.uninstall_armed = None;
         if let Target::App(id) = &self.focus
             && id != JELLYFIN_TILE
         {
@@ -5620,7 +5670,37 @@ impl State {
                 self.close_subpage();
                 return vec![Effect::Save];
             }
+            Target::Option(2) => {
+                // Uninstall: only for a hidden app the TV lets be removed, and
+                // only on a second press.
+                let Some(Overlay::Options { id, restore }) = self.overlay.clone() else {
+                    return vec![];
+                };
+                if !self.can_uninstall(&id) {
+                    return vec![];
+                }
+                if self.uninstall_armed.as_deref() != Some(id.as_str()) {
+                    self.uninstall_armed = Some(id);
+                    self.dirty = true;
+                    return vec![];
+                }
+                self.uninstall_armed = None;
+                self.overlay = None;
+                self.panel_started = None;
+                self.focus = restore;
+                self.pointer = false;
+                let title = self
+                    .inventory
+                    .apps
+                    .iter()
+                    .find(|app| app.id == id)
+                    .map_or(id.clone(), |app| app.title.clone());
+                self.notify(format!("Uninstalling {title}…"));
+                self.dirty = true;
+                return vec![Effect::Uninstall(id)];
+            }
             Target::Option(index) => {
+                self.uninstall_armed = None;
                 let Some(Overlay::Options { id, restore }) = self.overlay.take() else {
                     return vec![];
                 };

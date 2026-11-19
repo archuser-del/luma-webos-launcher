@@ -4946,3 +4946,59 @@ fn auto_resolution_lowered_by_the_launch_bug_gets_1440p_back_once() {
     again.sanitize();
     assert_eq!(again.auto_ui_cap, crate::model::UiResolution::Hd);
 }
+
+#[test]
+fn uninstall_needs_a_hidden_removable_app_and_a_second_press() {
+    let mut state = ready();
+    let id = "netflix".to_owned();
+    // Not hidden: no uninstall, even when the TV would allow it.
+    state
+        .inventory
+        .apps
+        .iter_mut()
+        .find(|app| app.id == id)
+        .unwrap()
+        .removable = true;
+    assert!(!state.can_uninstall(&id));
+    state.preferences.hidden.push(id.clone());
+    assert!(state.can_uninstall(&id));
+    state.focus = Target::App(id.clone());
+    state.options();
+    state.focus = Target::Option(2);
+    // First press only arms it.
+    assert!(state.activate().is_empty());
+    assert_eq!(state.uninstall_armed.as_deref(), Some("netflix"));
+    assert!(state.overlay.is_some());
+    // Second press uninstalls and closes the menu.
+    assert_eq!(state.activate(), vec![Effect::Uninstall(id.clone())]);
+    assert!(state.overlay.is_none());
+    assert!(state.uninstall_armed.is_none());
+    // A refusal keeps the app; success removes it from Luma's lists.
+    assert!(!state.uninstalled(&id, Err("not allowed".into())));
+    assert!(state.inventory.apps.iter().any(|app| app.id == id));
+    assert!(state.uninstalled(&id, Ok(())));
+    assert!(!state.inventory.apps.iter().any(|app| app.id == id));
+    assert!(!state.preferences.hidden.contains(&id));
+    // An app the TV will not remove never offers it.
+    let other = state.inventory.apps[0].id.clone();
+    state.preferences.hidden.push(other.clone());
+    assert!(!state.can_uninstall(&other));
+}
+
+#[test]
+fn app_list_reads_removable_and_developer_installs() {
+    let apps = crate::platform::normalize_apps(&json!([
+        {"id": "com.example.store", "title": "Store", "removable": true,
+         "folderPath": "/media/cryptofs/apps/usr/palm/applications/com.example.store"},
+        {"id": "com.example.dev", "title": "Dev", "removable": true,
+         "folderPath": "/media/developer/apps/usr/palm/applications/com.example.dev"},
+        {"id": "com.example.fixed", "title": "Fixed", "removable": false},
+        {"id": "com.example.system", "title": "System", "removable": true, "systemApp": true}
+    ]))
+    .unwrap();
+    let get = |id: &str| apps.iter().find(|app| app.id == id).unwrap();
+    assert!(get("com.example.store").removable && !get("com.example.store").developer);
+    assert!(get("com.example.dev").removable && get("com.example.dev").developer);
+    assert!(!get("com.example.fixed").removable);
+    assert!(!get("com.example.system").removable);
+}

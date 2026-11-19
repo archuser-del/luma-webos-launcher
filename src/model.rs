@@ -41,6 +41,13 @@ pub struct App {
     pub category: String,
     #[serde(skip)]
     pub icon: Option<crate::app_artwork::Source>,
+    /// The TV lets this app be uninstalled (its app list says "removable").
+    #[serde(skip)]
+    pub removable: bool,
+    /// Installed in developer mode or by Homebrew Channel (/media/developer):
+    /// removed through the install service's developer method.
+    #[serde(skip)]
+    pub developer: bool,
 }
 
 impl App {
@@ -66,6 +73,8 @@ impl App {
             brand: brand.into(),
             category: category.into(),
             icon: None,
+            removable: false,
+            developer: false,
         }
     }
 }
@@ -673,7 +682,12 @@ pub fn demo_inventory() -> Inventory {
             ("com.webos.app.roomconnect", "룸투룸 셰어"),
         ]
         .into_iter()
-        .map(|(id, title)| App::new(id, title))
+        .map(|(id, title)| {
+            let mut app = App::new(id, title);
+            // The desktop preview can show Uninstall for the non-LG apps.
+            app.removable = !id.starts_with("com.webos.");
+            app
+        })
         .collect(),
         inputs: vec![
             Input {

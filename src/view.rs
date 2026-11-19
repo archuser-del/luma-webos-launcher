@@ -4751,7 +4751,10 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
     let title_style = text(38., 600, -0.03).leading(1.1);
     let extra = assets.lines(title, title_style, 440.).saturating_sub(1) as f32 * 42.;
     let (row_h, row_gap) = (72., 16.);
-    let panel_h = 40. + 46. + extra + 8. + 30. + 32. + 2. * row_h + row_gap + 40.;
+    // Uninstall is the third row, only for a hidden app the TV can remove.
+    let uninstall = state.can_uninstall(id);
+    let rows = if uninstall { 3. } else { 2. };
+    let panel_h = 40. + 46. + extra + 8. + 30. + 32. + rows * row_h + (rows - 1.) * row_gap + 40.;
     let panel = Rect::new(660., (1080. - panel_h) / 2., 600., panel_h);
     out.modal = Some(panel);
     out.shadow(panel, 32., 120., 25., 0.47);
@@ -4788,17 +4791,23 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
         .any(|item| item == id);
     let hidden = state.preferences.hidden.iter().any(|item| item == id);
     let label_style = text(24., 500, 0.);
-    for (index, label) in [
+    let armed = state.uninstall_armed.as_deref() == Some(id);
+    let mut labels = vec![
         if favorite {
             language.t("removeFavorite")
         } else {
             language.t("addFavorite")
         },
         language.t(if hidden { "showApp" } else { "hideApp" }),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    if uninstall {
+        labels.push(if armed {
+            "Press again to uninstall"
+        } else {
+            "Uninstall"
+        });
+    }
+    for (index, label) in labels.into_iter().enumerate() {
         let rect = Rect::new(
             left,
             panel.y + 156. + extra + index as f32 * (row_h + row_gap),
@@ -4812,6 +4821,8 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
             assets,
             if index == 0 {
                 if favorite { "heart-filled" } else { "heart" }
+            } else if index == 2 {
+                "trash"
             } else if hidden {
                 "eye"
             } else {

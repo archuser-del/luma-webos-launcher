@@ -301,6 +301,15 @@ fn effects(
                     state.notify(format!("Would open {url} in the TV browser"));
                 }
             }
+            Effect::Uninstall(id) => {
+                let developer = state
+                    .inventory
+                    .apps
+                    .iter()
+                    .any(|app| app.id == id && app.developer);
+                debug_log!("uninstall {id} (developer install: {developer})");
+                platform.send(Request::Uninstall(id, developer));
+            }
             Effect::Launch(id) => {
                 if scroll_preview::is_placeholder(&id) {
                     state.notify(state.preferences.language.t("scrollTestOnly"));
@@ -790,6 +799,12 @@ fn script(
         }
         "hold" => state.hold(),
         "wait" => vec![],
+        // Desktop screenshots: focus one app, e.g. focus-app:netflix.
+        action if action.starts_with("focus-app:") => {
+            state.focus = state::Target::App(action["focus-app:".len()..].to_owned());
+            state.dirty = true;
+            vec![]
+        }
         action if action.starts_with("notice:") => {
             state.notify(&action["notice:".len()..]);
             vec![]
@@ -3430,6 +3445,18 @@ fn run() -> Result<(), String> {
                     if initial_focus {
                         state.focus = state.first_content();
                         initial_focus = false;
+                    }
+                }
+                Response::Uninstalled(id, result) => {
+                    debug_log!(
+                        "uninstall {id}: {}",
+                        result
+                            .as_ref()
+                            .map_or_else(|e| e.clone(), |_| "done".into())
+                    );
+                    if state.uninstalled(&id, result) {
+                        let _ = storage::save(&preferences_path, &state.preferences);
+                        platform.send(Request::Refresh);
                     }
                 }
                 Response::Signals(signals) => {
