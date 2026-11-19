@@ -606,8 +606,19 @@ fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> 
          [ {bin} -nt {pid} ] && kill \"$p\" && p=; else p=; fi; \
          if [ -z \"$p\" ] && [ -x {bin} ]; then nohup {bin} --pad-watch > /tmp/luma-pad-watch.log 2>&1 < /dev/null & fi; "
     );
+    // An installed wake watcher from an older Luma is replaced by this one
+    // (it opened a second Luma beside Luma as Home), and restarted.
+    let refresh = if matches!(change, Some(RootSet::Wake(_))) {
+        String::new()
+    } else {
+        format!(
+            "if [ -f {WAKE_SCRIPT} ] && [ ! -e {WAKE_OFF} ] && ! grep -q 'luma-wake v2' {WAKE_SCRIPT}; then \
+             {stop}; printf '%s' {} > {WAKE_SCRIPT} && chmod 755 {WAKE_SCRIPT} && {WAKE_SCRIPT}; fi; ",
+            quote(include_str!("../tv/luma-wake.sh"))
+        )
+    };
     let command = format!(
-        "if [ \"$(id -u)\" != 0 ]; then echo noroot; exit 0; fi; {apply}{pad}echo root; \
+        "if [ \"$(id -u)\" != 0 ]; then echo noroot; exit 0; fi; {apply}{refresh}{pad}echo root; \
          if [ -f {WAKE_SCRIPT} ] && [ ! -e {WAKE_OFF} ]; then echo wake; fi; \
          if grep -Eq '\"enabled\" *: *true' {HOME_STATE}/state.json 2>/dev/null; then echo home; fi; \
          /usr/bin/luna-send -n 1 -w 4000 luna://com.webos.settingsservice/getSystemSettings '{{\"category\":\"general\",\"keys\":[\"homeAutoLaunch\"]}}'"
