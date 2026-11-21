@@ -307,8 +307,12 @@ impl Player {
         let entry = crate::video_catalog::all()
             .get(index)
             .ok_or("Invalid video")?;
-        if !playable_source(&entry.url) {
+        let source = source_for(entry);
+        if !playable_source(&source) {
             return Err("Invalid streaming URL".into());
+        }
+        if source != entry.url {
+            crate::debug_log!("Wallpaper {index} plays from the USB drive");
         }
         let demux = crate::platform::install_dir()?.join("luma-demux");
         let log = OpenOptions::new()
@@ -318,7 +322,7 @@ impl Player {
             .ok();
         let mut cmd = Command::new(demux);
         cmd.arg(if entry.is_hevc() { "h265" } else { "h264" })
-            .arg(&entry.url)
+            .arg(&source)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(log.map_or_else(Stdio::null, Stdio::from));
@@ -402,7 +406,7 @@ impl Player {
         let entry = crate::video_catalog::all()
             .get(index)
             .ok_or("Invalid video")?;
-        if !playable_source(&entry.url) {
+        if !playable_source(&source_for(entry)) {
             return Err("Invalid streaming URL".into());
         }
         let app = CString::new(crate::platform::surface_id()).unwrap_or_default();
@@ -705,11 +709,18 @@ impl Drop for Player {
         unsafe { libc::dlclose(self.lib) };
     }
 }
-/// An HTTPS stream from the catalog, or an uploaded clip on local storage.
+/// The clip's copy on the USB drive when one is saved, else its usual source.
+fn source_for(entry: &crate::video_catalog::Video) -> String {
+    crate::usb_videos::local_path(&entry.id).unwrap_or_else(|| entry.url.clone())
+}
+/// An HTTPS stream from the catalog, an uploaded clip on local storage, or
+/// a catalog clip saved on the USB drive.
 fn playable_source(url: &str) -> bool {
     url.len() <= 2048
         && !url.contains(['\n', '\r', '\0'])
-        && (url.starts_with("https://") || crate::custom_videos::is_upload_path(url))
+        && (url.starts_with("https://")
+            || crate::custom_videos::is_upload_path(url)
+            || crate::usb_videos::is_saved_path(url))
 }
 fn dlerror() -> String {
     unsafe {

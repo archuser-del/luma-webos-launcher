@@ -758,7 +758,7 @@ fn layout_miniature(out: &mut Scene, state: &State, assets: &Assets, layout: Lay
 }
 
 fn wallpaper(out: &mut Scene, state: &State, assets: &Assets) {
-    let h = 740.;
+    let h = 780.;
     panels(out, h);
     let selected = crate::video_catalog::selected(&state.preferences.video_excluded);
     let items = [
@@ -812,6 +812,16 @@ fn wallpaper(out: &mut Scene, state: &State, assets: &Assets) {
             true,
         ),
         (
+            Target::WallpaperMenu(5),
+            "Save to USB Drive",
+            if state.preferences.usb_wallpapers {
+                crate::usb_videos::status().summary()
+            } else {
+                "Off".to_owned()
+            },
+            false,
+        ),
+        (
             Target::WallpaperMenu(4),
             "ImmichFrame Photos",
             if state.preferences.immich.linked() {
@@ -839,22 +849,19 @@ fn wallpaper(out: &mut Scene, state: &State, assets: &Assets) {
             },
         );
     }
-    let help_y = TOP + S32 + 6. * 92.;
+    let help_y = TOP + S32 + 7. * 92.;
     out.shape(
-        Rect::new(RIGHT + S24, help_y, WIDTH - S48, 120.),
+        Rect::new(RIGHT + S24, help_y, WIDTH - S48, 72.),
         CELL_RADIUS,
         c(0xffffff, 0.07),
     );
     out.text(
-        "Choose whole sources, single categories or individual clips.",
+        if state.preferences.usb_wallpapers {
+            "Selected clips are copied to the drive and play from it."
+        } else {
+            "Only selected clips play."
+        },
         Rect::new(RIGHT + S48, help_y + S16, WIDTH - S48 - S48, 40.),
-        text(25., 500, 0.),
-        c(0xffffff, 0.74),
-        false,
-    );
-    out.text(
-        "Only selected clips play.",
-        Rect::new(RIGHT + S48, help_y + S64, WIDTH - S48 - S48, 40.),
         text(25., 500, 0.),
         c(0xffffff, 0.74),
         false,

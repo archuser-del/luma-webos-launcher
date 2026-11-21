@@ -14,7 +14,6 @@ pub struct Video {
     pub source: String,
     /// Streamed by the hardware wallpaper on the TV: an HTTPS URL, or the
     /// absolute path of an uploaded file.
-    #[cfg(any(test, all(feature = "webos", target_os = "linux", target_arch = "arm")))]
     pub url: String,
     pub id: String,
     pub category: String,
@@ -29,12 +28,9 @@ pub struct Video {
 impl Video {
     /// An uploaded clip played from `file`.
     pub fn custom(id: String, name: String, file: &std::path::Path, hevc: bool) -> Self {
-        #[cfg(not(any(test, all(feature = "webos", target_os = "linux", target_arch = "arm"))))]
-        let _ = file;
         Self {
             name,
             source: CUSTOM_SOURCE.into(),
-            #[cfg(any(test, all(feature = "webos", target_os = "linux", target_arch = "arm")))]
             url: file.to_string_lossy().into_owned(),
             id,
             category: CUSTOM_CATEGORY.into(),

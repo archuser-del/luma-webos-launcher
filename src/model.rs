@@ -303,6 +303,9 @@ pub struct Preferences {
     pub video_excluded: BTreeSet<String>,
     pub video_shuffle: bool,
     pub video_shuffle_seed: u64,
+    /// Settings › Wallpaper › Save to USB Drive: keep selected clips on a
+    /// USB drive and play them from there.
+    pub usb_wallpapers: bool,
     pub show_home_names: bool,
     pub show_app_names: bool,
     pub hour_24: bool,
@@ -385,6 +388,7 @@ impl Default for Preferences {
             video_excluded: BTreeSet::new(),
             video_shuffle: true,
             video_shuffle_seed: 0,
+            usb_wallpapers: false,
             show_home_names: false,
             show_app_names: true,
             hour_24: false,

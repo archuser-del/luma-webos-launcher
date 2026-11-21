@@ -5002,3 +5002,20 @@ fn app_list_reads_removable_and_developer_installs() {
     assert!(!get("com.example.fixed").removable);
     assert!(!get("com.example.system").removable);
 }
+
+#[test]
+fn save_to_usb_drive_toggles_from_the_wallpaper_menu() {
+    let mut state = ready();
+    state.open(2);
+    state.focus = Target::Sidebar(1);
+    state.activate();
+    assert!(!state.preferences.usb_wallpapers);
+    state.focus = Target::WallpaperMenu(4);
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::WallpaperMenu(5));
+    let effects = state.activate();
+    assert!(state.preferences.usb_wallpapers);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save)));
+    state.activate();
+    assert!(!state.preferences.usb_wallpapers);
+}

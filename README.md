@@ -43,6 +43,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.
+- Wallpapers on a USB drive: **Settings › Wallpaper › Save to USB Drive** copies the selected clips, one at a time, into a `LumaWallpapers` folder on the first USB drive Luma can write to, and plays each saved clip from the drive instead of streaming it. Copies pause while a film plays and stop with 1 GB still free. Luma needs write access to the drive: it has it as the Home screen (which runs as root) or through a root tool that passes USB drives to apps.
 - Photo-frame wallpaper from [Immich](https://immich.app): **Settings › Wallpaper › ImmichFrame Photos** connects an [ImmichFrame](https://immichframe.dev) server (scan the QR code, type its address and, if it has one, its authentication secret). Luma shows a new photo every 15 seconds to 15 minutes, with the place and date it was taken. Portrait photos are shown whole over a soft blur.
 - Frosted-glass UI with one accent gradient, adjustable colors, heading and text fonts, and UI resolution (Auto / 4K / 1440p / 1080p). Auto draws in 4K while the TV keeps animations at 60 fps and steps down to 1440p, then 1080p, when it measures that it cannot; the video wallpaper always plays through the TV's hardware decoder at full quality, whatever the UI resolution.
 - Four layouts for the tabs, input buttons and clock, on their own page, **Settings › Layout**, each with a small diagram of where everything sits: **Classic** (all along the top), **Rail** (icon tabs down the left edge, inputs at its foot, clock top right), **Dock** (one glass bar at the bottom) and **Mirror** (inputs left, clock in the middle, tabs right). The remote follows the layout: Left of the page is the rail, Down past the last row is the dock, and the arrow back returns to the card you left.
@@ -285,14 +286,14 @@ player keeps up to 400 lines and sends them the next time it starts.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.9.5_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.9.6_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
 `ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.4.0_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.9.5_arm.ipk
+ares-install --device tv com.archbtw.luma_2.9.6_arm.ipk
 ares-install --device tv com.archbtw.luma.player_0.4.0_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
@@ -326,7 +327,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.9.5_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.9.6_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

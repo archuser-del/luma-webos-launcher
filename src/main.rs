@@ -41,6 +41,7 @@ mod steam;
 mod storage;
 mod typography;
 mod ui_sound;
+mod usb_videos;
 mod vector;
 mod video_catalog;
 mod view;
@@ -3122,6 +3123,7 @@ fn run() -> Result<(), String> {
     let video_init_after = Instant::now() + Duration::from_secs(2);
     let mut video_diag_count = 0usize;
     let mut still_preload_key = None;
+    let mut usb_generation = 0;
     #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
     let mut aerial_player = if webos {
         match hw_wallpaper::Player::new() {
@@ -3366,6 +3368,18 @@ fn run() -> Result<(), String> {
                 state.video_title = title.map(str::to_owned);
                 state.dirty = true;
             }
+        }
+        // Keep the selected clips on a USB drive (Settings › Wallpaper); copies
+        // wait while a film plays so they never take its bandwidth.
+        usb_videos::configure(
+            state.preferences.usb_wallpapers,
+            state.playback.is_some(),
+            &state.preferences.video_excluded,
+            state.preferences.video_index,
+        );
+        if usb_videos::generation() != usb_generation {
+            usb_generation = usb_videos::generation();
+            state.dirty |= state.page == state::Page::Settings;
         }
         // Decode the stills a swap can show next ahead of time, off the GL
         // thread, so Next Video and the automatic swap never stall a frame.

@@ -5385,6 +5385,10 @@ impl State {
                     self.settings_push(SettingsLevel::WallpaperImmich, Target::ImmichUse);
                     return vec![Effect::ImmichFormStart];
                 }
+                5 => {
+                    self.preferences.usb_wallpapers = !self.preferences.usb_wallpapers;
+                    return vec![Effect::Save];
+                }
                 3 => {
                     self.video_upload_qr.clear();
                     self.video_upload_link = None;
