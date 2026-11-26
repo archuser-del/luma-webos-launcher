@@ -181,9 +181,17 @@ fn get(agent: &ureq::Agent, link: &PlexLink, path: &str) -> Option<Value> {
         &link.client_id,
         &link.server_token,
     )
-    .call()
-    .ok()?;
-    read(response)
+    .call();
+    match response {
+        Ok(response) => read(response),
+        Err(error) => {
+            crate::debug_log!(
+                "Plex GET {} failed: {error}",
+                crate::debug_log::path_only(path)
+            );
+            None
+        }
+    }
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -844,6 +852,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         base: link.server_uri.clone(),
         token: link.server_token.clone(),
         device_id: link.client_id.clone(),
+        user: String::new(),
         item: target_key.clone(),
         source: String::new(),
         session: session.clone(),
@@ -893,6 +902,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         selected_subtitle,
         report: Some(report),
         music: None,
+        jellyfin: None,
     })));
 }
 

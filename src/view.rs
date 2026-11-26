@@ -1,6 +1,7 @@
 //! Screen geometry and styling mirror the web UI's 1920×1080 / 16px-rem layout.
 use crate::{
     i18n::Language,
+    layout::{self, Layout},
     model::{App, BACKGROUNDS, CATEGORIES, Input, InputMode},
     motion,
     renderer::{Color, Draw, TextStyle, WHITE},
@@ -197,7 +198,7 @@ impl Assets {
             .map(|c| self.glyph_advance(c, style))
             .fold(0., f32::max)
     }
-    fn width(&self, value: &str, style: TextStyle) -> f32 {
+    pub(crate) fn width(&self, value: &str, style: TextStyle) -> f32 {
         let digit_max = self.max_digit(style);
         value
             .chars()
@@ -634,6 +635,119 @@ pub fn navigation_for(assets: &Assets, language: Language, show_smart: bool) -> 
     }
 }
 
+/// The tabs of `layout`: the classic pill, moved or stood on end.
+pub fn navigation_in(
+    layout: Layout,
+    assets: &Assets,
+    language: Language,
+    show_smart: bool,
+) -> Navigation {
+    let classic = navigation_for(assets, language, show_smart);
+    let moved = |dx: f32, dy: f32, surface: Option<Rect>| Navigation {
+        surface: surface.unwrap_or(Rect::new(
+            classic.surface.x + dx,
+            classic.surface.y + dy,
+            classic.surface.w,
+            classic.surface.h,
+        )),
+        items: classic
+            .items
+            .iter()
+            .map(|r| Rect::new(r.x + dx, r.y + dy, r.w, r.h))
+            .collect(),
+    };
+    match layout {
+        Layout::Classic => moved(0., 0., None),
+        // Right-aligned with the page content.
+        Layout::Flip => moved(
+            crate::state::HOME_STRIP_RIGHT - (classic.surface.x + classic.surface.w),
+            0.,
+            None,
+        ),
+        // Centred in the bar, which is the surface itself.
+        Layout::Dock => moved(
+            0.,
+            layout::DOCK_TOP + (layout::DOCK_HEIGHT - NAV_PILL) / 2. - (NAV_TOP + NAV_PAD),
+            Some(Rect::new(
+                crate::state::HOME_STRIP_LEFT,
+                layout::DOCK_TOP,
+                crate::state::HOME_STRIP_RIGHT - crate::state::HOME_STRIP_LEFT,
+                layout::DOCK_HEIGHT,
+            )),
+        ),
+        Layout::Rail => {
+            let n = classic.items.len() as f32;
+            let pad = (layout::RAIL_WIDTH - layout::RAIL_BUTTON) / 2.;
+            Navigation {
+                surface: Rect::new(
+                    layout::RAIL_LEFT,
+                    NAV_TOP,
+                    layout::RAIL_WIDTH,
+                    2. * pad + n * layout::RAIL_BUTTON + (n - 1.) * layout::RAIL_GAP,
+                ),
+                items: (0..classic.items.len())
+                    .map(|i| {
+                        Rect::new(
+                            layout::RAIL_LEFT + pad,
+                            NAV_TOP + pad + i as f32 * (layout::RAIL_BUTTON + layout::RAIL_GAP),
+                            layout::RAIL_BUTTON,
+                            layout::RAIL_BUTTON,
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+/// Where the selection pill rests on a tab: its start and length along the
+/// bar (across for the top bars and the dock, down for the rail).
+pub fn nav_pill_target(layout: Layout, item: Rect) -> (f32, f32) {
+    if layout.vertical() {
+        (item.y, item.h)
+    } else {
+        (item.x, item.w)
+    }
+}
+
+/// Moves page content out of the chrome's way: every paint, clip and fade.
+fn shift_body(draws: &mut [Draw], layout: Layout) {
+    let (dx, dy) = layout.body_offset();
+    if dx == 0. && dy == 0. {
+        return;
+    }
+    for draw in draws {
+        match draw {
+            Draw::Clip(Some(r)) => {
+                r.x += dx;
+                r.y += dy;
+                // Rows still run out under the rail to the screen edge.
+                if dx > 0. && r.x <= dx {
+                    r.w += r.x;
+                    r.x = 0.;
+                }
+            }
+            Draw::RoundClip(Some((r, _))) => {
+                r.x += dx;
+                r.y += dy;
+            }
+            Draw::EdgeFade(Some(fade)) => {
+                fade[0] += dy;
+                fade[1] += dy;
+                if layout == Layout::Dock && fade[2] >= 1080. {
+                    // Content dissolves before it reaches the dock.
+                    fade[2] = layout::DOCK_FADE[0];
+                    fade[3] = layout::DOCK_FADE[1];
+                } else {
+                    fade[2] += dy;
+                    fade[3] += dy;
+                }
+            }
+            _ => motion::transform(draw, dx, dy, 1.),
+        }
+    }
+}
+
 /// Full-resolution first frame of a wallpaper clip, shown while it loads.
 pub fn video_still_path(assets: &Assets, index: usize) -> String {
     assets.video_still(index.min(crate::video_catalog::all().len() - 1))
@@ -777,7 +891,10 @@ pub fn scene_with_pill(
         ));
     }
     let main_bottom = state.main_bottom();
+    let layout = state.preferences.layout;
+    let (body_dx, body_dy) = layout.body_offset();
     let body_start = out.draw.len();
+    let body_controls = out.controls.len();
     // Horizontal Favorites media may reach the physical screen edge; keep
     // Apps and Settings inside their established 64.0.1856 content fields.
     let (body_left, body_width) = if matches!(state.page, Page::Home | Page::Settings) {
@@ -803,8 +920,18 @@ pub fn scene_with_pill(
     if state.page == Page::Home {
         // Scrolled Home content dissolves before it reaches the clock and date;
         // the bottom stays open, posters run to the screen edge unmasked.
+        // The shelf starts higher, the stage has nothing at the top to clear.
+        let [top, solid] = match state.preferences.layout {
+            Layout::Rail => [96., 146.],
+            Layout::Dock => [100., 150.],
+            Layout::Classic | Layout::Flip => {
+                // Turned to Jellyfin, Favorites rise to just under the clock.
+                let j = state.jellyfin_focus();
+                [150. - 40. * j, 206. - 46. * j]
+            }
+        };
         out.draw
-            .push(Draw::EdgeFade(Some([150., 206., 2000., 2001.])));
+            .push(Draw::EdgeFade(Some([top, solid, 2000., 2001.])));
     }
     if state.page == Page::SmartHome {
         // Like Home: scrolled tiles are gone before they reach the clock and date.
@@ -859,7 +986,9 @@ pub fn scene_with_pill(
                         .iter()
                         .filter_map(tvos_settings_view::backdrop_rect)
                         .find(|r| {
-                            (r.x - backdrop.x).abs() < 0.01 && (r.w - backdrop.w).abs() < 0.01
+                            // The frame before is already in its shifted place.
+                            (r.x - backdrop.x - body_dx).abs() < 0.01
+                                && (r.w - backdrop.w).abs() < 0.01
                         })
                         .map(|r| r.h)
                         .unwrap_or(backdrop.h);
@@ -927,6 +1056,16 @@ pub fn scene_with_pill(
             control.rect.x += dx;
         }
     }
+    // The layout moves the finished page as one block. Frozen snapshots of
+    // earlier frames, added below, are already where they were shown.
+    shift_body(&mut out.draw[body_start..body_end], layout);
+    for control in &mut out.controls[body_controls..] {
+        control.rect.x += body_dx;
+        control.rect.y += body_dy;
+    }
+    if out.page_bottom > 0. {
+        out.page_bottom += body_dy;
+    }
     // Crossfade frozen snapshots of the outgoing composited content. When another
     // navigation arrives mid-transition, compose() retargets from the visible frame.
     if let Some((previous, started, direction)) = &state.previous_page_layer {
@@ -984,10 +1123,21 @@ pub fn scene_with_pill(
         footer(&mut out, state, assets);
     }
     if state.page == Page::Home {
-        // Clock, then navigation, then the circles.
-        ambient_move(&mut out.draw[header_start..], state, 0., -260., |r| {
-            2. * r.x / 1920.
-        });
+        // Clock, then navigation, then the circles: each layout's chrome
+        // leaves over the screen edge it sits on.
+        match layout {
+            Layout::Classic | Layout::Flip => {
+                ambient_move(&mut out.draw[header_start..], state, 0., -260., |r| {
+                    2. * r.x / 1920.
+                })
+            }
+            Layout::Dock => ambient_move(&mut out.draw[header_start..], state, 0., 260., |r| {
+                2. * r.x / 1920.
+            }),
+            Layout::Rail => ambient_move(&mut out.draw[header_start..], state, -260., 0., |r| {
+                2. * r.y / 1080.
+            }),
+        }
         if state.ambient_on() {
             out.controls.clear();
         }
@@ -1112,43 +1262,109 @@ fn header(
     state: &State,
     assets: &Assets,
     now: OffsetDateTime,
-    pill_x: f32,
-    pill_width: f32,
+    pill_at: f32,
+    pill_len: f32,
 ) {
     let language = state.preferences.language;
+    let layout = state.preferences.layout;
     let clock = language.clock(
         now,
         state.preferences.hour_24,
         state.preferences.show_seconds,
     );
-    let layout = navigation_for(assets, language, state.show_smart_tab());
+    let navigation = navigation_in(layout, assets, language, state.show_smart_tab());
+    let (left, right) = (
+        crate::state::HOME_STRIP_LEFT,
+        crate::state::HOME_STRIP_RIGHT,
+    );
+    let date = language.date(now);
     // The clock digits are exactly as tall as the selected navigation pill
     // (52 px, NAV_TOP + NAV_PAD to its bottom); the date sits close under it.
     let clock_style = heading_fixed(assets, 64., 700).tracking(-0.03);
-    out.text(
-        &clock,
-        Rect::new(crate::state::HOME_STRIP_LEFT, 49.5, 760., 78.),
-        clock_style,
-        WHITE,
-        false,
-    );
     // Caps start 0.41 of the size below the box top: 14 px under the digits.
-    out.text(
-        language.date(now),
-        Rect::new(
-            crate::state::HOME_STRIP_LEFT,
-            NAV_TOP + NAV_PAD + NAV_PILL + 14. - 0.41 * 27.,
-            760.,
-            40.,
-        ),
-        text(27., 500, -0.02),
-        c(0xf0f3f6, 0.82),
-        false,
+    let date_y = NAV_TOP + NAV_PAD + NAV_PILL + 14. - 0.41 * 27.;
+    let date_style = text(27., 500, -0.02);
+    let date_ink = c(0xf0f3f6, 0.82);
+    match layout {
+        Layout::Classic => {
+            out.text(
+                &clock,
+                Rect::new(left, 49.5, 760., 78.),
+                clock_style,
+                WHITE,
+                false,
+            );
+            out.text(
+                &date,
+                Rect::new(left, date_y, 760., 40.),
+                date_style,
+                date_ink,
+                false,
+            );
+        }
+        // Top right, flush with the right edge of the shifted page.
+        Layout::Rail => {
+            let x = right + layout.body_offset().0 - 760.;
+            out.text(
+                &clock,
+                Rect::new(x, 49.5, 760., 78.),
+                clock_style.right(),
+                WHITE,
+                false,
+            );
+            out.text(
+                &date,
+                Rect::new(x, date_y, 760., 40.),
+                date_style.right(),
+                date_ink,
+                false,
+            );
+        }
+        Layout::Flip => {
+            out.text(
+                &clock,
+                Rect::new(580., 49.5, 760., 78.),
+                clock_style,
+                WHITE,
+                true,
+            );
+            out.text(
+                &date,
+                Rect::new(580., date_y, 760., 40.),
+                date_style,
+                date_ink,
+                true,
+            );
+        }
+        // In the dock: the time, then the date on the same line.
+        Layout::Dock => {}
+    }
+    let nav = navigation.surface;
+    let nav_radius = nav.w.min(nav.h) / 2.;
+    out.shadow(
+        nav,
+        nav_radius,
+        18.,
+        4.,
+        if layout == Layout::Dock { 0.2 } else { 0.06 },
     );
-    let nav = layout.surface;
-    out.shadow(nav, NAV_HEIGHT / 2., 18., 4., 0.06);
-    out.glass(nav, NAV_HEIGHT / 2.);
-    let pill = Rect::new(pill_x, NAV_TOP + NAV_PAD, pill_width, NAV_PILL);
+    out.glass(nav, nav_radius);
+    if layout == Layout::Dock {
+        let time_style = heading_fixed(assets, 40., 700).tracking(-0.03);
+        let time_width = assets.width(&clock, time_style);
+        let time = Rect::new(nav.x + 36., nav.y, time_width + 4., nav.h);
+        out.text(&clock, line_box(time, time_style), time_style, WHITE, false);
+        let day_style = text(24., 500, -0.02);
+        let day = Rect::new(time.x + time.w + 18., nav.y + 2., 520., nav.h);
+        out.text(&date, line_box(day, day_style), day_style, date_ink, false);
+    }
+    let first_item = navigation.items[0];
+    let pill = if layout.vertical() {
+        Rect::new(first_item.x, pill_at, first_item.w, pill_len)
+    } else {
+        Rect::new(pill_at, first_item.y, pill_len, NAV_PILL)
+    };
+    let pill_radius = pill.w.min(pill.h) / 2.;
     let nav_accent = state.preferences.accent.use_nav;
     let (first, second) = state.accent_colors();
     // The selected tab is one solid accent surface with dark-or-light ink chosen
@@ -1160,12 +1376,12 @@ fn header(
     };
     out.draw.push(if nav_accent {
         if state.preferences.accent.kind == "gradient" {
-            Draw::DiagonalGradient(pill, NAV_PILL / 2., c(first, 1.), c(second, 1.))
+            Draw::DiagonalGradient(pill, pill_radius, c(first, 1.), c(second, 1.))
         } else {
-            Draw::RoundedGradient(pill, NAV_PILL / 2., c(first, 1.), c(first, 1.))
+            Draw::RoundedGradient(pill, pill_radius, c(first, 1.), c(first, 1.))
         }
     } else {
-        Draw::RoundedGradient(pill, NAV_PILL / 2., c(0xfafafa, 1.), c(0xe5e5e5, 1.))
+        Draw::RoundedGradient(pill, pill_radius, c(0xfafafa, 1.), c(0xe5e5e5, 1.))
     });
     let keys = if state.show_smart_tab() {
         vec!["home", "apps", "Smart Home", "settings"]
@@ -1173,28 +1389,78 @@ fn header(
         vec!["home", "apps", "settings"]
     };
     for (index, key) in keys.into_iter().enumerate() {
-        let rect = layout.items[index];
-        out.text(
-            if key == "Smart Home" {
-                key
-            } else {
-                language.t(key)
-            },
-            line_box(rect, nav_label_style()),
-            nav_label_style(),
-            {
-                let overlap = ((pill.x + pill.w).min(rect.x + rect.w) - pill.x.max(rect.x)).max(0.);
-                let coverage = (overlap / rect.w).clamp(0., 1.);
-                blend(c(0xeeeeee, 0.73), selected_nav_color, coverage)
-            },
-            true,
-        );
+        let rect = navigation.items[index];
+        let label = if key == "Smart Home" {
+            key
+        } else {
+            language.t(key)
+        };
+        // How much of this tab the moving pill covers decides its ink.
+        let coverage = if layout.vertical() {
+            ((pill.y + pill.h).min(rect.y + rect.h) - pill.y.max(rect.y)).max(0.) / rect.h
+        } else {
+            ((pill.x + pill.w).min(rect.x + rect.w) - pill.x.max(rect.x)).max(0.) / rect.w
+        }
+        .clamp(0., 1.);
+        let ink = blend(c(0xeeeeee, 0.73), selected_nav_color, coverage);
+        if layout.vertical() {
+            // The rail shows icons; the tab under the remote names itself.
+            let icon = match key {
+                "home" => "home",
+                "apps" => "grid",
+                "Smart Home" => "smart-light",
+                _ => "settings",
+            };
+            let size = 28.;
+            out.icon(
+                assets,
+                icon,
+                Rect::new(
+                    rect.x + (rect.w - size) / 2.,
+                    rect.y + (rect.h - size) / 2.,
+                    size,
+                    size,
+                ),
+                ink,
+            );
+            let focus = state.focus_level(&Target::Nav(index));
+            if focus > 0. && !state.pointer {
+                rail_caption(out, assets, label, rect, focus);
+            }
+        } else {
+            out.text(
+                label,
+                line_box(rect, nav_label_style()),
+                nav_label_style(),
+                ink,
+                true,
+            );
+        }
         out.control(Target::Nav(index), rect, false);
     }
     header_circles(out, state, assets);
     if state.page == Page::Home && state.music.now.is_some() {
         mini_view::mini_player(out, state, assets);
     }
+}
+
+/// The rail has no room for words: the button under the remote gets a small
+/// glass label to its right.
+fn rail_caption(out: &mut Scene, assets: &Assets, label: &str, anchor: Rect, alpha: f32) {
+    let style = nav_label_style();
+    let height = 44.;
+    let rect = Rect::new(
+        layout::RAIL_LEFT + layout::RAIL_WIDTH + 12.,
+        anchor.y + (anchor.h - height) / 2.,
+        assets.width(label, style) + 40.,
+        height,
+    );
+    let from = out.draw.len();
+    out.shadow(rect, height / 2., 18., 4., 0.3);
+    out.glass(rect, height / 2.);
+    out.shape(rect, height / 2., c(0x0b0f16, 0.55));
+    out.text(label, line_box(rect, style), style, WHITE, true);
+    out.fade(from, alpha, 1.);
 }
 
 /// Text color on an accent surface, picked by contrast against the actual fill.
@@ -1267,20 +1533,43 @@ pub(crate) fn header_circle_targets(state: &State) -> Vec<(Target, String, Strin
     items
 }
 
-pub(crate) fn header_circle_rect(slot: usize) -> Rect {
-    Rect::new(
-        crate::state::HOME_STRIP_RIGHT
-            - HEADER_CIRCLE
-            - slot as f32 * (HEADER_CIRCLE + HEADER_CIRCLE_GAP),
-        NAV_TOP,
-        HEADER_CIRCLE,
-        HEADER_CIRCLE,
-    )
+/// Slot 0 is TV settings; every further slot is one visible input. The
+/// circles grow away from the corner the layout gives them.
+pub(crate) fn chrome_circle_rect(layout: Layout, slot: usize) -> Rect {
+    let size = HEADER_CIRCLE;
+    let step = slot as f32;
+    let (x, y) = match layout {
+        Layout::Classic => (
+            crate::state::HOME_STRIP_RIGHT - size - step * (size + HEADER_CIRCLE_GAP),
+            NAV_TOP,
+        ),
+        Layout::Flip => (
+            crate::state::HOME_STRIP_LEFT + step * (size + HEADER_CIRCLE_GAP),
+            NAV_TOP,
+        ),
+        Layout::Dock => (
+            crate::state::HOME_STRIP_RIGHT - 8. - size - step * (size + 12.),
+            layout::DOCK_TOP + (layout::DOCK_HEIGHT - size) / 2.,
+        ),
+        Layout::Rail => (
+            layout::RAIL_LEFT + (layout::RAIL_WIDTH - size) / 2.,
+            1080. - NAV_TOP - size - step * (size + 12.),
+        ),
+    };
+    Rect::new(x, y, size, size)
 }
 
 fn header_circles(out: &mut Scene, state: &State, assets: &Assets) {
+    let layout = state.preferences.layout;
     for (slot, (target, icon, caption)) in header_circle_targets(state).into_iter().enumerate() {
-        let rect = header_circle_rect(slot);
+        let rect = chrome_circle_rect(layout, slot);
+        // On the rail the sliders are the Settings tab; the TV's own
+        // settings get the TV.
+        let icon = if layout == Layout::Rail && target == Target::TvSettings {
+            "tv".to_owned()
+        } else {
+            icon
+        };
         let focus = state.focus_level(&target);
         let lift = rect.inset(-2.7 * focus);
         let radius = lift.w / 2.;
@@ -1311,19 +1600,116 @@ fn header_circles(out: &mut Scene, state: &State, assets: &Assets) {
             ink,
         );
         if focus > 0. && !state.pointer {
-            let style = TextStyle::new(20.).weight(600).leading(1.3);
-            let width = assets.width(&caption, style) + 8.;
-            // Keep the caption on screen even for the rightmost circle.
-            let x = (rect.x + rect.w / 2. - width / 2.).min(1920. - 24. - width);
-            out.text(
-                caption,
-                Rect::new(x, rect.y + rect.h + 12., width, 28.),
-                style,
-                c(0xffffff, 0.95 * focus),
-                true,
-            );
+            if layout == Layout::Rail {
+                rail_caption(out, assets, &caption, rect, focus);
+            } else {
+                let style = TextStyle::new(20.).weight(600).leading(1.3);
+                let width = assets.width(&caption, style) + 8.;
+                // Keep the caption on screen even for the outermost circle.
+                let x = (rect.x + rect.w / 2. - width / 2.)
+                    .min(1920. - 24. - width)
+                    .max(24.);
+                out.text(
+                    caption,
+                    Rect::new(x, rect.y + rect.h + 12., width, 28.),
+                    style,
+                    c(0xffffff, 0.95 * focus),
+                    true,
+                );
+            }
         }
         out.control(target, rect, false);
+    }
+}
+
+/// "PlayStation 5 is on · HDMI 1": one button per input with a picture,
+/// beside the Favorites title, one press of Up from the apps. Its live dot
+/// and accent outline make it easy to spot without focus.
+fn live_input_buttons(out: &mut Scene, state: &State, assets: &Assets, x: f32, title_y: f32) {
+    let style = text(25., 600, -0.01);
+    let mut x = x;
+    let h = 56.;
+    let y = title_y + (SECTION_TITLE_H - h) / 2.;
+    // A soft pulse on the live dot, still with reduced motion.
+    let pulse = if state.preferences.reduced_motion {
+        1.
+    } else {
+        0.6 + 0.4
+            * (state.page_started.elapsed().as_secs_f32() * 2.4)
+                .sin()
+                .abs()
+    };
+    for (input, live) in state.plugged_inputs() {
+        let target = Target::LiveInput(input.id.clone());
+        // The viewer's name for it, else what the TV calls it (often the
+        // device itself, from HDMI-CEC), else the port.
+        let name = state
+            .preferences
+            .input_name(input)
+            .or_else(|| (input.title != input.port).then_some(input.title.as_str()))
+            .unwrap_or(&input.port);
+        let label = if name == input.port {
+            input.port.clone()
+        } else {
+            format!("{name} · {}", input.port)
+        };
+        let label_w = assets.width(&label, style).ceil();
+        let w = 24. + 14. + 14. + 30. + 14. + label_w + 28.;
+        if x + w > crate::state::HOME_STRIP_RIGHT {
+            break;
+        }
+        let rect = Rect::new(x, y, w, h);
+        let focus = state.focus_level(&target);
+        let lift = rect.inset(-3. * focus);
+        out.shadow(
+            lift,
+            lift.h / 2.,
+            18. + 18. * focus,
+            6. + 6. * focus,
+            0.2 + 0.2 * focus,
+        );
+        out.glass(lift, lift.h / 2.);
+        if focus > 0. {
+            let at = out.draw.len();
+            accent_fill(out, lift, lift.h / 2., state);
+            out.fade(at, focus, 1.);
+        } else if live {
+            out.accent_ring(lift, lift.h / 2., state);
+        } else {
+            // Plugged in, no picture: grayed, a plain outline.
+            out.border(lift, lift.h / 2., 1.5, c(0xffffff, 0.16));
+        }
+        let rest = if live { WHITE } else { c(0xffffff, 0.42) };
+        let ink = blend(rest, accent_ink(state), focus);
+        let dot = Rect::new(lift.x + 24., lift.y + (lift.h - 14.) / 2., 14., 14.);
+        if live {
+            out.shape(dot.inset(-4. * pulse), 11., c(0x4ade80, 0.25 * pulse));
+            out.shape(dot, 7., c(0x4ade80, 1.));
+        } else {
+            out.border(dot, 7., 2., blend(c(0xffffff, 0.4), ink, focus));
+        }
+        let icon = format!(
+            "input-{}",
+            input_icon(input, state.preferences.input_name(input))
+        );
+        out.icon(
+            assets,
+            &icon,
+            Rect::new(dot.x + 14. + 14., lift.y + (lift.h - 30.) / 2., 30., 30.),
+            ink,
+        );
+        out.text(
+            &label,
+            line_box(
+                Rect::new(dot.x + 14. + 14. + 30. + 14., lift.y, label_w + 8., lift.h),
+                style,
+            ),
+            style,
+            ink,
+            false,
+        );
+        out.control(target, rect, false);
+        x += w + 16.;
     }
 }
 
@@ -1894,9 +2280,39 @@ fn draw_rude_phrase(
                     "swap",
                     "breaking",
                     "rollback",
+                    "status",
+                    "firmware",
+                    "hdr",
+                    "brightness",
+                    "sync",
+                    "drip",
+                    "leak",
+                    "waterproof",
+                    "voltage",
+                    "static",
+                    "particle",
+                    "shader",
+                    "turbo",
+                    "bitrate",
+                    "depth",
+                    "draw",
+                    "cron",
+                    "power",
+                    "battery",
+                    "benchmark",
+                    "storage",
+                    "paste",
+                    "build",
+                    "bugs",
+                    "rpm",
                 ]
                 .iter()
                 .any(|key| token.to_ascii_lowercase().contains(key))
+            })
+            // "Router: water-cooled." The thing before the colon is the tech word.
+            .or_else(|| {
+                let (head, _) = phrase.title.split_once(':')?;
+                head.split_whitespace().last()
             })
             .unwrap_or("")
     };
@@ -1948,9 +2364,14 @@ fn draw_rude_phrase(
     // Treat the subtitle as part of the headline, not a separate date row.
     // Subtitle hugs the headline; the video caption keeps its own distance.
     let subtitle_y = y + line_step - 4.;
-    let subtitle_lines = assets
-        .lines(&phrase.subtitle, subtitle_style, subtitle_wrap)
-        .clamp(1, 2) as f32;
+    // A headline may have no subtitle: it then ends at the title.
+    let subtitle_lines = if phrase.subtitle.is_empty() {
+        0.
+    } else {
+        assets
+            .lines(&phrase.subtitle, subtitle_style, subtitle_wrap)
+            .clamp(1, 2) as f32
+    };
     // Swear words in the subtitle take the accent, the rest stays soft white.
     let subtitle_words: Vec<&str> = phrase.subtitle.split_whitespace().collect();
     let (mut sx, mut sy) = (84.0f32, subtitle_y);
@@ -2111,7 +2532,11 @@ fn classic_greeting(
 
 fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let language = state.preferences.language;
+    let layout = state.preferences.layout;
     let s = state.scroll + state.bounce_at(crate::state::BounceAxis::Page) - HOME_DROP;
+    // A place on the page at rest, where it is drawn at the current scroll.
+    let at = |y: f32| y - s - HOME_DROP;
+    let info_controls = out.controls.len();
     // Weather gets a distinct TV-sized widget instead of reducing the greeting.
     let shift = 0.0f32;
     let greeting_start = out.draw.len();
@@ -2126,6 +2551,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 && !state.preferences.reduced_motion
                 && let Some(previous) = &state.rude_weather.previous
             {
+                let from = out.draw.len();
                 let _ = draw_rude_phrase(
                     out,
                     assets,
@@ -2145,7 +2571,11 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                         wrap: widgets_view::phrase_width(state),
                     },
                 );
+                if layout == Layout::Flip {
+                    align_lines_right(out, assets, from, crate::state::HOME_STRIP_RIGHT);
+                }
             }
+            let from = out.draw.len();
             (greeting_bottom, greeting_width) = draw_rude_phrase(
                 out,
                 assets,
@@ -2169,12 +2599,23 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                     wrap: widgets_view::phrase_width(state),
                 },
             );
+            if layout == Layout::Flip {
+                align_lines_right(out, assets, from, crate::state::HOME_STRIP_RIGHT);
+            }
         } else {
             (greeting_bottom, greeting_width) =
                 classic_greeting(out, state, assets, now, s + shift);
         }
     } else {
         (greeting_bottom, greeting_width) = classic_greeting(out, state, assets, now, s + shift);
+    }
+    // The mirror sets every headline line against the right edge (the
+    // weather headline above did it phrase by phrase).
+    let weather_headline = state.preferences.greeting_style
+        == crate::weather_phrases::GreetingStyle::Rude
+        && state.rude_weather.current.is_some();
+    if layout == Layout::Flip && !weather_headline {
+        align_lines_right(out, assets, greeting_start, crate::state::HOME_STRIP_RIGHT);
     }
     if greeting_bottom <= 0. {
         greeting_bottom = PHRASE_TOP + 110. - s;
@@ -2184,6 +2625,18 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let caption_y = greeting_bottom + 34.;
     let caption_start = out.draw.len();
     video_caption(out, state, assets, caption_y, greeting_width.max(420.));
+    if layout == Layout::Flip {
+        let right = bounds(assets, &out.draw[caption_start..]).map_or(0., |b| b.x + b.w);
+        if right > 0. {
+            move_block(
+                out,
+                caption_start..out.draw.len(),
+                info_controls..out.controls.len(),
+                crate::state::HOME_STRIP_RIGHT - right,
+                0.,
+            );
+        }
+    }
     out.enter(caption_start, state, 0.18, 22.);
     let press = state.ambient_press();
     if press > 0. {
@@ -2206,9 +2659,34 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     let home_content_offset = (caption_y + 48. + 36. + s - FAVORITES_TOP)
         .max(widgets_view::bottom() + 40. - FAVORITES_TOP)
         .max(0.);
+    let caption_end = (out.draw.len(), out.controls.len());
+    // Where the widgets go: the classic top right, the mirror's top left, or
+    // the stage's corner high above the headline. The shelf moves them with
+    // the headline, below Favorites.
+    let zone = widgets_view::zone(state);
+    let widgets_move = match layout {
+        Layout::Flip => (crate::state::HOME_STRIP_LEFT - zone.left, 0.),
+        Layout::Dock => (0., at(crate::layout::DOCK_WIDGETS_TOP) - zone.top),
+        Layout::Classic | Layout::Rail => (0., 0.),
+    };
+    // The widgets' text line ("Weather") sits above the blocks.
+    let widgets_top = zone.top
+        - if zone.text.is_empty() {
+            0.
+        } else {
+            WIDGET_TEXT_ABOVE
+        };
+    let widgets_at = (out.draw.len(), out.controls.len());
     if state.widget_edit.is_none() {
         let start = out.draw.len();
         widgets_view::home(out, state, assets);
+        move_block(
+            out,
+            start..out.draw.len(),
+            widgets_at.1..out.controls.len(),
+            widgets_move.0,
+            widgets_move.1,
+        );
         out.enter(start, state, 0.21, 29.);
         // One widget after another, the rightmost first.
         let blocks: Vec<Rect> = widgets_view::zone(state)
@@ -2225,23 +2703,65 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 .map_or(1., |i| 1. + (count - 1. - i as f32))
         });
     }
+    let widgets_end = (out.draw.len(), out.controls.len());
+    let rest_top = match layout {
+        Layout::Rail => at(crate::layout::RAIL_FAVORITES_TOP),
+        Layout::Dock => at(crate::layout::DOCK_FAVORITES_TOP),
+        Layout::Classic | Layout::Flip => FAVORITES_TOP + home_content_offset - s,
+    };
+    // Turned to Jellyfin: the headline and widgets give way, Favorites rise
+    // to the top (below the mini-player while music plays).
+    let jellyfin = state.jellyfin_focus();
+    let music = state.music.now.is_some();
+    let jellyfin_top = match layout {
+        Layout::Rail => rest_top,
+        Layout::Dock => at(if music { 266. } else { 176. }),
+        Layout::Classic | Layout::Flip => at(if music { 262. } else { 170. }),
+    };
+    let favorites_top = rest_top + (jellyfin_top - rest_top) * jellyfin;
+    let favorites_row = favorites_top + FAVORITES_ROW - FAVORITES_TOP;
     let fav_label_start = out.draw.len();
-    section_title(
-        out,
-        assets,
+    let title_w = assets.width(
         language.t("favoriteApps"),
-        FAVORITES_TOP + home_content_offset - s,
+        heading_fixed(assets, 31., 700).tracking(-0.01),
+    );
+    section_title(out, assets, language.t("favoriteApps"), favorites_top);
+    // The mirror's title ends at the right edge, its buttons before it.
+    let title_shift = if layout == Layout::Flip {
+        crate::state::HOME_STRIP_RIGHT - crate::state::HOME_STRIP_LEFT - title_w
+    } else {
+        0.
+    };
+    let controls_at = out.controls.len();
+    move_block(
+        out,
+        fav_label_start..out.draw.len(),
+        controls_at..controls_at,
+        title_shift,
+        0.,
     );
     out.enter(fav_label_start, state, 0.3, 22.);
+    if state.moving.is_none() {
+        let start = out.draw.len();
+        let controls_at = out.controls.len();
+        live_input_buttons(out, state, assets, 84. + title_w + 36., favorites_top);
+        if layout == Layout::Flip
+            && let Some(b) = bounds(assets, &out.draw[start..])
+        {
+            move_block(
+                out,
+                start..out.draw.len(),
+                controls_at..out.controls.len(),
+                crate::state::HOME_STRIP_RIGHT - title_w - 36. - (b.x + b.w),
+                0.,
+            );
+        }
+        out.enter(start, state, 0.33, 22.);
+    }
     if state.moving.is_some() {
         out.text(
             language.t("moveApps"),
-            Rect::new(
-                1686.,
-                FAVORITES_TOP + 7. + home_content_offset - s,
-                150.,
-                24.,
-            ),
+            Rect::new(1686., favorites_top + 7., 150., 24.),
             text(14.4, 400, 0.),
             c(0xdedede, 1.),
             true,
@@ -2255,7 +2775,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             out.shape(
                 Rect::new(
                     84. + index as f32 * GRID_PITCH,
-                    FAVORITES_ROW + home_content_offset - s,
+                    favorites_row,
                     270.,
                     FACE_HEIGHT,
                 ),
@@ -2270,12 +2790,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             state,
             assets,
             EmptyState {
-                rect: Rect::new(
-                    84.,
-                    FAVORITES_ROW - 11. + home_content_offset - s,
-                    1752.,
-                    258.7,
-                ),
+                rect: Rect::new(84., favorites_row - 11., 1752., 258.7),
                 icon: "heart",
                 title: if error {
                     language.t("aLittleHelp")
@@ -2309,7 +2824,7 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
             84. + index as f32 * HOME_TILE_PITCH
                 - state.home_scroll
                 - state.bounce_at(crate::state::BounceAxis::Favorites),
-            FAVORITES_ROW + home_content_offset - s,
+            favorites_row,
             HOME_TILE_WIDTH,
             FACE_HEIGHT,
         );
@@ -2337,11 +2852,163 @@ fn home(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
     ambient_move(&mut out.draw[fav_label_start..], state, 0., 900., |r| {
         4. + 3. * (r.x / 1920.).clamp(0., 1.)
     });
-    let stacks_y = FAVORITES_ROW + grid_height + 47. + home_content_offset - s;
+    let favorites_bottom = favorites_row + grid_height;
+    let mut stacks_y = favorites_bottom + 47.;
+    match layout {
+        // The shelf: the headline, its caption and the widgets follow the apps.
+        Layout::Rail => {
+            let top = (PHRASE_TOP - s).min(widgets_top);
+            let bottom = (caption_y + 48.).max(
+                zone.blocks
+                    .iter()
+                    .map(|b| b.2.y + b.2.h)
+                    .fold(zone.top, f32::max),
+            );
+            let dy = favorites_bottom + 64. - top;
+            move_block(
+                out,
+                greeting_start..caption_end.0,
+                info_controls..caption_end.1,
+                0.,
+                dy,
+            );
+            move_block(
+                out,
+                widgets_at.0..widgets_end.0,
+                widgets_at.1..widgets_end.1,
+                0.,
+                dy,
+            );
+            stacks_y = bottom + dy + 56.;
+        }
+        // The stage: the headline sits right above Favorites, low on the
+        // screen; the wallpaper keeps the top.
+        Layout::Dock => {
+            let dy = favorites_top - 40. - (caption_y + 48.);
+            move_block(
+                out,
+                greeting_start..caption_end.0,
+                info_controls..caption_end.1,
+                0.,
+                dy,
+            );
+        }
+        Layout::Classic | Layout::Flip => {}
+    }
+    // Turned to Jellyfin: its rows follow Favorites directly, and the
+    // headline, caption and widgets fade out (and take no focus once gone).
+    if jellyfin > 0. {
+        stacks_y += (favorites_bottom + 47. - stacks_y) * jellyfin;
+        for range in [greeting_start..caption_end.0, widgets_at.0..widgets_end.0] {
+            motion::transform_group(&mut out.draw[range], 0., 0., 1. - jellyfin);
+        }
+        if jellyfin > 0.5 {
+            out.controls.drain(widgets_at.1..widgets_end.1);
+            out.controls.drain(info_controls..caption_end.1);
+        }
+    }
     stacks_view::home_stacks(out, state, assets, stacks_y);
     // Edit mode dims the page, so the widgets draw over everything else.
     if state.widget_edit.is_some() {
+        let at = (out.draw.len(), out.controls.len());
         widgets_view::home(out, state, assets);
+        let dy = if layout == Layout::Rail {
+            favorites_bottom + 64. - (PHRASE_TOP - s).min(widgets_top)
+        } else {
+            widgets_move.1
+        };
+        move_block(
+            out,
+            at.0..out.draw.len(),
+            at.1..out.controls.len(),
+            widgets_move.0,
+            dy,
+        );
+    }
+}
+
+/// How far the widgets' text line reaches above their blocks.
+const WIDGET_TEXT_ABOVE: f32 = 70.;
+
+/// Moves a finished block of Home: its paint and the controls it registered.
+fn move_block(out: &mut Scene, draws: Range<usize>, controls: Range<usize>, dx: f32, dy: f32) {
+    if dx == 0. && dy == 0. {
+        return;
+    }
+    for draw in &mut out.draw[draws] {
+        match draw {
+            Draw::Clip(Some(r)) | Draw::RoundClip(Some((r, _))) => {
+                r.x += dx;
+                r.y += dy;
+            }
+            _ => motion::transform(draw, dx, dy, 1.),
+        }
+    }
+    for control in &mut out.controls[controls] {
+        control.rect.x += dx;
+        control.rect.y += dy;
+    }
+}
+
+/// The box around everything painted, shadows aside; text by its ink.
+fn bounds(assets: &Assets, draws: &[Draw]) -> Option<Rect> {
+    let mut found: Option<Rect> = None;
+    for draw in draws {
+        let r = match draw {
+            Draw::Shadow(..) => continue,
+            Draw::Text(value, r, style, _, centered) => {
+                let ink = assets.width(value, *style).min(r.w);
+                let x = if *centered {
+                    r.x + (r.w - ink) / 2.
+                } else {
+                    r.x
+                };
+                Rect::new(x, r.y, ink, r.h)
+            }
+            _ => {
+                let mut copy = draw.clone();
+                let Some(r) = rect_mut(&mut copy).map(|r| *r) else {
+                    continue;
+                };
+                r
+            }
+        };
+        found = Some(match found {
+            None => r,
+            Some(b) => {
+                let x = b.x.min(r.x);
+                let y = b.y.min(r.y);
+                Rect::new(
+                    x,
+                    y,
+                    (b.x + b.w).max(r.x + r.w) - x,
+                    (b.y + b.h).max(r.y + r.h) - y,
+                )
+            }
+        });
+    }
+    found
+}
+
+/// Sets each line of text painted since `from` against `right`: words on
+/// one line share their top.
+fn align_lines_right(out: &mut Scene, assets: &Assets, from: usize, right: f32) {
+    let mut lines: Vec<(f32, f32)> = Vec::new();
+    for draw in &out.draw[from..] {
+        if let Draw::Text(value, r, style, _, _) = draw {
+            let end = r.x + assets.width(value, *style);
+            match lines.iter_mut().find(|l| (l.0 - r.y).abs() < 0.5) {
+                Some(line) => line.1 = line.1.max(end),
+                None => lines.push((r.y, end)),
+            }
+        }
+    }
+    for draw in &mut out.draw[from..] {
+        if let Some(r) = rect_mut(draw)
+            && let Some(line) = lines.iter().find(|l| (l.0 - r.y).abs() < 0.5)
+        {
+            r.x += right - line.1;
+        }
     }
 }
 
@@ -2923,7 +3590,8 @@ fn settings(out: &mut Scene, state: &State, assets: &Assets) {
         && (state.settings_level != crate::state::SettingsLevel::Section
             || state.section == 1
             || state.section == crate::state::APPEARANCE_SECTION
-            || state.section == crate::state::STACKS_SECTION)
+            || state.section == crate::state::STACKS_SECTION
+            || state.section == crate::state::LAYOUT_SECTION)
     {
         tvos_settings_view::render(out, state, assets);
         return;
@@ -3113,6 +3781,16 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
         WEATHER_SECTION => weather_settings(out, state, assets),
         crate::state::SMARTHOME_SECTION => smart_home_settings_view::render(out, state, assets),
         SYSTEM_SECTION => {
+            // The list scrolls inside its glass panel, never over the clock.
+            {
+                use tvos_settings_view::{MAX_HEIGHT, RIGHT, S16, TOP, WIDTH};
+                out.draw.push(Draw::Clip(Some(Rect::new(
+                    RIGHT,
+                    TOP + S16,
+                    WIDTH,
+                    MAX_HEIGHT - 2. * S16,
+                ))));
+            }
             for (position, (index, title, icon)) in [
                 (
                     3,
@@ -3126,6 +3804,9 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                 (5, language.t("quitApp"), "power"),
                 (7, "Original LG Home", "tv"),
                 (8, "Video library · full screen", "tv"),
+                (11, "Debug Log", "list"),
+                (12, "Dolby TrueHD audio", "volume"),
+                (13, "DTS audio", "volume"),
             ]
             .into_iter()
             .enumerate()
@@ -3139,7 +3820,16 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                         rect: Rect::new(640., 164.8 + position as f32 * 84. - s, 1120., 72.),
                         title,
                         icon: Some(icon),
-                        value: None,
+                        value: match index {
+                            11 => Some(language.t(if state.preferences.debug_log {
+                                "stateOn"
+                            } else {
+                                "stateOff"
+                            })),
+                            12 => Some(state.preferences.truehd.label()),
+                            13 => Some(state.preferences.dts.label()),
+                            _ => None,
+                        },
                         description: None,
                         selected: false,
                         chevron: false,
@@ -3149,6 +3839,7 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
             if let Some(root) = state.root {
                 root_feature_rows(out, state, assets, root);
             }
+            out.draw.push(Draw::Clip(None));
         }
         _ => input_settings_groups(out, state, assets),
     }
@@ -3164,7 +3855,8 @@ fn root_feature_rows(
     let language = state.preferences.language;
     let x = tvos_settings_view::RIGHT + tvos_settings_view::S32;
     let w = tvos_settings_view::WIDTH - 2. * tvos_settings_view::S32;
-    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 4. * 92. + 16. - state.scroll;
+    // Under the seven System rows.
+    let mut y = tvos_settings_view::TOP + tvos_settings_view::S32 + 7. * 92. + 16. - state.scroll;
     out.text(
         "ROOT FEATURES",
         Rect::new(x + 32., y + 6., w - 64., 36.),
@@ -3174,6 +3866,22 @@ fn root_feature_rows(
     );
     y += 48.;
     let state_text = |on: bool| language.t(if on { "stateOn" } else { "stateOff" });
+    tvos_settings_view::cell(
+        out,
+        state,
+        assets,
+        Target::Setting(14),
+        Rect::new(x, y, w, 104.),
+        tvos_settings_view::CellContent {
+            name: "Luma as Home screen",
+            value: Some(state_text(root.home)),
+            desc: Some("Replaces LG Home: the Home button and power on open Luma"),
+            chevron: false,
+            checked: false,
+            partial: false,
+        },
+    );
+    y += 116.;
     tvos_settings_view::cell(
         out,
         state,
@@ -3664,12 +4372,10 @@ fn background_settings(out: &mut Scene, state: &State, assets: &Assets) {
 
 fn greeting_settings(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
-    let style_value =
-        if state.preferences.greeting_style == crate::weather_phrases::GreetingStyle::Rude {
-            "Tech"
-        } else {
-            "Classic"
-        };
+    let style_value = match state.preferences.greeting_style {
+        crate::weather_phrases::GreetingStyle::Classic => "Classic",
+        crate::weather_phrases::GreetingStyle::Rude => "Tech",
+    };
     row(
         out,
         state,
@@ -4045,7 +4751,10 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
     let title_style = text(38., 600, -0.03).leading(1.1);
     let extra = assets.lines(title, title_style, 440.).saturating_sub(1) as f32 * 42.;
     let (row_h, row_gap) = (72., 16.);
-    let panel_h = 40. + 46. + extra + 8. + 30. + 32. + 2. * row_h + row_gap + 40.;
+    // Uninstall is the third row, only for a hidden app the TV can remove.
+    let uninstall = state.can_uninstall(id);
+    let rows = if uninstall { 3. } else { 2. };
+    let panel_h = 40. + 46. + extra + 8. + 30. + 32. + rows * row_h + (rows - 1.) * row_gap + 40.;
     let panel = Rect::new(660., (1080. - panel_h) / 2., 600., panel_h);
     out.modal = Some(panel);
     out.shadow(panel, 32., 120., 25., 0.47);
@@ -4082,17 +4791,23 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
         .any(|item| item == id);
     let hidden = state.preferences.hidden.iter().any(|item| item == id);
     let label_style = text(24., 500, 0.);
-    for (index, label) in [
+    let armed = state.uninstall_armed.as_deref() == Some(id);
+    let mut labels = vec![
         if favorite {
             language.t("removeFavorite")
         } else {
             language.t("addFavorite")
         },
         language.t(if hidden { "showApp" } else { "hideApp" }),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    if uninstall {
+        labels.push(if armed {
+            "Press again to uninstall"
+        } else {
+            "Uninstall"
+        });
+    }
+    for (index, label) in labels.into_iter().enumerate() {
         let rect = Rect::new(
             left,
             panel.y + 156. + extra + index as f32 * (row_h + row_gap),
@@ -4106,6 +4821,8 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str) {
             assets,
             if index == 0 {
                 if favorite { "heart-filled" } else { "heart" }
+            } else if index == 2 {
+                "trash"
             } else if hidden {
                 "eye"
             } else {

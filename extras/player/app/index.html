@@ -11,7 +11,7 @@
     <div id="controls">
       <div id="topShade"></div>
       <div id="bottomShade"></div>
-      <div id="kicker"><b id="kind">MOVIE</b><i></i><span>MEDIA</span></div>
+      <div id="kicker"><b id="kind">MOVIE</b><i></i><span id="mode">MEDIA</span></div>
       <h1 id="title"></h1>
       <div id="episode"></div>
       <div id="clock"></div>
@@ -22,9 +22,14 @@
         <div id="track">
           <div id="buffered"></div>
           <div id="filled"></div>
+          <div id="ticks"></div>
         </div>
         <div id="thumb"></div>
         <div id="chip" class="hidden"></div>
+        <div id="preview" class="hidden">
+          <div id="previewImg"></div>
+          <div id="previewText"><b id="previewTime"></b><span id="previewName"></span></div>
+        </div>
       </div>
       <div id="pos"></div>
       <div id="remain"></div>
@@ -63,6 +68,8 @@
       <h2 id="noteTitle">Loading…</h2>
       <p id="noteSub"></p>
     </div>
+    <script src="log.js"></script>
+    <script src="streams.js"></script>
     <script src="player.js"></script>
   </body>
 </html>

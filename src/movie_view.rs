@@ -1062,6 +1062,7 @@ fn side_panel(
     let heading = match kind {
         movie::AUDIO => "Audio",
         movie::SUBTITLES => "Subtitles",
+        movie::VERSION => "Version",
         _ => "Quality",
     };
     out.text(
@@ -1075,6 +1076,16 @@ fn side_panel(
     let note = match kind {
         movie::AUDIO => "Switch in the TV player".to_owned(),
         movie::SUBTITLES => format!("{} tracks", options.len().saturating_sub(1)),
+        movie::VERSION => format!("{} files", options.len()),
+        // Only the original plays untouched; the others are re-encoded.
+        movie::QUALITY
+            if card
+                .detail
+                .as_ref()
+                .is_some_and(|d| d.default_quality.is_some()) =>
+        {
+            "Others are transcoded".to_owned()
+        }
         _ => String::new(),
     };
     let mut note_style = body(assets, 20., 500);
@@ -1162,6 +1173,7 @@ fn pill(kind: usize, label: &str) -> Button<'_> {
         icon: Some(match kind {
             movie::AUDIO => "volume",
             movie::SUBTITLES => "captions",
+            movie::VERSION => "list",
             _ => "quality",
         }),
         label,

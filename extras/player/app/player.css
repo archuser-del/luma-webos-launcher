@@ -320,6 +320,83 @@ body.controls #controls {
     sans-serif;
   transform: translateX(-50%);
 }
+/* Chapter breaks cut the timeline into segments. */
+#ticks .tick {
+  position: absolute;
+  top: 0;
+  width: 4px;
+  height: 10px;
+  margin-left: -2px;
+  background: rgba(0, 0, 0, 0.6);
+}
+/* Trickplay thumbnail and chapter name above the timeline while seeking. */
+#preview {
+  position: absolute;
+  bottom: 52px;
+  width: 336px;
+  padding: 8px;
+  box-sizing: border-box;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.78);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  transform: translateX(-50%);
+}
+#previewImg {
+  width: 320px;
+  height: 180px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.06);
+  background-repeat: no-repeat;
+}
+#preview.textOnly #previewImg {
+  display: none;
+}
+#previewText {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 8px 6px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#previewTime {
+  font:
+    700 24px LumaBody,
+    sans-serif;
+}
+#previewName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font:
+    500 22px LumaBody,
+    sans-serif;
+  color: rgba(255, 255, 255, 0.75);
+}
+/* Chapter list rows: a picture, the name and where it starts. */
+.opt.chapter {
+  padding-left: 12px;
+  gap: 18px;
+}
+.opt.chapter img,
+.opt.chapter .noimg {
+  flex: none;
+  width: 80px;
+  height: 45px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.08);
+}
+.opt.chapter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.opt.chapter em {
+  margin-left: auto;
+  padding-left: 16px;
+  font-style: normal;
+  font-weight: 500;
+  opacity: 0.7;
+}
 #pos {
   position: absolute;
   left: 88px;

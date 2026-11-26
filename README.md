@@ -7,7 +7,7 @@ Luma replaces the cluttered LG Home with one calm screen: your favorite apps, li
 Free and open source (MIT). Fork it, change it, ship it.
 
 > [!NOTE]
-> **This is a fork.** It builds Luma **2.4.0** under its own app ID, **`com.archbtw.luma`**, so it
+> **This is a fork.** It builds Luma **2.5.0** under its own app ID, **`com.archbtw.luma`**, so it
 > installs beside the original Luma (`com.denisefremov.luma`) with its own settings. What differs
 > from the original:
 >
@@ -20,6 +20,9 @@ Free and open source (MIT). Fork it, change it, ship it.
 >   the Home Assistant web interface opens from the Smart Home tab.
 > - A Jellyfin **Libraries** row shows every library as a wide banner card.
 > - The wallpaper can be a photo frame fed by an ImmichFrame server.
+> - Jellyfin plays files as they are (Direct Play first), keeps HDR in HDR, and has Version and
+>   Quality pickers.
+> - Home shows a Switch button for every HDMI input with a picture.
 >
 > The promo video and most screenshots below show the original Luma, so headline text and widgets
 > look a little different from this build.
@@ -34,12 +37,17 @@ Free and open source (MIT). Fork it, change it, ship it.
 
 **Home**
 
+- Each layout arranges Home its own way. **Classic**: headline and weather on top, Favorites, then the content rows. **Shelf** (Rail): Favorites and the HDMI switch buttons first, then the headline beside the weather, with a content row already in view. **Stage** (Dock): the wallpaper keeps the top of the screen, the widgets sit in its corner, and the headline, switch buttons and Favorites rest low above the dock. **Mirror**: widgets on the left, the headline and the Favorites title set against the right edge. Up and Down follow each arrangement from top to bottom.
+- With the Magic Remote, click anywhere beside the apps, buttons and widgets and Home clears away to the wallpaper (the screensaver's animation). Any key or click brings it back.
+- A Jellyfin tile in Favorites (the Jellyfin app's own tile when it is a favorite, else one Luma adds at the end, one press of Left from your first app). Jellyfin's rows show only while that tile is selected: the headline, its caption and the widgets fade out, and Favorites and the Jellyfin rows glide up to fill the screen. Down goes into the rows and Up comes back to the tile. Hold OK on Luma's tile to move it like any app.
 - Favorite apps row and "stacks": rows of content from Jellyfin, Moonlight and more, each capped at 20 cards with a **View Library** page behind it.
 - Live video wallpapers, on by default: Apple and Amazon aerials played in hardware. Pick whole collections or single clips.
 - Your own video wallpapers: **Settings › Wallpaper › Upload Videos** shows a QR code. Open it on a phone or computer on the same network and pick MP4/MOV files (H.264 or HEVC). They play from the TV's storage, and **Only My Videos** rotates just your uploads.
+- Wallpapers on a USB drive: **Settings › Wallpaper › Save to USB Drive** copies the selected clips, one at a time, into a `LumaWallpapers` folder on the first USB drive Luma can write to, and plays each saved clip from the drive instead of streaming it. Copies pause while a film plays and stop with 1 GB still free. Luma needs write access to the drive: it has it as the Home screen (which runs as root) or through a root tool that passes USB drives to apps.
 - Photo-frame wallpaper from [Immich](https://immich.app): **Settings › Wallpaper › ImmichFrame Photos** connects an [ImmichFrame](https://immichframe.dev) server (scan the QR code, type its address and, if it has one, its authentication secret). Luma shows a new photo every 15 seconds to 15 minutes, with the place and date it was taken. Portrait photos are shown whole over a soft blur.
-- Frosted-glass UI with one accent gradient, adjustable colors, heading and text fonts, and UI resolution (Auto / 4K / 1440p / 1080p).
-- A tech-themed headline that comments on the weather ("Thermal throttling: off.", "Packet loss: rain."), plus a clock and date. Prefer a plain greeting? Switch **Settings › General › Greeting** from Tech to Classic (also tech themed: "System booted. Good morning.").
+- Frosted-glass UI with one accent gradient, adjustable colors, heading and text fonts, and UI resolution (Auto / 4K / 1440p / 1080p). Auto draws in 4K while the TV keeps animations at 60 fps and steps down to 1440p, then 1080p, when it measures that it cannot; the video wallpaper always plays through the TV's hardware decoder at full quality, whatever the UI resolution.
+- Four layouts for the tabs, input buttons and clock, on their own page, **Settings › Layout**, each with a small diagram of where everything sits: **Classic** (all along the top), **Rail** (icon tabs down the left edge, inputs at its foot, clock top right), **Dock** (one glass bar at the bottom) and **Mirror** (inputs left, clock in the middle, tabs right). The remote follows the layout: Left of the page is the rail, Down past the last row is the dock, and the arrow back returns to the card you left.
+- A tech-themed headline that comments on the weather ("Thermal throttling: off.", "Router: water-cooled."), picked at random from over 10,000 and changed every hour without repeats, plus a clock and date. Prefer a plain greeting? Switch **Settings › General › Greeting** from Tech to Classic (also tech themed: "System booted. Good morning.").
 - LG's own apps (Multi View, Gallery, Home Hub, Camera, Web Browser, LG Link, Sports, Memory Care and the like) start hidden. Live TV stays. Unhide any of them from **Apps › Hidden**.
 
 **Widgets**
@@ -48,14 +56,21 @@ Free and open source (MIT). Fork it, change it, ship it.
 - HDMI input preview and Home Assistant status line.
 - Small, medium, large and text-line sizes, laid out on a grid.
 
+**Inputs**
+
+- Above Favorites, one small button per plugged-in HDMI input, by name (**PlayStation 5 · HDMI 1**), one press of Up from your apps. Inputs with a picture have a green dot; a device that is plugged in but asleep is grayed out (OK still switches to it). Names are the ones you gave the inputs, else what the TV reports over HDMI-CEC. Signal detection needs root; without it, every plugged-in input counts as live.
+
 **Movies, series and music (Jellyfin, Plex)**
 
 - Sign in with a code or a QR code on your phone: no typing with the remote.
 - A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
+- **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit over HLS (fMP4), as Jellyfin's own webOS app streams, and just that audio track is converted: to E-AC-3 5.1 for surround, or FLAC (lossless) for stereo, since webOS refuses FLAC with more than two channels. Should the TV refuse that, Luma Player steps down to AC-3, then AAC, still with the original video. webOS rarely admits to decoding TrueHD or DTS even where it does: **Settings › System › Dolby TrueHD audio** and **DTS audio** are _Ask the TV_ (default), _TV plays it_ (the file plays untouched) or _Convert it_. If a TV set to play it refuses a film after all, Luma Player converts that one and carries on.
+- **HDR stays HDR.** HDR10, HLG and Dolby Vision video is never re-encoded (Jellyfin would turn it into SDR), so HDR titles offer no lower qualities. Burning an image subtitle into an HDR film is the one exception, and that subtitle is labelled "burned in, SDR" so it is your choice.
+- **Version and Quality pickers** on the title card: choose between a title's versions (for example 4K HDR and 1080p) and between "Original" and lower qualities for SDR files. Audio, subtitles and quality can also be changed while playing.
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
 - Music: albums, songs and a now-playing screen.
-- Plex support is new and less tested than Jellyfin.
+- Plex support is new and less tested than Jellyfin (the Direct Play and HDR rules above are Jellyfin's).
 
 **Games (Moonlight)**
 
@@ -186,6 +201,31 @@ Luma runs as a normal app without root. On a rooted TV (Homebrew Channel, elevat
 
 Without root the Root features section is hidden, and Luma never tries to change system files.
 
+### Make Luma the Home screen
+
+Replaces LG Home with Luma on a rooted TV: the Home button opens Luma, and Luma comes up when the TV
+starts. Supported on webOS 5, 6, 24, 25 and 26. Run in the TV's root SSH shell, and confirm with `y`:
+
+```sh
+sh /media/developer/apps/usr/palm/applications/com.archbtw.luma/home.sh enable
+```
+
+What it does: on webOS 5/6/24 it mounts Luma's program over LG Home's; on 25/26 it mounts a Home app
+that points at Luma. LG Home's own files stay untouched underneath. A boot hook
+(`/var/lib/webosbrew/init.d/64-luma-home`) reapplies it at every cold boot, and **Home Auto Launch**
+is turned on so the TV opens Home, now Luma, at power-on.
+
+Check it, or go back to LG Home (this also restores Home Auto Launch to what it was):
+
+```sh
+sh /var/lib/luma-home/home.sh status
+sh /var/lib/luma-home/home.sh disable
+```
+
+Disable it before uninstalling Luma. If you use the autostart hook below, disable that first; you
+don't need both. Logs: `/var/lib/luma-home/boot.log` (boot hook) and `/tmp/luma-home.log` (Luma
+running as Home).
+
 ### Autostart from the command line
 
 Opens Luma 25 seconds after a full cold boot, as a regular app (the Home button is not remapped).
@@ -206,17 +246,56 @@ It installs `/var/lib/webosbrew/init.d/65-luma`, which Homebrew Channel runs at 
 `/tmp/luma-boot.log`. **Open Luma when the TV turns on** above also covers waking from Quick Start+;
 you only need one of the two.
 
+## Debug log
+
+To report a bug, switch on **Settings › System › Debug Log**, make the problem happen, and send the
+newest log. Luma then writes one file per start to `logs/` next to its `preferences.json`, usually
+`/media/developer/com.archbtw.luma/logs/luma-<date>T<time>.log`, and keeps the five newest. Each
+line starts with the TV's local time, for example `2026-11-11T20:41:05.123+01:00`.
+
+A log starts with the screen's refresh rate and drawing size, records how many frames per second each animation reached, and holds every remote press (page and focus before and after), every action Luma takes, each
+load of the Home rows and how many cards came back, failed Jellyfin, Plex, Home Assistant and
+ImmichFrame requests, Luma's own messages, and a backtrace if it crashes. It never holds tokens, passwords or URL query strings, but it does show server addresses,
+app names and HDMI device names.
+
+For a problem that happens while Luma starts, switch the log on before it starts: create an empty
+file named `debug-log` next to `preferences.json`, then open Luma (or restart the TV for Luma Home).
+Delete the file to switch it off again.
+
+Over SSH on a rooted TV:
+
+```sh
+touch /media/developer/com.archbtw.luma/debug-log
+ls -t /media/developer/com.archbtw.luma/logs/
+```
+
+From your computer, copy the logs off the TV (replace `TV_IP`):
+
+```sh
+scp 'root@TV_IP:/media/developer/com.archbtw.luma/logs/*.log' .
+```
+
+Luma Player (the Jellyfin and Plex player, 0.2.0 or later) writes into the same log while it is on,
+tagged `[player]`: which codecs the TV reports, the file's tracks, whether it chose Direct Play,
+Direct Stream or a transcode and why, the stream settings asked of Jellyfin, every state of the
+TV's video pipeline (loading, buffering, playing, errors with their code), track and quality
+changes, remote keys, and failed progress reports. If Luma was not running to receive them, the
+player keeps up to 400 lines and sends them the next time it starts.
+
 ## Install
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.4.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.9.6_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.0.11_all.ipk`.
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.4.0_all.ipk` plays
+Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
+(**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.4.0_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.0.11_all.ipk
+ares-install --device tv com.archbtw.luma_2.9.6_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.4.0_all.ipk
+ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
 Coming from the original Luma? It stays installed as a separate app (`com.denisefremov.luma`) with its
@@ -248,7 +327,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.4.0_arm.ipk, player IPK, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.9.6_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

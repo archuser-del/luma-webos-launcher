@@ -1,0 +1,227 @@
+"""Special Tech headlines: streaks, sudden changes, forecasts, extremes,
+times of the week and holidays. Read by generate-headlines.py.
+
+Keys are the labels Luma reads (weather_phrases.rs). Placeholders:
+{N} days in a row, {old} {new} before and after, {delta} degrees changed,
+{soon} the hour something arrives and {time} the current hour (24-hour,
+"14:00"), {temp} the temperature now (°C or °F, as set in Luma).
+"""
+
+SPECIAL = {
+    # The same weather two or more days in a row.
+    "still:cold": [
+        ("Still cold, still no patch.", "Day {N}. Spring is still in beta."),
+        ("Day {N} of cold mode.", "The heating is now your main process."),
+        ("Cold loop detected.", "Day {N}. Same frost, different morning."),
+        ("Winter.exe won't close.", "Day {N}. Have you tried turning it off and on?"),
+        ("Still frozen. Not responding.", "Day {N}. Waiting for a warmer update."),
+        ("Cold streak: {N} days.", "Thermal paste weather continues."),
+        ("No warm patch yet.", "Day {N}. Blankets remain the recommended hardware."),
+        ("Same cold, new day.", "Day {N}. Coffee consumption: critical."),
+    ],
+    "still:rain": [
+        ("Still raining. Infinite loop.", "Day {N}. Build an ark. Or a server rack."),
+        ("Rain: day {N}.", "The sky forgot to close the tap."),
+        ("Drip mode, day {N}.", "Waterproofing is now a core feature."),
+        ("Still wet. Still here.", "Day {N}. Umbrellas have earned overtime."),
+        ("Rain loop never ends.", "Day {N}. Someone add a break statement."),
+        ("Rainy streak: {N} days.", "Liquid cooling, now with extra liquid."),
+        ("Same rain, new day.", "Day {N}. The couch thanks you for your loyalty."),
+    ],
+    "still:grey": [
+        ("Still grey. Error 404: sun.", "The sun is still in development."),
+        ("Day {N} of grey mode.", "Brightness locked at 20%."),
+        ("Sun.dll still missing.", "Day {N}. Reinstalling the sky."),
+        ("Overcast, day {N}.", "The default theme is sticking around."),
+        ("Grey streak: {N} days.", "Low contrast, high patience."),
+        ("Still cloudy. Still syncing.", "Day {N}. The cloud is very much in the cloud."),
+    ],
+    "still:hot": [
+        ("Still hot. CPU still throttling.", "Day {N}. The AC is your only friend."),
+        ("Day {N} of thermal throttling.", "Hydrate like your uptime depends on it."),
+        ("Heat loop detected.", "Day {N}. The fans have filed a complaint."),
+        ("Still melting.", "Day {N}. Shade remains the best firewall."),
+        ("Hot streak: {N} days.", "Not the good kind of hot streak."),
+        ("Same heat, new day.", "Day {N}. Ice cubes are a critical resource."),
+    ],
+    "still:snow": [
+        ("Still snowing. Buffering forever.", "Day {N}. The render just keeps going."),
+        ("Day {N} of white noise.", "The snow shader is stuck on."),
+        ("Snowed in, day {N}.", "Perfect uptime for indoor projects."),
+        ("Snow streak: {N} days.", "Plows in safe mode, people in blankets."),
+        ("Still white outside.", "Day {N}. Particle effects maxed out."),
+    ],
+    "still:fog": [
+        ("Still foggy. Still 240p.", "Day {N}. Draw distance unchanged."),
+        ("Day {N} of low resolution.", "Someone wipe the lens."),
+        ("Fog loop detected.", "Day {N}. Visibility patch still pending."),
+        ("Haze streak: {N} days.", "Rendering the world one meter at a time."),
+    ],
+    # A sudden change: new kind of weather, or a big swing in ~3 hours.
+    "change:any": [
+        ("Unexpected weather update.", "Was {old} an hour ago."),
+        ("Hot-swapped forecast.", "{old} → {new}."),
+        ("Breaking changes detected.", "Dress for every version."),
+        ("Weather hotfix deployed.", "From {old} to {new}. No restart needed."),
+        ("Sky changed its config.", "{old} out, {new} in."),
+        ("New weather build.", "Changelog: {old} → {new}."),
+        ("Plot twist outside.", "It was {old}. Now it's {new}."),
+        ("Forecast merged a surprise.", "{old} has been replaced by {new}."),
+    ],
+    "change:colder": [
+        ("It got colder: rollback.", "{delta}° down in a few hours."),
+        ("Temperature dropped {delta}°.", "Grab another layer."),
+        ("Cooling event detected.", "{delta}° colder than a few hours ago."),
+        ("Rollback to winter.", "Down {delta}°. Someone reverted the heat."),
+        ("Sudden cool-down.", "{delta}° lower. The fans can rest."),
+    ],
+    "change:warmer": [
+        ("Warm patch applied.", "{delta}° up in a few hours."),
+        ("Temperature spike.", "Up {delta}°. Shed a layer."),
+        ("Heat upgrade installed.", "{delta}° warmer than earlier."),
+        ("Overclocked afternoon.", "{delta}° up. The sun pushed an update."),
+        ("Warming trend detected.", "Up {delta}° since earlier. Nice."),
+    ],
+    # From the next hours' forecast.
+    "rain_soon": [
+        ("Rain incoming.", "Expected around {soon}. Umbrella pre-loaded."),
+        ("Precipitation queued.", "Rain due by {soon}."),
+        ("Weather update downloading.", "Rain arriving around {soon}."),
+        ("Incoming packets: rain.", "Due around {soon}. Bring things inside."),
+        ("Rain on the roadmap.", "ETA {soon}."),
+        ("Umbrella: prefetch.", "Rain expected at about {soon}."),
+    ],
+    "clearing": [
+        ("Rain ending soon.", "Clearing around {soon}."),
+        ("Drip mode ending.", "Dry skies expected by {soon}."),
+        ("Weather patch incoming.", "The rain should stop around {soon}."),
+        ("Rain: finishing up.", "ETA dry: {soon}."),
+        ("Light at the end of the stream.", "Clearer by {soon}."),
+    ],
+    # Extremes.
+    "heatwave": [
+        ("Thermal emergency.", "{temp} outside. Stay in, stay cool."),
+        ("Heatwave mode.", "{temp}. Even the router wants a fan."),
+        ("Outside: {temp}.", "That's GPU-under-load territory."),
+        ("Sun overclocked.", "{temp} and climbing. Hydrate."),
+        ("Critical temperature.", "{temp} out there. AC is mandatory."),
+    ],
+    "deep_freeze": [
+        ("Deep freeze.", "{temp}. Nothing should be outside, including you."),
+        ("Cryogenic conditions.", "{temp} outside. Stay in and stream."),
+        ("Absolute zero speedrun.", "{temp}. Cars and people both struggle to start."),
+        ("Kernel panic: cold.", "{temp} outside. Layers on layers."),
+        ("Liquid nitrogen weather.", "{temp}. The heating is a critical service."),
+    ],
+    # Times of the week.
+    "monday": [
+        ("Monday.exe is starting.", "Coffee first, then commits."),
+        ("New sprint, who dis.", "It's Monday. Ease into it."),
+        ("Weekly reboot complete.", "Monday morning. Patience loading."),
+        ("Monday patch deployed.", "Expect a few bugs today."),
+        ("Booting into the week.", "Slow start allowed. It's Monday."),
+        ("Week 0% complete.", "Monday. One task at a time."),
+    ],
+    "friday": [
+        ("Weekend.exe loading.", "It's Friday evening. Log off."),
+        ("Deploy freeze in effect.", "Friday night. Nothing ships now."),
+        ("Friday: build passed.", "Time to queue up something good."),
+        ("Week 100% complete.", "Friday evening. You earned the couch."),
+        ("Shutting down work processes.", "It's Friday. Movie night unlocked."),
+        ("Never deploy on a Friday.", "Deploy snacks instead."),
+    ],
+    "weekend": [
+        ("Weekend mode: on.", "No meetings detected."),
+        ("Offline for maintenance.", "It's the weekend. So are you."),
+        ("Low-priority day.", "Weekend rules apply."),
+        ("Calendar: empty.", "Perfect conditions for a long series."),
+        ("Sleep-in patch applied.", "It's the weekend. Breakfast at any hour."),
+        ("Background tasks only.", "Weekend. Nothing urgent, nothing due."),
+    ],
+    "small_hours": [
+        ("Small hours detected.", "It's after {time}. Sleep is a feature."),
+        ("Late-night build running.", "After {time}. The bugs can wait till morning."),
+        ("Insomnia mode.", "It's after {time}. One more episode is a lie."),
+        ("Uptime: too long.", "Past {time}. Even servers have maintenance windows."),
+        ("Night owl detected.", "It's after {time}. Your future self says go to bed."),
+        ("Cron job: bedtime.", "Overdue. It's after {time}."),
+    ],
+    # Holidays and days worth a line.
+    "new_year": [
+        ("Year++.", "Happy New Year. Fresh changelog, same you."),
+        ("New year, new version.", "Happy New Year. Release notes to follow."),
+        ("Calendar overflow handled.", "Happy New Year. The counter rolled over fine."),
+        ("Happy New Year.", "Resolutions loaded. Execution pending."),
+        ("Year rollover complete.", "Happy New Year. No Y2K this time."),
+    ],
+    "new_years_eve": [
+        ("Year ending soon.", "New Year's Eve. Countdown process started."),
+        ("Final commit of the year.", "Happy New Year's Eve. Push it before midnight."),
+        ("Year-end release candidate.", "New Year's Eve. Ship it at 00:00."),
+        ("Countdown.exe running.", "It's New Year's Eve. Snacks are mandatory."),
+    ],
+    "valentine": [
+        ("Love.exe is running.", "Happy Valentine's Day."),
+        ("Compatibility check: passed.", "Happy Valentine's Day."),
+        ("Heart rate: elevated.", "It's Valentine's Day. Treat someone nice."),
+        ("<3 merged to main.", "Happy Valentine's Day."),
+        ("Pairing successful.", "Valentine's Day. Bluetooth would be proud."),
+    ],
+    "leap_day": [
+        ("Bonus day unlocked.", "February 29th. A free extra day."),
+        ("Leap day patch.", "Rare build: only every four years."),
+        ("Calendar edge case.", "It's February 29th. Enjoy the bonus."),
+    ],
+    "pi_day": [
+        ("Pi Day: 3.14159…", "Eat something round."),
+        ("Happy Pi Day.", "Irrational, but delicious."),
+        ("Infinite digits detected.", "It's Pi Day. Pie is the correct answer."),
+    ],
+    "april_fools": [
+        ("All systems normal.", "April 1st. Trust no headline today."),
+        ("Wi-Fi is now solar powered.", "Happy April Fools' Day."),
+        ("Weather forecast: yes.", "It's April Fools'. Believe nothing."),
+        ("Router achieved sentience.", "Probably. It's April 1st."),
+    ],
+    "star_wars": [
+        ("May the Fourth be with you.", "Star Wars Day. Queue the saga."),
+        ("Not the bugs you're looking for.", "Happy Star Wars Day."),
+        ("Hyperdrive: online.", "May the Fourth. Marathon recommended."),
+    ],
+    "independence": [
+        ("Happy Fourth of July.", "Fireworks tonight. Keep the pets inside."),
+        ("Independence Day.", "Grill on, devices charged, fireworks later."),
+        ("Freedom.exe launched.", "Happy Fourth. Stay safe with the sparklers."),
+    ],
+    "programmers_day": [
+        ("Day 256.", "Happy Programmers' Day. 0x100 days in."),
+        ("Programmers' Day.", "The 256th day of the year. Celebrate in binary."),
+        ("11111111 + 1.", "Day 256: Programmers' Day."),
+    ],
+    "halloween": [
+        ("Ghost process detected.", "Happy Halloween."),
+        ("Spooky action at a distance.", "It's Halloween. Candy is a dependency."),
+        ("Zombie threads everywhere.", "Happy Halloween. Lock the doors."),
+        ("Boo.exe has started.", "Halloween night. Horror movie queue ready."),
+        ("Haunted hardware.", "Happy Halloween."),
+    ],
+    "thanksgiving": [
+        ("Gratitude.log updated.", "Happy Thanksgiving."),
+        ("Thanks for all the packets.", "Happy Thanksgiving. Seconds are allowed."),
+        ("Turkey render complete.", "Happy Thanksgiving. Nap mode at 15:00."),
+        ("Feast mode: enabled.", "Happy Thanksgiving."),
+    ],
+    "christmas": [
+        ("Merry Christmas.", "Presents unpacked, cables everywhere."),
+        ("Holiday build shipped.", "Merry Christmas."),
+        ("Sleigh telemetry: nominal.", "It's Christmas. Movie marathon recommended."),
+        ("Gift wrap deployed.", "Merry Christmas. Batteries included, hopefully."),
+        ("Peace on earth, zero errors.", "Merry Christmas."),
+        ("Snow optional, cheer mandatory.", "Merry Christmas."),
+    ],
+    "friday_13": [
+        ("Friday the 13th.", "Back up everything. Just in case."),
+        ("Unlucky build number.", "Friday the 13th. Avoid deploys."),
+        ("Superstition mode.", "It's Friday the 13th. Mind the black cat on the keyboard."),
+    ],
+}

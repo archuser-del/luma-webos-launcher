@@ -1,5 +1,15 @@
 # lg-luma
 
+## 2.5.0
+
+### Minor Changes
+
+- Jellyfin playback plays files as they are. Luma Player asks the TV which codecs it decodes and chooses Direct Play (the original MKV), Direct Stream (video copied, only unsupported audio converted to FLAC, or Dolby/AAC without FLAC), or a transcode only for an unsupported video codec, a burned-in image subtitle or a lower quality the viewer picks.
+- HDR video is never re-encoded, so it always plays in HDR; HDR titles offer no lower qualities, and image subtitles on HDR films are labelled "burned in, SDR".
+- Version and Quality pickers on the Jellyfin title card ("Original" first); audio, subtitle and quality switching in the player re-plans the stream; next/previous episodes are planned the same way.
+- Home shows a "Switch to <device> · HDMI n" button for every HDMI input with a picture.
+- Luma Player 0.1.0.
+
 ## 2.4.0
 
 ### Minor Changes

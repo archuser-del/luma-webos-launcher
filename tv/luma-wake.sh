@@ -5,6 +5,7 @@
 # LG system apps are not changed.
 # Installed and switched by Luma Settings › System › Root features.
 # Disable: touch /var/lib/webosbrew/luma-autostart-disabled
+# luma-wake v2: stands back while Luma is the Home screen.
 if [ -z "$LUMA_WAKE_CHILD" ]; then
   LUMA_WAKE_CHILD=1 nohup "$0" > /tmp/luma-wake.log 2>&1 < /dev/null &
   exit 0
@@ -19,6 +20,12 @@ app=/media/developer/apps/usr/palm/applications/com.archbtw.luma/appinfo.json
 open_luma() {
   [ -e /var/lib/webosbrew/luma-autostart-disabled ] && return
   [ -f "$app" ] || return
+  # Luma is the Home screen: the TV opens it itself, and opening the app as
+  # well would run a second Luma beside it (both decoding the wallpaper).
+  if grep -Eq '"enabled" *: *true' /var/lib/luma-home/state.json 2>/dev/null; then
+    echo "$(date '+%T') Luma is the Home screen: the TV opens it"
+    return
+  fi
   for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     # Launch first: right after resume the foreground report can be stale.
     reply=$(luna-send -n 1 luna://com.webos.service.applicationManager/launch '{"id":"com.archbtw.luma"}')

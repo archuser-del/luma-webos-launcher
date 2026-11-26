@@ -25,8 +25,9 @@ fn tv_path() -> Result<PathBuf, String> {
         os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     };
 
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let legacy = executable.with_file_name("preferences.json");
+    // The installed package, also when Luma runs in place of LG's Home executable.
+    let installation = crate::platform::install_dir()?;
+    let legacy = installation.join("preferences.json");
     let id = crate::platform::APP_ID;
     // These volumes persist across boots. The app-specific directory also
     // survives replacement of the installed payload on an ordinary update.
@@ -40,7 +41,7 @@ fn tv_path() -> Result<PathBuf, String> {
     let internal = PathBuf::from("/media/internal")
         .join(format!(".{id}"))
         .join("preferences.json");
-    let mut candidates = if executable.starts_with("/media/cryptofs") {
+    let mut candidates = if installation.starts_with("/media/cryptofs") {
         [internal, developer, shared_developer]
     } else {
         [developer, shared_developer, internal]
@@ -68,7 +69,12 @@ fn tv_path() -> Result<PathBuf, String> {
         };
         // Do not silently reuse a symlink or root-created debug directory as
         // another process's private app storage.
-        if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        // As LG's Home, Luma runs as root while this folder belongs to the app
+        // user (from running as a normal app): root uses it as it is, so Home
+        // and the app share one set of settings. `home.sh disable` gives the
+        // files root wrote back to the app user.
+        let euid = unsafe { libc::geteuid() };
+        if !metadata.is_dir() || (metadata.uid() != euid && euid != 0) {
             failures.push(format!(
                 "{} is not owned by the app user",
                 directory.display()
@@ -133,6 +139,9 @@ fn tv_path() -> Result<PathBuf, String> {
             }
         }
         eprintln!("Luma persistent storage: {}", directory.display());
+        for skipped in &failures {
+            eprintln!("Luma persistent storage skipped {skipped}");
+        }
         return Ok(path);
     }
     Err(format!(

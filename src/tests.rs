@@ -55,6 +55,79 @@ fn uploaded_videos_join_the_catalog_and_can_play_alone() {
 }
 
 #[test]
+fn every_plugged_in_input_gets_a_button_and_a_sleeping_one_is_grayed() {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    // HDMI 1 and 2 have a cable in; only HDMI 2 has a picture now.
+    for input in &mut state.inventory.inputs {
+        input.connected = Some(input.port != "HDMI 3");
+    }
+    crate::model::apply_signals(
+        &mut state.inventory.inputs,
+        &[(1, false), (2, true), (3, false)],
+    );
+    let buttons = |state: &State| -> Vec<Target> {
+        let mut found: Vec<_> = controls(state)
+            .into_iter()
+            .filter(|c| matches!(c.target, Target::LiveInput(_)))
+            .collect();
+        found.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
+        found.into_iter().map(|c| c.target).collect()
+    };
+    let hdmi = |n: u8| Target::LiveInput(format!("com.webos.app.hdmi{n}"));
+    // Both plugged-in inputs, by name; HDMI 3 has no cable and no button.
+    assert_eq!(buttons(&state), vec![hdmi(1), hdmi(2)]);
+    let plugged = state.plugged_inputs();
+    let live: Vec<(&str, bool)> = plugged
+        .iter()
+        .map(|(input, live)| (input.port.as_str(), *live))
+        .collect();
+    assert_eq!(
+        live,
+        vec![("HDMI 1", false), ("HDMI 2", true)],
+        "HDMI 1 is grayed"
+    );
+    // Up from the apps reaches them; Left and Right walk them; OK switches,
+    // also to the grayed one (it may wake the device).
+    state.focus = Target::App("netflix".into());
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, hdmi(1));
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.focus, hdmi(2));
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.webos.app.hdmi2".into())]
+    );
+    state.launching = false;
+    state.focus = hdmi(1);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.webos.app.hdmi1".into())]
+    );
+    state.launching = false;
+    // Down goes back to the apps.
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::App("netflix".into()));
+    // An input the viewer turned off gets no button.
+    state
+        .preferences
+        .input_modes
+        .insert("com.webos.app.hdmi2".into(), InputMode::Off);
+    assert_eq!(buttons(&state), vec![hdmi(1)]);
+    // The cable comes out: the button goes, and focus does not stay on it.
+    state.preferences.input_modes.clear();
+    state.focus = hdmi(1);
+    for input in &mut state.inventory.inputs {
+        if input.port == "HDMI 1" {
+            input.connected = Some(false);
+        }
+    }
+    state.reconcile_focus();
+    assert_eq!(buttons(&state), vec![hdmi(2)]);
+    assert!(!matches!(state.focus, Target::LiveInput(_)));
+}
+
+#[test]
 fn lg_system_apps_are_hidden_once_and_unhiding_sticks() {
     let mut state = State::new(Preferences::default());
     assert!(state.set_inventory(demo_inventory(), None));
@@ -113,12 +186,14 @@ fn scene(state: &State) -> view::Scene {
         text_pct: std::cell::Cell::new(state.preferences.text_size_pct),
         artwork: crate::app_artwork::Service::new(false),
     };
-    let navigation = view::navigation_for(&assets, state.preferences.language, false);
+    let layout = state.preferences.layout;
+    let navigation = view::navigation_in(layout, &assets, state.preferences.language, false);
+    let (pill, length) = view::nav_pill_target(layout, navigation.items[state.page_index()]);
     view::scene_with_pill(
         state,
         &assets,
-        navigation.items[state.page_index()].x,
-        navigation.items[state.page_index()].w,
+        pill,
+        length,
         time::OffsetDateTime::UNIX_EPOCH,
     )
 }
@@ -134,6 +209,9 @@ fn remote_routes_from_header_and_back_through_settings() {
     state.preferences.background = "dunes".into();
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::App("netflix".into()));
+    // The demo's plugged-in HDMI 1 offers its Switch button on the way up.
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::LiveInput("com.webos.app.hdmi1".into()));
     state.direction(Direction::Up, &controls(&state));
     assert_eq!(state.focus, Target::Nav(0));
     state.open(2);
@@ -2149,7 +2227,7 @@ fn settings_v2_pointer_back_at_each_depth_returns_to_parent() {
     );
 }
 #[test]
-fn settings_v2_glass_rows_are_exactly_80px_with_no_left_row_icons() {
+fn settings_root_rows_share_one_size_with_no_left_row_icons() {
     let mut state = ready();
     state.open_settings();
     state.preferences.reduced_motion = true;
@@ -2159,10 +2237,11 @@ fn settings_v2_glass_rows_are_exactly_80px_with_no_left_row_icons() {
         .iter()
         .filter(|c| matches!(c.target, Target::Sidebar(_)))
         .collect();
-    assert_eq!(rows.len(), 8);
+    // Nine sections: 72px rows, so the list fits the panel without scrolling.
+    assert_eq!(rows.len(), 9);
     assert!(
         rows.iter()
-            .all(|r| r.rect.h == 80. && r.rect.x == 864. && r.rect.w == 940.)
+            .all(|r| r.rect.h == 72. && r.rect.x == 864. && r.rect.w == 940.)
     );
     assert!(layout.draw.iter().any(
         |d| matches!(d,crate::renderer::Draw::Shape(r, radius, _,color)
@@ -2591,7 +2670,7 @@ fn video_sources_and_categories_have_distinct_pointer_hitboxes() {
 }
 
 #[test]
-fn settings_root_six_rows_have_symmetric_32px_inner_padding() {
+fn settings_root_rows_have_symmetric_32px_inner_padding() {
     let mut state = ready();
     state.open_settings();
     state.preferences.reduced_motion = true;
@@ -2602,13 +2681,14 @@ fn settings_root_six_rows_have_symmetric_32px_inner_padding() {
         .filter_map(crate::view::tvos_settings_view::backdrop_rect)
         .collect::<Vec<_>>();
     assert_eq!(panels.len(), 6);
-    assert!(panels.iter().all(|r| (r.h - 788.).abs() < 0.01));
+    // 32 + nine 72px rows + eight 10px gaps + 32.
+    assert!(panels.iter().all(|r| (r.h - 792.).abs() < 0.01));
     let last = layout
         .controls
         .iter()
         .find(|c| c.target == Target::Sidebar(5))
         .unwrap();
-    assert!((last.rect.y + last.rect.h + 32. - (184. + 788.)).abs() < 0.01);
+    assert!((last.rect.y + last.rect.h + 32. - (184. + 792.)).abs() < 0.01);
 }
 #[test]
 fn settings_backdrops_stay_in_place_during_content_cascade_and_height_change() {
@@ -3323,6 +3403,7 @@ fn stack_card_opens_title_card_and_back_returns_to_the_card() {
             episode: None,
             quality: None,
             subtitle: Some("English".into()),
+            version: None,
         })]
     );
     // More like this lists the other cards of the row.
@@ -3382,7 +3463,9 @@ fn root_status_reads_the_homebrew_exec_reply() {
     )
     .unwrap();
     assert!(status.wake);
+    assert!(!status.home);
     assert_eq!(status.home_auto_launch, Some(false));
+    assert!(parse_root_status("root\nhome\n").unwrap().home);
     let status = parse_root_status("root\n").unwrap();
     assert!(!status.wake);
     assert_eq!(status.home_auto_launch, None);
@@ -3766,4 +3849,1173 @@ fn unsupported_saved_media_source_is_ignored_without_losing_other_settings() {
     assert_eq!(prefs.stacks[0].source, "jellyfin");
     assert_eq!(prefs.stacks[0].collection, "recent");
     assert!(prefs.luma_player);
+}
+
+// Layouts: where the tabs, inputs and clock sit, and how the remote gets there.
+
+fn laid_out(layout: crate::layout::Layout) -> State {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    state.preferences.reduced_motion = true;
+    state.preferences.layout = layout;
+    state
+}
+
+fn press(state: &mut State, direction: Direction) -> Vec<Effect> {
+    let controls = controls(state);
+    state.direction(direction, &controls)
+}
+
+fn rect_of(state: &State, target: &Target) -> crate::state::Rect {
+    controls(state)
+        .into_iter()
+        .find(|c| &c.target == target)
+        .unwrap_or_else(|| panic!("{target:?} is not on screen"))
+        .rect
+}
+
+fn first_app(state: &State) -> Target {
+    Target::App(state.apps()[0].id.clone())
+}
+
+#[test]
+fn a_saved_layout_loads_by_name_and_an_unknown_one_falls_back() {
+    use crate::layout::Layout;
+    for (name, layout) in [
+        ("classic", Layout::Classic),
+        ("rail", Layout::Rail),
+        ("dock", Layout::Dock),
+        ("flip", Layout::Flip),
+    ] {
+        let prefs: Preferences = serde_json::from_value(json!({ "layout": name })).unwrap();
+        assert_eq!(prefs.layout, layout);
+        assert_eq!(serde_json::to_value(&prefs).unwrap()["layout"], name);
+    }
+    let prefs: Preferences = serde_json::from_value(json!({ "layout": "carousel" })).unwrap();
+    assert_eq!(prefs.layout, Layout::default());
+    assert_eq!(Layout::Classic.body_offset(), (0., 0.));
+}
+
+#[test]
+fn settings_has_a_layout_page_that_picks_any_design() {
+    use crate::layout::Layout;
+    use crate::state::{LAYOUT_SECTION, SECTION_ORDER, SettingsLevel};
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    // Layout is a row of its own on the Settings list, after Appearance.
+    let row = SECTION_ORDER
+        .iter()
+        .position(|s| *s == LAYOUT_SECTION)
+        .unwrap();
+    assert_eq!(SECTION_ORDER[row - 1], crate::state::APPEARANCE_SECTION);
+    let list = controls(&state);
+    let rows: Vec<_> = list
+        .iter()
+        .filter(|c| matches!(c.target, Target::Sidebar(_)))
+        .collect();
+    assert_eq!(rows.len(), SECTION_ORDER.len());
+    // All nine rows fit the glass panel.
+    let bottom = rows.iter().map(|c| c.rect.y + c.rect.h).fold(0., f32::max);
+    assert!(bottom <= 184. + 808. - 32., "the last row ends at {bottom}");
+    state.focus = Target::Sidebar(LAYOUT_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    assert_eq!(state.focus, Target::LayoutChoice(0), "the design in use");
+    let list = controls(&state);
+    for (i, _) in Layout::ALL.iter().enumerate() {
+        assert!(list.iter().any(|c| c.target == Target::LayoutChoice(i)));
+    }
+    // Down the column; OK picks, and the page stays open in the new design.
+    for (i, layout) in Layout::ALL.into_iter().enumerate().skip(1) {
+        press(&mut state, Direction::Down);
+        assert_eq!(state.focus, Target::LayoutChoice(i));
+        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(state.preferences.layout, layout);
+        assert_eq!(state.settings_level, SettingsLevel::Section);
+        let list = controls(&state);
+        assert!(list.iter().any(|c| c.target == Target::LayoutChoice(i)));
+    }
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::LayoutChoice(Layout::ALL.len() - 1));
+    // Up to the top, then the Back arrow; Back returns to the Layout row.
+    for _ in 0..Layout::ALL.len() {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(state.focus, Target::SettingsBack);
+    state.back();
+    assert_eq!(state.settings_level, SettingsLevel::Root);
+    assert_eq!(state.focus, Target::Sidebar(LAYOUT_SECTION));
+    // Opening it again starts on the design in use.
+    state.activate();
+    assert_eq!(state.focus, Target::LayoutChoice(Layout::Flip.index()));
+}
+
+#[test]
+fn every_layout_keeps_its_chrome_clear_of_the_page() {
+    use crate::layout::{DOCK_TOP, Layout, RAIL_LEFT, RAIL_WIDTH, is_chrome};
+    for layout in Layout::ALL {
+        for page in 0..3 {
+            let mut state = laid_out(layout);
+            state.open(page);
+            let controls = controls(&state);
+            let (chrome, body): (Vec<_>, Vec<_>) =
+                controls.iter().partition(|c| is_chrome(&c.target));
+            assert!(chrome.len() >= 4, "{layout:?}: tabs and a circle");
+            assert!(!body.is_empty(), "{layout:?} page {page} has content");
+            for c in &chrome {
+                assert!(
+                    c.rect.x >= 0. && c.rect.x + c.rect.w <= 1920.,
+                    "{layout:?}: {:?} leaves the screen",
+                    c.target
+                );
+                assert!(c.rect.y >= 0. && c.rect.y + c.rect.h <= 1080.);
+                // No visible part of a page control lies under a chrome
+                // button; the page has dissolved before it reaches the dock.
+                for b in &body {
+                    let bottom = layout.pointer_bottom(b.rect.y + b.rect.h);
+                    let apart = b.rect.x >= c.rect.x + c.rect.w
+                        || b.rect.x + b.rect.w <= c.rect.x
+                        || b.rect.y >= c.rect.y + c.rect.h
+                        || bottom <= c.rect.y;
+                    assert!(
+                        apart,
+                        "{layout:?} page {page}: {:?} overlaps {:?}",
+                        b.target, c.target
+                    );
+                }
+            }
+            match layout {
+                Layout::Rail => {
+                    assert!(
+                        chrome.iter().all(|c| c.rect.x >= RAIL_LEFT
+                            && c.rect.x + c.rect.w <= RAIL_LEFT + RAIL_WIDTH)
+                    );
+                }
+                Layout::Dock => assert!(chrome.iter().all(|c| c.rect.y >= DOCK_TOP)),
+                Layout::Classic | Layout::Flip => {
+                    assert!(chrome.iter().all(|c| c.rect.y + c.rect.h < 150.))
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_mirrored_bar_puts_inputs_left_and_tabs_right() {
+    use crate::layout::Layout;
+    let state = laid_out(Layout::Flip);
+    let tabs = rect_of(&state, &Target::Nav(0));
+    let tv = rect_of(&state, &Target::TvSettings);
+    assert_eq!(tv.x, crate::state::HOME_STRIP_LEFT);
+    assert!(tabs.x > 1200.);
+    let last = rect_of(&state, &Target::Nav(state.settings_nav_index()));
+    assert!((last.x + last.w - crate::state::HOME_STRIP_RIGHT).abs() < 9.);
+    let classic = laid_out(Layout::Classic);
+    assert!(rect_of(&classic, &Target::TvSettings).x > rect_of(&classic, &Target::Nav(0)).x);
+}
+
+#[test]
+fn rail_left_of_the_page_is_the_rail_and_right_returns() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Rail);
+    let netflix = first_app(&state);
+    state.focus = netflix.clone();
+    // Up no longer leads to the tabs: they are on the left now.
+    let above = {
+        press(&mut state, Direction::Up);
+        state.focus.clone()
+    };
+    assert!(!matches!(above, Target::Nav(_)));
+    state.focus = netflix.clone();
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0), "the screen edge is a wall");
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, netflix, "back where the remote came from");
+    // Down the rail opens the next tab; Up comes back.
+    press(&mut state, Direction::Left);
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Apps, Target::Nav(1))
+    );
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(1), "left of the first column");
+    press(&mut state, Direction::Up);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Home, Target::Nav(0))
+    );
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0), "the top of the rail is a wall");
+}
+
+#[test]
+fn rail_inputs_sit_below_the_tabs_and_are_walked_in_order() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Rail);
+    let last = state.settings_nav_index();
+    state.open(last);
+    assert_eq!(state.focus, Target::Nav(last));
+    let mut walked = vec![];
+    for _ in 0..8 {
+        let before = state.focus.clone();
+        press(&mut state, Direction::Down);
+        if state.focus == before {
+            break;
+        }
+        walked.push(state.focus.clone());
+    }
+    assert_eq!(state.page, Page::Settings, "the circles open no tab");
+    assert_eq!(walked.last(), Some(&Target::TvSettings));
+    assert!(
+        walked[..walked.len() - 1]
+            .iter()
+            .all(|t| matches!(t, Target::Input(_)))
+    );
+    // Each one below the one before.
+    let ys: Vec<f32> = walked.iter().map(|t| rect_of(&state, t).y).collect();
+    assert!(ys.windows(2).all(|w| w[1] > w[0]));
+    for _ in 0..walked.len() {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(state.focus, Target::Nav(last), "back on the open tab");
+    assert_eq!(state.page, Page::Settings);
+}
+
+#[test]
+fn dock_is_below_the_last_row_and_up_returns() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Dock);
+    state.open(1);
+    // Into the page from the dock is Up; Down is the screen edge.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Nav(1));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Filter(0), "nothing above the page");
+    // Down through every row of the grid, then once more: the dock.
+    let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+    for _ in 0..rows {
+        press(&mut state, Direction::Down);
+        assert!(matches!(state.focus, Target::App(_)));
+    }
+    let last = state.focus.clone();
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Nav(1));
+    assert_eq!(state.page, Page::Apps);
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, last, "back on the row the remote left");
+    // Along the dock: tabs switch, then the inputs, then the edge.
+    press(&mut state, Direction::Down);
+    press(&mut state, Direction::Left);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Home, Target::Nav(0))
+    );
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Nav(0));
+    let last_tab = state.settings_nav_index();
+    for _ in 0..last_tab {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(state.page, Page::Settings);
+    press(&mut state, Direction::Right);
+    assert!(matches!(state.focus, Target::Input(_) | Target::TvSettings));
+    assert_eq!(state.page, Page::Settings);
+    for _ in 0..8 {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(state.focus, Target::TvSettings, "the rightmost circle");
+}
+
+#[test]
+fn dock_never_hides_the_focused_card() {
+    use crate::layout::{DOCK_FADE, Layout};
+    let mut state = laid_out(Layout::Dock);
+    state.open(1);
+    press(&mut state, Direction::Up);
+    let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+    for row in 0..rows {
+        press(&mut state, Direction::Down);
+        // A frame later the page has scrolled the card into view.
+        let controls = controls(&state);
+        state.reveal_focus(&controls);
+        let rect = rect_of(&state, &state.focus.clone());
+        assert!(
+            rect.y + rect.h <= DOCK_FADE[0] + 0.5,
+            "row {row}: card ends at {}, the page fades from {}",
+            rect.y + rect.h,
+            DOCK_FADE[0]
+        );
+        assert!(rect.y >= 0., "row {row} is cut off at the top");
+    }
+}
+
+#[test]
+fn dock_and_rail_keep_the_page_scrolled_when_the_chrome_takes_focus() {
+    use crate::layout::Layout;
+    for layout in [Layout::Dock, Layout::Rail] {
+        let mut state = laid_out(layout);
+        state.open(1);
+        press(&mut state, layout.inward());
+        let rows = state.apps().len().div_ceil(crate::state::APPS_COLUMNS);
+        for _ in 0..rows {
+            press(&mut state, Direction::Down);
+            let controls = controls(&state);
+            state.reveal_focus(&controls);
+        }
+        let scrolled = state.scroll_goal;
+        assert!(
+            scrolled > 0.,
+            "{layout:?}: the grid is taller than the screen"
+        );
+        let app = state.focus.clone();
+        // Rail: walk to the first column, then off it.
+        for _ in 0..crate::state::APPS_COLUMNS {
+            if matches!(state.focus, Target::Nav(_)) {
+                break;
+            }
+            press(&mut state, layout.outward());
+        }
+        assert_eq!(state.focus, Target::Nav(1), "{layout:?}");
+        assert_eq!(
+            state.scroll_goal, scrolled,
+            "{layout:?}: the page stays put"
+        );
+        press(&mut state, layout.inward());
+        assert!(matches!(state.focus, Target::App(_)), "{layout:?}");
+        if layout == Layout::Dock {
+            assert_eq!(state.focus, app);
+        }
+        // Back still goes to the tab and scrolls the page to its top.
+        state.back();
+        assert_eq!(state.focus, Target::Nav(1));
+        assert_eq!(state.scroll_goal, 0.);
+    }
+}
+
+#[test]
+fn mirrored_bar_walks_from_the_tabs_left_to_the_inputs() {
+    use crate::layout::Layout;
+    let mut state = laid_out(Layout::Flip);
+    state.focus = first_app(&state);
+    for _ in 0..4 {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(state.focus, Target::Nav(0), "Up still reaches the bar");
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0));
+    // Left of the first tab are the inputs; the TV settings come last.
+    press(&mut state, Direction::Left);
+    assert!(matches!(state.focus, Target::Input(_)));
+    assert_eq!(state.page, Page::Home);
+    for _ in 0..8 {
+        press(&mut state, Direction::Left);
+    }
+    assert_eq!(state.focus, Target::TvSettings);
+    for _ in 0..8 {
+        press(&mut state, Direction::Right);
+        if matches!(state.focus, Target::Nav(_)) {
+            break;
+        }
+    }
+    assert_eq!(state.focus, Target::Nav(0), "back on the open tab");
+    press(&mut state, Direction::Right);
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Apps, Target::Nav(1))
+    );
+    let last = state.settings_nav_index();
+    for _ in 0..6 {
+        press(&mut state, Direction::Right);
+    }
+    assert_eq!(
+        (state.page, state.focus.clone()),
+        (Page::Settings, Target::Nav(last))
+    );
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Sidebar(0));
+    // A page control never jumps sideways onto the circles.
+    state.open(1);
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Filter(0));
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::Filter(0));
+}
+
+#[test]
+fn every_layout_reaches_every_tab_and_gets_back_into_each_page() {
+    use crate::layout::Layout;
+    for layout in [Layout::Rail, Layout::Dock, Layout::Flip] {
+        let mut state = laid_out(layout);
+        let (previous, next) = layout.along();
+        state.back();
+        assert_eq!(state.focus, Target::Nav(0), "{layout:?}");
+        for index in 1..=state.settings_nav_index() {
+            press(&mut state, next);
+            assert_eq!(state.focus, Target::Nav(index), "{layout:?}");
+            assert_eq!(state.page_index(), index, "{layout:?}");
+            press(&mut state, layout.inward());
+            assert!(
+                !crate::layout::is_chrome(&state.focus),
+                "{layout:?}: tab {index} has a way into its page"
+            );
+            state.back();
+            // Settings steps back through its own levels first.
+            for _ in 0..3 {
+                if matches!(state.focus, Target::Nav(_)) {
+                    break;
+                }
+                state.back();
+            }
+            assert_eq!(state.focus, Target::Nav(index), "{layout:?}");
+        }
+        for index in (0..state.settings_nav_index()).rev() {
+            press(&mut state, previous);
+            assert_eq!(state.page_index(), index, "{layout:?}");
+        }
+    }
+}
+
+// Home arrangements: each layout stacks Home's parts its own way, and the
+// remote walks them in that order.
+
+fn home_in(layout: crate::layout::Layout) -> State {
+    let mut state = laid_out(layout);
+    state.preferences.background = "video".into();
+    state.preferences.show_weather = true;
+    // One content row of films under Favorites.
+    state.preferences.stacks = vec![crate::stacks::StackConfig {
+        source: "jellyfin".into(),
+        ..Default::default()
+    }];
+    state.stack_items = vec![
+        (1..=8)
+            .map(|id| crate::stacks::StackItem {
+                title: format!("Film {id}"),
+                poster: None,
+                id,
+            })
+            .collect(),
+    ];
+    state
+}
+
+fn first_of(state: &State, band: crate::layout::HomeBand) -> crate::state::Rect {
+    controls(state)
+        .into_iter()
+        .filter(|c| crate::layout::home_band(&c.target) == Some(band))
+        .map(|c| c.rect)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap_or_else(|| panic!("no {band:?} on Home"))
+}
+
+#[test]
+fn every_home_has_its_parts_where_its_layout_puts_them() {
+    use crate::layout::{DOCK_FADE, HomeBand, Layout};
+    let classic = home_in(Layout::Classic);
+    let classic_apps = first_of(&classic, HomeBand::Apps);
+    let classic_info = first_of(&classic, HomeBand::Info);
+    assert!(classic_info.y < classic_apps.y);
+
+    // The shelf: apps first, then the headline and widgets, then the rows.
+    let shelf = home_in(Layout::Rail);
+    let apps = first_of(&shelf, HomeBand::Apps);
+    let info = first_of(&shelf, HomeBand::Info);
+    let rows = first_of(&shelf, HomeBand::Stacks);
+    assert!(apps.y < 260., "favorites sit at the top: {}", apps.y);
+    assert!(first_of(&shelf, HomeBand::Live).y < apps.y);
+    assert!(apps.y + apps.h < info.y, "the headline follows the apps");
+    assert!(info.y < rows.y);
+    assert!(rows.y < 1000., "a content row shows without scrolling");
+
+    // The stage: widgets high in the corner, the rest low above the dock.
+    let stage = home_in(Layout::Dock);
+    let widget = controls(&stage)
+        .into_iter()
+        .find(|c| matches!(c.target, Target::Widget(_)))
+        .expect("the weather widget")
+        .rect;
+    let caption = rect_of(&stage, &Target::VideoTitle);
+    let apps = first_of(&stage, HomeBand::Apps);
+    assert!(widget.y < 200., "widgets keep the top: {}", widget.y);
+    assert!(widget.x > 960.);
+    assert!(caption.y > widget.y + widget.h);
+    assert!(
+        apps.y > classic_apps.y,
+        "favorites sit lower than on the classic Home"
+    );
+    assert!(apps.y + apps.h <= DOCK_FADE[0], "and clear of the dock");
+
+    // The mirror: widgets left, headline and the Favorites title right.
+    let mirror = home_in(Layout::Flip);
+    let widget = controls(&mirror)
+        .into_iter()
+        .find(|c| matches!(c.target, Target::Widget(_)))
+        .unwrap()
+        .rect;
+    assert_eq!(widget.x, crate::state::HOME_STRIP_LEFT);
+    let caption = rect_of(&mirror, &Target::VideoTitle);
+    assert!(caption.x > 960., "the caption sits on the right");
+    let live = first_of(&mirror, HomeBand::Live);
+    assert!(live.x > first_of(&classic, HomeBand::Live).x);
+    assert_eq!(
+        first_of(&mirror, HomeBand::Apps).y,
+        classic_apps.y,
+        "the rows keep their place"
+    );
+}
+
+#[test]
+fn the_mirror_sets_the_headline_against_the_right_edge() {
+    use crate::layout::Layout;
+    let state = home_in(Layout::Flip);
+    let scene = scene(&state);
+    let assets = view::Assets {
+        root: PathBuf::new(),
+        version: "test".into(),
+        metrics: BTreeMap::new(),
+        catalog_metrics: BTreeMap::new(),
+        active_heading: std::cell::Cell::new(crate::typography::HeadingFont::default()),
+        active_text: std::cell::Cell::new(crate::typography::TextFont::default()),
+        heading_pct: std::cell::Cell::new(state.preferences.heading_size_pct),
+        text_pct: std::cell::Cell::new(state.preferences.text_size_pct),
+        artwork: crate::app_artwork::Service::new(false),
+    };
+    // The biggest type on Home is the headline; every line of it ends at
+    // the right edge of the page.
+    let size = scene
+        .draw
+        .iter()
+        .filter_map(|d| match d {
+            crate::renderer::Draw::Text(_, _, style, _, _) => Some(style.size),
+            _ => None,
+        })
+        .fold(0., f32::max);
+    let mut ends: BTreeMap<i32, f32> = BTreeMap::new();
+    for d in &scene.draw {
+        if let crate::renderer::Draw::Text(value, r, style, _, _) = d
+            && style.size == size
+        {
+            let end = r.x + assets.width(value, *style);
+            let line = ends.entry(r.y.round() as i32).or_insert(0.);
+            *line = line.max(end);
+        }
+    }
+    assert!(!ends.is_empty());
+    for end in ends.values() {
+        assert!(
+            (end - crate::state::HOME_STRIP_RIGHT).abs() < 1.,
+            "a headline line ends at {end}"
+        );
+    }
+}
+
+#[test]
+fn the_shelf_walks_down_from_the_apps_to_the_headline_to_the_rows() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Rail);
+    state.focus = first_app(&state);
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "the switch buttons sit above"
+    );
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "nothing above them"
+    );
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "then the headline band"
+    );
+    // The rightmost app leads down to the widget under it.
+    state.focus = Target::App(state.apps()[5].id.clone());
+    press(&mut state, Direction::Down);
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Down);
+    assert!(
+        matches!(state.focus, Target::StackCard(0, _)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Up);
+    assert_eq!(home_band(&state.focus), Some(HomeBand::Info));
+    // Up through the widget and its label, then the apps.
+    for _ in 0..3 {
+        if matches!(state.focus, Target::App(_)) {
+            break;
+        }
+        press(&mut state, Direction::Up);
+    }
+    assert!(matches!(state.focus, Target::App(_)), "{:?}", state.focus);
+}
+
+#[test]
+fn the_stage_walks_down_to_the_dock_and_up_to_the_corner_widgets() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Dock);
+    state.focus = Target::App(state.apps()[5].id.clone());
+    let app = state.focus.clone();
+    press(&mut state, Direction::Up);
+    assert!(matches!(state.focus, Target::LiveInput(_)));
+    press(&mut state, Direction::Up);
+    assert_eq!(home_band(&state.focus), Some(HomeBand::Info));
+    // From the right the widget in the corner is the nearer one.
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+    for _ in 0..3 {
+        press(&mut state, Direction::Up);
+    }
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "the corner is the top: {:?}",
+        state.focus
+    );
+    for _ in 0..3 {
+        if matches!(state.focus, Target::LiveInput(_)) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert!(
+        matches!(state.focus, Target::LiveInput(_)),
+        "{:?}",
+        state.focus
+    );
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    state.focus = app;
+    // Down through the rows, then the dock.
+    for _ in 0..12 {
+        press(&mut state, Direction::Down);
+        let controls = controls(&state);
+        state.reveal_focus(&controls);
+        if matches!(state.focus, Target::Nav(_)) {
+            break;
+        }
+    }
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Up);
+    assert!(
+        matches!(state.focus, Target::StackCard(..)),
+        "back on the last row"
+    );
+}
+
+#[test]
+fn the_mirror_walks_from_the_bar_to_the_widgets_and_headline() {
+    use crate::layout::{HomeBand, Layout, home_band};
+    let mut state = home_in(Layout::Flip);
+    state.back();
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Down);
+    assert_eq!(
+        home_band(&state.focus),
+        Some(HomeBand::Info),
+        "below the bar comes the headline band, not the apps"
+    );
+    let first = state.focus.clone();
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::Nav(0));
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, first, "back where it left");
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::LiveInput(_)));
+    press(&mut state, Direction::Down);
+    assert!(matches!(state.focus, Target::App(_)));
+    // The leftmost app leads up to the widget on the left.
+    state.focus = first_app(&state);
+    for _ in 0..2 {
+        press(&mut state, Direction::Up);
+    }
+    assert!(
+        matches!(state.focus, Target::Widget(_)),
+        "{:?}",
+        state.focus
+    );
+}
+
+#[test]
+fn system_has_a_debug_log_switch_that_the_remote_reaches() {
+    use crate::state::{SYSTEM_SECTION, SettingsLevel};
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    state.focus = Target::Sidebar(SYSTEM_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    // Down the System rows to the last one.
+    for _ in 0..6 {
+        if state.focus == Target::Setting(11) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert_eq!(state.focus, Target::Setting(11));
+    assert!(!state.preferences.debug_log);
+    assert_eq!(state.activate(), vec![Effect::Save, Effect::DebugLog(true)]);
+    assert!(state.preferences.debug_log);
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Save, Effect::DebugLog(false)]
+    );
+    // The switch is saved with the other settings.
+    state.preferences.debug_log = true;
+    let saved = serde_json::to_value(&state.preferences).unwrap();
+    assert_eq!(saved["debug_log"], true);
+    let back: Preferences = serde_json::from_value(saved).unwrap();
+    assert!(back.debug_log);
+    // Root features sit below the five System rows, never on them.
+    state.root = Some(crate::platform::RootStatus::default());
+    let list = controls(&state);
+    let debug = rect_of(&state, &Target::Setting(11));
+    let wake = list
+        .iter()
+        .find(|c| c.target == Target::Setting(9))
+        .unwrap()
+        .rect;
+    assert!(wake.y >= debug.y + debug.h, "{wake:?} under {debug:?}");
+}
+
+#[test]
+fn a_missing_companion_app_is_recognised_in_every_webos_wording() {
+    use crate::platform::player_not_installed;
+    // webOS 6, from a debug log: the launch service answers just "not exist".
+    assert!(player_not_installed(
+        "luna://com.webos.applicationManager/launch: not exist"
+    ));
+    assert!(player_not_installed("Application is not installed"));
+    assert!(player_not_installed("unknown application"));
+    assert!(!player_not_installed("Permission denied"));
+}
+
+fn jellyfin_home(with_app: bool) -> State {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    state.preferences.reduced_motion = true;
+    if !with_app {
+        state.preferences.hidden.push("org.jellyfin.webos".into());
+    }
+    state.preferences.jellyfin = crate::jellyfin::JellyfinLink {
+        server: "http://jf:8096".into(),
+        user_id: "u".into(),
+        token: "t".into(),
+        device_id: "d".into(),
+        ..Default::default()
+    };
+    let films = |n: i64| -> Vec<crate::stacks::StackItem> {
+        (1..=n)
+            .map(|id| crate::stacks::StackItem {
+                title: format!("Film {id}"),
+                poster: None,
+                id,
+            })
+            .collect()
+    };
+    state.preferences.stacks = vec![
+        crate::stacks::StackConfig {
+            source: "moonlight".into(),
+            name: "Games".into(),
+            ..Default::default()
+        },
+        crate::stacks::StackConfig {
+            source: "jellyfin".into(),
+            name: "Continue watching".into(),
+            ..Default::default()
+        },
+    ];
+    state.stack_items = vec![films(3), films(6)];
+    state
+}
+
+fn row_names(state: &State) -> Vec<usize> {
+    (0..4)
+        .filter_map(|r| crate::stacks::row_stack(state, r))
+        .collect()
+}
+
+#[test]
+fn luma_adds_a_jellyfin_tile_whose_rows_show_only_while_it_is_selected() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    let apps: Vec<String> = state.apps().iter().map(|a| a.id.clone()).collect();
+    assert_eq!(
+        apps.last().map(String::as_str),
+        Some(JELLYFIN_TILE),
+        "last in the row"
+    );
+    assert_eq!(
+        state.apps().last().unwrap().brand,
+        "jellyfin",
+        "with Jellyfin's logo"
+    );
+    // On Netflix: the Games row, no Jellyfin row.
+    state.focus = first_app(&state);
+    let _ = controls(&state);
+    assert_eq!(row_names(&state), vec![0]);
+    // Left from the first tile wraps to the Jellyfin tile: its row appears,
+    // first, right under Favorites; Games follows.
+    press(&mut state, Direction::Left);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    assert!(
+        controls(&state)
+            .iter()
+            .any(|c| matches!(c.target, Target::StackCard(0, _)))
+    );
+    // Down goes straight into it.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::StackCard(0, 0));
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    // OK goes down into it too; it stays while the remote is there.
+    assert_eq!(state.activate(), vec![]);
+    assert_eq!(state.focus, Target::StackCard(0, 0));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, Target::StackCard(0, 1));
+    // Down to Games and back up: still there; Up again returns to the
+    // Jellyfin tile, not the app above the card.
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::StackCard(1, 0));
+    assert_eq!(row_names(&state), vec![1, 0]);
+    press(&mut state, Direction::Up);
+    press(&mut state, Direction::Up);
+    assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()));
+    // Another tile: the row goes away again.
+    press(&mut state, Direction::Right);
+    assert_eq!(state.focus, first_app(&state));
+    assert_eq!(row_names(&state), vec![0]);
+    // Luma's own tile has no app options.
+    state.focus = Target::App(JELLYFIN_TILE.into());
+    state.options();
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn the_jellyfin_app_tile_stands_for_jellyfin_when_it_is_a_favorite() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(true);
+    let mut favorites = state.preferences.favorites(&state.inventory.apps);
+    favorites.push("org.jellyfin.webos".into());
+    state.preferences.favorites = Some(favorites);
+    let apps: Vec<String> = state.apps().iter().map(|a| a.id.clone()).collect();
+    assert!(apps.contains(&"org.jellyfin.webos".to_owned()));
+    assert!(
+        !apps.contains(&JELLYFIN_TILE.to_owned()),
+        "no second Jellyfin tile"
+    );
+    state.focus = Target::App("org.jellyfin.webos".into());
+    let _ = controls(&state);
+    assert_eq!(row_names(&state), vec![1, 0]);
+    // OK still opens the app itself.
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("org.jellyfin.webos".into())]
+    );
+    state.launching = false;
+    state.focus = first_app(&state);
+    assert_eq!(row_names(&state), vec![0]);
+}
+
+#[test]
+fn without_jellyfin_signed_in_there_is_no_tile() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    state.preferences.jellyfin = Default::default();
+    assert!(state.apps().iter().all(|a| a.id != JELLYFIN_TILE));
+    assert_eq!(state.jellyfin_tile_id(), None);
+}
+
+#[test]
+fn every_layout_returns_up_from_the_jellyfin_rows_to_the_jellyfin_tile() {
+    use crate::layout::Layout;
+    use crate::state::JELLYFIN_TILE;
+    for layout in [Layout::Rail, Layout::Dock, Layout::Flip] {
+        let mut state = jellyfin_home(false);
+        state.preferences.layout = layout;
+        state.focus = Target::App(JELLYFIN_TILE.into());
+        let _ = controls(&state);
+        assert_eq!(state.activate(), vec![], "{layout:?}");
+        assert_eq!(state.focus, Target::StackCard(0, 0), "{layout:?}");
+        for _ in 0..4 {
+            if matches!(state.focus, Target::App(_)) {
+                break;
+            }
+            press(&mut state, Direction::Up);
+        }
+        assert_eq!(state.focus, Target::App(JELLYFIN_TILE.into()), "{layout:?}");
+    }
+}
+
+#[test]
+fn the_jellyfin_tile_moves_like_an_app_and_keeps_its_place() {
+    use crate::state::JELLYFIN_TILE;
+    let mut state = jellyfin_home(false);
+    let tile = Target::App(JELLYFIN_TILE.into());
+    let place = |state: &State| state.apps().iter().position(|a| a.id == JELLYFIN_TILE);
+    let last = state.apps().len() - 1;
+    assert_eq!(place(&state), Some(last));
+    // Hold OK on it, then Left twice, then OK: two places further left.
+    state.focus = tile.clone();
+    let _ = state.hold();
+    assert_eq!(state.moving.as_deref(), Some(JELLYFIN_TILE));
+    assert_eq!(press(&mut state, Direction::Left), vec![Effect::Save]);
+    assert_eq!(press(&mut state, Direction::Left), vec![Effect::Save]);
+    let _ = state.activate();
+    assert!(state.moving.is_none());
+    assert_eq!(place(&state), Some(last - 2));
+    // Saved with the favorites, so it survives a restart.
+    let saved = state.preferences.favorites.clone().unwrap();
+    assert!(saved.iter().any(|id| id == JELLYFIN_TILE));
+    let again =
+        serde_json::from_value::<Preferences>(serde_json::to_value(&state.preferences).unwrap())
+            .unwrap();
+    assert_eq!(again.favorites, Some(saved));
+    // Still the Jellyfin tile: selecting it shows its row.
+    state.focus = tile;
+    let _ = controls(&state);
+    assert!(state.jellyfin_rows_shown());
+}
+
+#[test]
+fn selecting_jellyfin_hides_the_headline_and_widgets_and_lifts_favorites() {
+    use crate::layout::Layout;
+    use crate::state::JELLYFIN_TILE;
+    for layout in Layout::ALL {
+        let mut state = jellyfin_home(false);
+        state.preferences.background = "video".into();
+        state.preferences.show_weather = true;
+        state.preferences.layout = layout;
+        let first = first_app(&state);
+        state.focus = first.clone();
+        let before = controls(&state);
+        let app_y = |list: &[crate::state::Control]| {
+            list.iter().find(|c| c.target == first).unwrap().rect.y
+        };
+        let info = |list: &[crate::state::Control]| {
+            list.iter()
+                .filter(|c| {
+                    crate::layout::home_band(&c.target) == Some(crate::layout::HomeBand::Info)
+                })
+                .count()
+        };
+        assert!(
+            info(&before) > 0,
+            "{layout:?}: headline and widgets on Home"
+        );
+        state.focus = Target::App(JELLYFIN_TILE.into());
+        let _ = controls(&state); // the selection is noticed while drawing
+        let after = controls(&state);
+        assert_eq!(info(&after), 0, "{layout:?}: nothing of them to focus");
+        if layout == Layout::Rail {
+            assert_eq!(
+                app_y(&after),
+                app_y(&before),
+                "the shelf is already at the top"
+            );
+        } else {
+            assert!(
+                app_y(&after) < app_y(&before) - 100.,
+                "{layout:?}: Favorites rise"
+            );
+            // Under the clock; the dock keeps its clock at the bottom.
+            let top = if layout == Layout::Dock { 100. } else { 150. };
+            assert!(app_y(&after) > top, "{layout:?}: still under the clock");
+        }
+        // The Jellyfin row sits right under Favorites, on screen.
+        let card = after
+            .iter()
+            .find(|c| c.target == Target::StackCard(0, 0))
+            .unwrap_or_else(|| panic!("{layout:?}: Jellyfin row on screen"))
+            .rect;
+        assert!(
+            card.y > app_y(&after) && card.y + card.h < 1080.,
+            "{layout:?}"
+        );
+        // Back on another tile: all of it returns.
+        state.focus = first.clone();
+        let _ = controls(&state);
+        assert!(info(&controls(&state)) > 0, "{layout:?}");
+    }
+}
+
+#[test]
+fn a_click_beside_everything_clears_home_and_any_key_brings_it_back() {
+    let mut state = ready();
+    state.preferences.background = "dunes".into();
+    assert!(state.home_can_clear());
+    state.clear_home();
+    assert!(state.ambient_on(), "Home clears to the wallpaper");
+    // While clear, nothing on Home takes a click.
+    assert!(controls(&state).is_empty());
+    // A key (or another click) brings everything back.
+    state.leave_ambient();
+    assert!(!state.ambient.is_some_and(|(on, _)| on));
+    // Never over a page, a title card or while apps are being moved.
+    state.open(1);
+    assert!(!state.home_can_clear());
+    state.clear_home();
+    assert!(!state.ambient.is_some_and(|(on, _)| on));
+    state.open(0);
+    state.moving = Some("netflix".into());
+    assert!(!state.home_can_clear());
+}
+
+#[test]
+fn system_sets_whether_the_tv_plays_truehd_and_dts() {
+    use crate::model::AudioSupport;
+    use crate::state::{SYSTEM_SECTION, SettingsLevel};
+    let mut state = ready();
+    state.preferences.reduced_motion = true;
+    state.open(state.settings_nav_index());
+    state.focus = Target::Sidebar(SYSTEM_SECTION);
+    state.activate();
+    assert_eq!(state.settings_level, SettingsLevel::Section);
+    for _ in 0..8 {
+        if state.focus == Target::Setting(12) {
+            break;
+        }
+        press(&mut state, Direction::Down);
+    }
+    assert_eq!(state.focus, Target::Setting(12), "TrueHD after Debug Log");
+    assert_eq!(
+        state.preferences.truehd,
+        AudioSupport::Auto,
+        "the TV is asked first"
+    );
+    for want in [AudioSupport::On, AudioSupport::Off, AudioSupport::Auto] {
+        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(state.preferences.truehd, want);
+    }
+    press(&mut state, Direction::Down);
+    assert_eq!(state.focus, Target::Setting(13));
+    state.activate();
+    assert_eq!(state.preferences.dts, AudioSupport::On);
+    // Saved as words the player reads.
+    let saved = serde_json::to_value(&state.preferences).unwrap();
+    assert_eq!(saved["truehd"], "auto");
+    assert_eq!(saved["dts"], "on");
+    // Root features stay below every System row.
+    state.root = Some(crate::platform::RootStatus::default());
+    let dts = rect_of(&state, &Target::Setting(13));
+    let wake = controls(&state)
+        .into_iter()
+        .find(|c| c.target == Target::Setting(9))
+        .unwrap()
+        .rect;
+    assert!(wake.y >= dts.y + dts.h, "{wake:?} under {dts:?}");
+}
+
+#[test]
+fn auto_resolution_lowered_by_the_launch_bug_gets_1440p_back_once() {
+    let mut old: Preferences =
+        serde_json::from_str(r#"{"ui_resolution":"auto","auto_ui_cap":"1080p"}"#).unwrap();
+    old.sanitize();
+    assert_eq!(old.auto_ui_cap, crate::model::UiResolution::Qhd);
+    let mut again: Preferences = serde_json::from_str(
+        &serde_json::to_string(&Preferences {
+            auto_ui_cap: crate::model::UiResolution::Hd,
+            ..old
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    again.sanitize();
+    assert_eq!(again.auto_ui_cap, crate::model::UiResolution::Hd);
+}
+
+#[test]
+fn uninstall_needs_a_hidden_removable_app_and_a_second_press() {
+    let mut state = ready();
+    let id = "netflix".to_owned();
+    // Not hidden: no uninstall, even when the TV would allow it.
+    state
+        .inventory
+        .apps
+        .iter_mut()
+        .find(|app| app.id == id)
+        .unwrap()
+        .removable = true;
+    assert!(!state.can_uninstall(&id));
+    state.preferences.hidden.push(id.clone());
+    assert!(state.can_uninstall(&id));
+    state.focus = Target::App(id.clone());
+    state.options();
+    state.focus = Target::Option(2);
+    // First press only arms it.
+    assert!(state.activate().is_empty());
+    assert_eq!(state.uninstall_armed.as_deref(), Some("netflix"));
+    assert!(state.overlay.is_some());
+    // Second press uninstalls and closes the menu.
+    assert_eq!(state.activate(), vec![Effect::Uninstall(id.clone())]);
+    assert!(state.overlay.is_none());
+    assert!(state.uninstall_armed.is_none());
+    // A refusal keeps the app; success removes it from Luma's lists.
+    assert!(!state.uninstalled(&id, Err("not allowed".into())));
+    assert!(state.inventory.apps.iter().any(|app| app.id == id));
+    assert!(state.uninstalled(&id, Ok(())));
+    assert!(!state.inventory.apps.iter().any(|app| app.id == id));
+    assert!(!state.preferences.hidden.contains(&id));
+    // An app the TV will not remove never offers it.
+    let other = state.inventory.apps[0].id.clone();
+    state.preferences.hidden.push(other.clone());
+    assert!(!state.can_uninstall(&other));
+}
+
+#[test]
+fn app_list_reads_removable_and_developer_installs() {
+    let apps = crate::platform::normalize_apps(&json!([
+        {"id": "com.example.store", "title": "Store", "removable": true,
+         "folderPath": "/media/cryptofs/apps/usr/palm/applications/com.example.store"},
+        {"id": "com.example.dev", "title": "Dev", "removable": true,
+         "folderPath": "/media/developer/apps/usr/palm/applications/com.example.dev"},
+        {"id": "com.example.fixed", "title": "Fixed", "removable": false},
+        {"id": "com.example.system", "title": "System", "removable": true, "systemApp": true}
+    ]))
+    .unwrap();
+    let get = |id: &str| apps.iter().find(|app| app.id == id).unwrap();
+    assert!(get("com.example.store").removable && !get("com.example.store").developer);
+    assert!(get("com.example.dev").removable && get("com.example.dev").developer);
+    assert!(!get("com.example.fixed").removable);
+    assert!(!get("com.example.system").removable);
+}
+
+#[test]
+fn save_to_usb_drive_toggles_from_the_wallpaper_menu() {
+    let mut state = ready();
+    state.open(2);
+    state.focus = Target::Sidebar(1);
+    state.activate();
+    assert!(!state.preferences.usb_wallpapers);
+    state.focus = Target::WallpaperMenu(4);
+    state.direction(Direction::Up, &controls(&state));
+    assert_eq!(state.focus, Target::WallpaperMenu(5));
+    let effects = state.activate();
+    assert!(state.preferences.usb_wallpapers);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Save)));
+    state.activate();
+    assert!(!state.preferences.usb_wallpapers);
 }

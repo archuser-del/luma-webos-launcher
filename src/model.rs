@@ -41,6 +41,13 @@ pub struct App {
     pub category: String,
     #[serde(skip)]
     pub icon: Option<crate::app_artwork::Source>,
+    /// The TV lets this app be uninstalled (its app list says "removable").
+    #[serde(skip)]
+    pub removable: bool,
+    /// Installed in developer mode or by Homebrew Channel (/media/developer):
+    /// removed through the install service's developer method.
+    #[serde(skip)]
+    pub developer: bool,
 }
 
 impl App {
@@ -66,6 +73,8 @@ impl App {
             brand: brand.into(),
             category: category.into(),
             icon: None,
+            removable: false,
+            developer: false,
         }
     }
 }
@@ -79,6 +88,40 @@ pub struct Input {
     /// The source is sending a picture (eim getHDMISignalInfo); a sleeping
     /// device keeps the cable's 5 V but stops the signal.
     pub signal: Option<bool>,
+}
+
+/// Can the TV decode an audio codec: ask it, or overrule its answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioSupport {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl AudioSupport {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::On,
+            Self::On => Self::Off,
+            Self::Off => Self::Auto,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Ask the TV",
+            Self::On => "TV plays it",
+            Self::Off => "Convert it",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -246,12 +289,23 @@ pub struct Preferences {
     /// because an app listed here is never hidden automatically again.
     pub lg_auto_hidden: BTreeSet<String>,
     pub background: String,
+    /// Where the tabs, inputs and clock sit (Settings › Layout).
+    pub layout: crate::layout::Layout,
+    /// Settings › System › Debug Log.
+    pub debug_log: bool,
+    /// Settings › System: whether this TV decodes Dolby TrueHD and DTS in
+    /// films. webOS rarely says so itself, so it can be set by hand.
+    pub truehd: AudioSupport,
+    pub dts: AudioSupport,
     pub video_index: usize,
     /// Bitset for Apple, Amazon, Aerial Community, RobinFrcd.
     pub video_sources_mask: u8,
     pub video_excluded: BTreeSet<String>,
     pub video_shuffle: bool,
     pub video_shuffle_seed: u64,
+    /// Settings › Wallpaper › Save to USB Drive: keep selected clips on a
+    /// USB drive and play them from there.
+    pub usb_wallpapers: bool,
     pub show_home_names: bool,
     pub show_app_names: bool,
     pub hour_24: bool,
@@ -276,9 +330,15 @@ pub struct Preferences {
     pub ui_resolution: UiResolution,
     /// Last stable Auto ceiling for this particular TV. Lowered only; no oscillation.
     pub auto_ui_cap: UiResolution,
+    /// 2.6.9 lowered Auto to 1080p on the slow frames of a player launch;
+    /// preferences from before 2.6.11 (0 here) get 1440p back once.
+    #[serde(default)]
+    pub auto_ui_cap_rev: u8,
 
     pub greeting_style: GreetingStyle,
     pub weather_day_history: Vec<DayRecord>,
+    /// Fingerprints of recently shown Tech headlines, so they do not repeat.
+    pub weather_phrase_seen: Vec<u32>,
     pub input_modes: BTreeMap<String, InputMode>,
     /// Custom names by input app ID; the TV's port and label stay visible as detail.
     pub input_names: BTreeMap<String, String>,
@@ -319,11 +379,16 @@ impl Default for Preferences {
             lg_auto_hidden: BTreeSet::new(),
             // Video wallpapers (bundled aerials and the viewer's own uploads).
             background: "video".into(),
+            layout: crate::layout::Layout::default(),
+            debug_log: false,
+            truehd: AudioSupport::Auto,
+            dts: AudioSupport::Auto,
             video_index: 0,
             video_sources_mask: crate::video_catalog::ALL_SOURCES,
             video_excluded: BTreeSet::new(),
             video_shuffle: true,
             video_shuffle_seed: 0,
+            usb_wallpapers: false,
             show_home_names: false,
             show_app_names: true,
             hour_24: false,
@@ -340,9 +405,11 @@ impl Default for Preferences {
             screensaver_minutes: 10,
             ui_resolution: UiResolution::Qhd,
             auto_ui_cap: UiResolution::Uhd,
+            auto_ui_cap_rev: 1,
 
             greeting_style: GreetingStyle::Rude,
             weather_day_history: Vec::new(),
+            weather_phrase_seen: Vec::new(),
             input_modes: BTreeMap::new(),
             input_names: BTreeMap::new(),
             show_weather: true,
@@ -465,6 +532,12 @@ impl Preferences {
     pub fn sanitize(&mut self) {
         if self.auto_ui_cap == UiResolution::Auto {
             self.auto_ui_cap = UiResolution::Uhd;
+        }
+        if self.auto_ui_cap_rev < 1 {
+            if self.auto_ui_cap == UiResolution::Hd {
+                self.auto_ui_cap = UiResolution::Qhd;
+            }
+            self.auto_ui_cap_rev = 1;
         }
         self.heading_size_pct = self.heading_size_pct.clamp(85, 170);
         self.text_size_pct = self.text_size_pct.clamp(90, 150);
@@ -613,7 +686,12 @@ pub fn demo_inventory() -> Inventory {
             ("com.webos.app.roomconnect", "룸투룸 셰어"),
         ]
         .into_iter()
-        .map(|(id, title)| App::new(id, title))
+        .map(|(id, title)| {
+            let mut app = App::new(id, title);
+            // The desktop preview can show Uninstall for the non-LG apps.
+            app.removable = !id.starts_with("com.webos.");
+            app
+        })
         .collect(),
         inputs: vec![
             Input {

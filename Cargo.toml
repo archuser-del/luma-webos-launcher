@@ -1,6 +1,6 @@
 [package]
 name = "luma"
-version = "2.4.0"
+version = "2.9.6"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -9,7 +9,7 @@ license = "MIT"
 description = "A remote-first native launcher for rooted LG webOS TVs"
 
 [workspace]
-members = ["vector-geometry", "tools/vector-assets"]
+members = ["vector-geometry", "tools/vector-assets", "tv-helper"]
 resolver = "3"
 
 [features]

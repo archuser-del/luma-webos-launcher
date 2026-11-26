@@ -39,13 +39,20 @@ pub const SCENE_FIRED: f32 = 2.;
 pub const SMART_REVEAL_TOP: f32 = 186.;
 pub const SYSTEM_SECTION: usize = 5;
 pub const APPEARANCE_SECTION: usize = 6;
-pub const SECTION_COUNT: usize = 8;
+pub const SECTION_COUNT: usize = 9;
 /// Settings › Stacks (rows of media on Home).
 pub const STACKS_SECTION: usize = 7;
 /// Root order: Appearance and Stacks follow Wallpaper; other IDs keep their mapping.
-pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 7, 2, 3, 4, 5];
+/// Settings › Layout: the designs for the bars and for Home.
+pub const LAYOUT_SECTION: usize = 8;
+pub const SECTION_ORDER: [usize; SECTION_COUNT] = [0, 1, 6, 8, 7, 2, 3, 4, 5];
 pub const APPS_COLUMNS: usize = 6;
 pub const HOME_STRIP_LEFT: f32 = 84.;
+/// Seconds Home takes to turn to Jellyfin and back.
+pub const JELLYFIN_GLIDE: f32 = 0.32;
+/// Luma's own Jellyfin tile in Favorites. Saved in the favorites list like
+/// an app, so it can be moved; no app is installed under this id.
+pub const JELLYFIN_TILE: &str = "com.archbtw.luma.jellyfin";
 pub const HOME_STRIP_RIGHT: f32 = 1836.;
 pub const HOME_VIEWPORT_LEFT: f32 = 0.;
 pub const HOME_VIEWPORT_RIGHT: f32 = 1920.;
@@ -71,6 +78,9 @@ pub enum Target {
     TvSettings,
     App(String),
     Input(String),
+    /// Home: the large "PlayStation 5 is on · Switch" button of an HDMI
+    /// input that has a picture right now.
+    LiveInput(String),
     Browse,
     Filter(usize),
     Search,
@@ -102,6 +112,8 @@ pub enum Target {
     PhraseSubtitleSize,
     UiSounds,
     Screensaver,
+    /// Settings › Layout: one of the designs.
+    LayoutChoice(usize),
     UiResolutionOpen,
     UiResolutionPick(usize),
     HeadingFontPick(usize),
@@ -335,7 +347,7 @@ pub enum TextField {
     Library,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Up,
     Down,
@@ -345,6 +357,10 @@ pub enum Direction {
 
 #[derive(Debug, PartialEq)]
 pub enum Effect {
+    /// Settings › System › Debug Log switched on or off.
+    DebugLog(bool),
+    /// Uninstall this app (from the app menu of a hidden app).
+    Uninstall(String),
     Save,
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
@@ -528,6 +544,19 @@ pub struct State {
     pub library_closing: Option<(Box<crate::library::Library>, Instant)>,
     pub page: Page,
     pub focus: Target,
+    /// The control the remote left for the tabs or inputs; the arrow back
+    /// into the page returns to it (layouts other than the classic bar).
+    pub chrome_return: Option<Target>,
+    /// The Favorites tile last selected on Home. The Jellyfin rows show
+    /// only while it is the Jellyfin tile.
+    pub home_pick: Option<String>,
+    /// Luma's own Jellyfin tile, for when the Jellyfin app is not a favorite.
+    jellyfin_tile: App,
+    /// Jellyfin focus on Home: (on, since, where the glide started). Kept in
+    /// a Cell because drawing notices the change.
+    jellyfin_mode: std::cell::Cell<(bool, Instant, f32)>,
+    /// The debug log file this run writes, while the log is on.
+    pub debug_log_file: Option<String>,
     pub inventory: Inventory,
     pub preferences: Preferences,
     pub accent_transition: Option<(u32, u32, Instant)>,
@@ -637,6 +666,8 @@ pub struct State {
     pub ha_detail: Option<String>,
     /// The camera whose long-press menu (Hide/Show camera) is open.
     pub ha_camera_menu: Option<String>,
+    /// The app whose "Uninstall" was pressed once: a second press confirms.
+    pub uninstall_armed: Option<String>,
     /// The scene just run from the tab and when, for a short confirmation.
     pub ha_scene_fired: Option<(String, Instant)>,
     /// Open title card, and one fading out after closing.
@@ -656,6 +687,16 @@ pub struct State {
     pub widget_add: (crate::widgets::Kind, crate::widgets::Size),
     /// Where focus returns when a page opened from a widget closes.
     pub widget_return: Option<Target>,
+}
+
+/// The live input buttons on screen, left to right.
+fn live_controls(controls: &[Control]) -> Vec<Target> {
+    let mut live: Vec<&Control> = controls
+        .iter()
+        .filter(|c| matches!(c.target, Target::LiveInput(_)))
+        .collect();
+    live.sort_by(|a, b| a.rect.x.total_cmp(&b.rect.x));
+    live.into_iter().map(|c| c.target.clone()).collect()
 }
 
 impl State {
@@ -689,6 +730,17 @@ impl State {
         Self {
             page: Page::Home,
             focus: Target::Nav(0),
+            chrome_return: None,
+            home_pick: None,
+            jellyfin_mode: std::cell::Cell::new((false, Instant::now(), 0.)),
+            jellyfin_tile: {
+                let mut tile = App::new(JELLYFIN_TILE, "Jellyfin");
+                // Jellyfin's logo and colours, as on the Jellyfin app's tile.
+                tile.brand = "jellyfin".into();
+                tile.category = "Streaming".into();
+                tile
+            },
+            debug_log_file: None,
             inventory: Inventory::default(),
             preferences,
             accent_transition: None,
@@ -821,6 +873,7 @@ impl State {
             ha_discovery_since: Instant::now(),
             ha_detail: None,
             ha_camera_menu: None,
+            uninstall_armed: None,
             ha_scene_fired: None,
             movie: None,
             playback: None,
@@ -871,6 +924,21 @@ impl State {
             service: service.into(),
             data: serde_json::json!({ "entity_id": id }),
         })]
+    }
+
+    /// HDMI inputs with a picture right now (or, without a signal report,
+    /// a cable plugged in), unless the viewer turned the input off.
+    /// Inputs with a cable in, and whether each shows a picture. A device
+    /// asleep keeps its cable's 5 V but sends nothing: plugged in, not live.
+    /// Without signal detection (no root), plugged in counts as live.
+    pub fn plugged_inputs(&self) -> Vec<(&crate::model::Input, bool)> {
+        self.inventory
+            .inputs
+            .iter()
+            .filter(|input| self.preferences.input_modes.get(&input.id) != Some(&InputMode::Off))
+            .filter(|input| input.connected == Some(true) || input.signal == Some(true))
+            .map(|input| (input, input.signal.unwrap_or(true)))
+            .collect()
     }
 
     /// Wallpaper type: 0 photo, 1 video, 2 ImmichFrame.
@@ -1214,6 +1282,11 @@ impl State {
     pub fn change_focus(&mut self, target: Target) {
         if self.focus == target {
             return;
+        }
+        if self.page == Page::Home
+            && let Target::App(id) = &target
+        {
+            self.home_pick = Some(id.clone());
         }
         if target != Target::SmartSignOut {
             self.ha_signout_armed = false;
@@ -1578,6 +1651,7 @@ impl State {
                 .ha_scene_fired
                 .as_ref()
                 .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < SCENE_FIRED)
+            || self.jellyfin_gliding()
             || self.previous_page_layer.is_some()
             || self.previous_panel_layer.is_some()
             || self.previous_sidebar_layer.is_some()
@@ -1608,6 +1682,27 @@ impl State {
                     let age = start.elapsed().as_secs_f32();
                     age < motion::PANEL_IN || (5. ..5. + motion::PANEL_OUT).contains(&age)
                 }))
+    }
+
+    /// Home asked for again (sam relaunched Luma as LG Home): close whatever was open and
+    /// show the Home tab. Keyboard drafts are committed first.
+    pub fn return_home(&mut self) -> Vec<Effect> {
+        let pending = self.finish_text_input();
+        if self.ambient_on() {
+            self.leave_ambient();
+        }
+        self.library = None;
+        self.library_closing = None;
+        self.movie = None;
+        self.album = None;
+        self.game = None;
+        self.widget_detail = None;
+        self.ha_detail = None;
+        self.ha_camera = None;
+        self.ha_camera_menu = None;
+        self.pointer = false;
+        self.open(0);
+        pending
     }
 
     pub fn open(&mut self, index: usize) {
@@ -1650,11 +1745,7 @@ impl State {
     pub fn apps(&self) -> Vec<&App> {
         let ids = self.preferences.favorites(&self.inventory.apps);
         if self.page == Page::Home {
-            return ids
-                .iter()
-                .filter(|id| !self.preferences.hidden.contains(id))
-                .filter_map(|id| self.inventory.apps.iter().find(|app| &app.id == id))
-                .collect();
+            return self.home_apps();
         }
         let query = self.query.to_lowercase();
         let mut apps: Vec<_> = self
@@ -1682,16 +1773,102 @@ impl State {
         apps
     }
 
-    pub fn home_scroll_max(&self) -> f32 {
-        let count = self
+    /// The Favorites tile that stands for Jellyfin: the Jellyfin app when it
+    /// is a favorite, else Luma's own tile. None until Jellyfin is signed in
+    /// with a row to show.
+    pub fn jellyfin_tile_id(&self) -> Option<String> {
+        let rows = self
+            .preferences
+            .stacks
+            .iter()
+            .any(|s| s.show && s.source == "jellyfin");
+        if !self.preferences.jellyfin.linked() || !rows {
+            return None;
+        }
+        let favorite = self
             .preferences
             .favorites(&self.inventory.apps)
+            .into_iter()
+            .filter(|id| !self.preferences.hidden.contains(id))
+            .find(|id| {
+                self.inventory
+                    .apps
+                    .iter()
+                    .any(|app| &app.id == id && app.brand == "jellyfin")
+            });
+        Some(favorite.unwrap_or_else(|| JELLYFIN_TILE.to_owned()))
+    }
+
+    /// The Jellyfin rows show while the Jellyfin tile is selected: focused,
+    /// or the last tile chosen while the remote is in the rows below.
+    /// Without a tile to choose (not signed in) nothing hides them.
+    pub fn jellyfin_rows_shown(&self) -> bool {
+        let Some(tile) = self.jellyfin_tile_id() else {
+            return true;
+        };
+        match &self.focus {
+            Target::App(id) => *id == tile,
+            _ => self.home_pick.as_deref() == Some(tile.as_str()),
+        }
+    }
+
+    /// Favorites in their saved order, Luma's Jellyfin tile included: where
+    /// it was moved to, else at the end.
+    pub fn home_favorite_ids(&self) -> Vec<String> {
+        let mut ids = self.preferences.favorites(&self.inventory.apps);
+        if self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE)
+            && !ids.iter().any(|id| id == JELLYFIN_TILE)
+        {
+            ids.push(JELLYFIN_TILE.to_owned());
+        }
+        ids
+    }
+
+    /// The tiles of Home's Favorites row.
+    fn home_apps(&self) -> Vec<&App> {
+        let tile = self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE);
+        self.home_favorite_ids()
             .iter()
-            .filter(|id| {
-                !self.preferences.hidden.contains(id)
-                    && self.inventory.apps.iter().any(|app| &app.id == *id)
+            .filter(|id| !self.preferences.hidden.contains(id))
+            .filter_map(|id| {
+                if id == JELLYFIN_TILE {
+                    tile.then_some(&self.jellyfin_tile)
+                } else {
+                    self.inventory.apps.iter().find(|app| &app.id == id)
+                }
             })
-            .count();
+            .collect()
+    }
+
+    /// 0 → 1 while Home turns to Jellyfin: the headline, its caption and
+    /// the widgets fade out, Favorites and the Jellyfin rows glide up.
+    pub fn jellyfin_focus(&self) -> f32 {
+        let on = self.page == Page::Home
+            && self.jellyfin_tile_id().is_some()
+            && self.jellyfin_rows_shown();
+        let (target, since, from) = self.jellyfin_mode.get();
+        let goal = if target { 1. } else { 0. };
+        let now = if self.preferences.reduced_motion {
+            goal
+        } else {
+            let t = motion::progress(since.elapsed().as_secs_f32(), JELLYFIN_GLIDE);
+            from + (goal - from) * t
+        };
+        if on != target {
+            self.jellyfin_mode.set((on, Instant::now(), now));
+        }
+        now
+    }
+
+    fn jellyfin_gliding(&self) -> bool {
+        // Notices a change of selection first.
+        let _ = self.jellyfin_focus();
+        let (_, since, _) = self.jellyfin_mode.get();
+        !self.preferences.reduced_motion && since.elapsed().as_secs_f32() < JELLYFIN_GLIDE
+    }
+
+    pub fn home_scroll_max(&self) -> f32 {
+        let count = self.home_apps().len();
         let content = if count == 0 {
             0.
         } else {
@@ -1877,6 +2054,14 @@ impl State {
         {
             self.focus = self.first_content();
         }
+        if let Target::LiveInput(id) = &self.focus
+            && !self
+                .plugged_inputs()
+                .iter()
+                .any(|(input, _)| &input.id == id)
+        {
+            self.focus = self.first_content();
+        }
         if let Target::Input(id) = &self.focus
             && !self
                 .inventory
@@ -2013,12 +2198,22 @@ impl State {
         } else {
             FOCUS_BOTTOM_INSET
         };
-        self.main_bottom() - inset
+        let layout = self.preferences.layout;
+        // Controls are placed where the layout moved the page to.
+        layout.focus_bottom(self.main_bottom() - inset + layout.body_offset().1)
     }
 
     /// Remote focus is revealed after layout changes, including hide/reorder.
     /// Pointer paths deliberately do not call this method.
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
+        // Focus set directly (startup, Back) still counts as a pick.
+        if self.page == Page::Home
+            && let Target::App(id) = &self.focus
+            && self.home_pick.as_deref() != Some(id.as_str())
+        {
+            self.home_pick = Some(id.clone());
+            self.dirty = true;
+        }
         let (previous, previous_home) = (self.scroll_goal, self.home_scroll_goal);
         // Home stands still under the title card while it opens, shows and
         // closes; its rows keep their scroll for the card to return to.
@@ -2058,7 +2253,11 @@ impl State {
                 // Leaving Favorites slides the row back to its first card.
                 self.home_scroll_goal = 0.;
             }
-            if matches!(
+            let body_dy = self.preferences.layout.body_offset().1;
+            if crate::layout::is_chrome(&self.focus) && self.preferences.layout.keeps_scroll() {
+                // The rail and the dock sit beside the page, not above it:
+                // the page stays where it is scrolled to.
+            } else if matches!(
                 self.focus,
                 Target::Nav(_)
                     | Target::Filter(_)
@@ -2092,7 +2291,7 @@ impl State {
                     HOME_REVEAL_TOP
                 } else {
                     120.8
-                };
+                } + body_dy;
                 if control.rect.y < top {
                     self.scroll_goal = (self.scroll + control.rect.y - top).max(0.);
                 }
@@ -2109,7 +2308,7 @@ impl State {
                         || self.section == STACKS_SECTION
                         || self.section == SMARTHOME_SECTION)
                 {
-                    936.
+                    936. + body_dy
                 } else {
                     self.focus_bottom()
                 };
@@ -2252,6 +2451,7 @@ impl State {
             SYSTEM_SECTION => Target::Setting(3),
             APPEARANCE_SECTION => Target::AccentChoice(7),
             STACKS_SECTION => Target::StackRow(0),
+            LAYOUT_SECTION => Target::LayoutChoice(self.preferences.layout.index()),
             INPUTS_SECTION => self
                 .inventory
                 .inputs
@@ -2324,7 +2524,291 @@ impl State {
         self.dirty = true;
     }
 
+    /// One arrow press. The classic bar is routed by `direction_classic`;
+    /// every other layout adds its own way on to, along and off the chrome.
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.direction_routed(direction, controls);
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.direction_routed(direction, controls);
+        crate::debug_log!(
+            "key {direction:?}: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn direction_routed(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        use crate::layout::{Layout, is_chrome};
+        let layout = self.preferences.layout;
+        if layout == Layout::Classic || self.ambient_on() {
+            return self.direction_classic(direction, controls);
+        }
+        let has_tabs = controls.iter().any(|c| matches!(c.target, Target::Nav(_)));
+        if has_tabs
+            && is_chrome(&self.focus)
+            && self.overlay.is_none()
+            && let Some(effects) = self.chrome_direction(direction, controls)
+        {
+            return effects;
+        }
+        if has_tabs && let Some(effects) = self.home_band_direction(direction, controls) {
+            return effects;
+        }
+        let before = self.focus.clone();
+        // Left of the first favourite is the rail, not the last favourite.
+        if layout == Layout::Rail
+            && has_tabs
+            && direction == Direction::Left
+            && self.page == Page::Home
+            && self.overlay.is_none()
+            && self.moving.is_none()
+            && let Target::App(id) = &before
+            && self.apps().first().is_some_and(|app| &app.id == id)
+        {
+            self.enter_chrome(before, controls);
+            return vec![];
+        }
+        let mark = self.route_mark();
+        let effects = self.direction_classic(direction, controls);
+        if !has_tabs || is_chrome(&before) {
+            return effects;
+        }
+        if is_chrome(&self.focus) {
+            // A classic route up to the top bar.
+            if direction == layout.outward() {
+                self.enter_chrome(before, controls);
+            } else {
+                // The chrome is not that way in this layout: stay put.
+                self.focus(before, controls);
+            }
+        } else if direction == layout.outward()
+            && layout.keeps_scroll()
+            && effects.is_empty()
+            && self.overlay.is_none()
+            && self.moving.is_none()
+            && mark == self.route_mark()
+        {
+            // Nothing lay that way: the page ends here, the chrome is next.
+            self.enter_chrome(before, controls);
+        }
+        effects
+    }
+
+    /// Everything a press can change without leaving a trace in the effects.
+    fn route_mark(
+        &self,
+    ) -> (
+        Target,
+        Page,
+        SettingsLevel,
+        Option<Subpage>,
+        usize,
+        [u32; 3],
+    ) {
+        (
+            self.focus.clone(),
+            self.page,
+            self.settings_level,
+            self.subpage.clone(),
+            self.section,
+            [
+                self.scroll_goal.to_bits(),
+                self.home_scroll_goal.to_bits(),
+                self.stack_scroll.2.to_bits(),
+            ],
+        )
+    }
+
+    /// Focus moves from the page to this page's own tab and remembers where
+    /// it came from.
+    fn enter_chrome(&mut self, from: Target, controls: &[Control]) {
+        self.chrome_return = Some(from);
+        self.focus(Target::Nav(self.page_index()), controls);
+    }
+
+    /// Arrows while a tab or an input circle has focus. None leaves the
+    /// press to the classic rules.
+    fn chrome_direction(
+        &mut self,
+        direction: Direction,
+        controls: &[Control],
+    ) -> Option<Vec<Effect>> {
+        use crate::layout::is_chrome;
+        let layout = self.preferences.layout;
+        // The chrome in the order it is laid out along its bar.
+        let mut chrome: Vec<&Control> = controls.iter().filter(|c| is_chrome(&c.target)).collect();
+        let along = |c: &Control| {
+            let (x, y) = c.rect.center();
+            if layout.vertical() { y } else { x }
+        };
+        chrome.sort_by(|a, b| along(a).total_cmp(&along(b)));
+        let at = chrome.iter().position(|c| c.target == self.focus)?;
+        let (previous, next) = layout.along();
+        if direction == previous || direction == next {
+            let to = if direction == next {
+                (at + 1 < chrome.len()).then(|| at + 1)
+            } else {
+                at.checked_sub(1)
+            };
+            // The ends of the bar are walls.
+            let Some(to) = to else {
+                return Some(vec![]);
+            };
+            match (&self.focus, chrome[to].target.clone()) {
+                // Moving along the tabs opens them, as on the classic bar.
+                (Target::Nav(_), Target::Nav(index)) => {
+                    self.chrome_return = None;
+                    self.open(index);
+                }
+                // From the circles back onto the tabs: the open page's tab.
+                (_, Target::Nav(_)) => self.focus(Target::Nav(self.page_index()), controls),
+                (_, target) => self.focus(target, controls),
+            }
+            return Some(vec![]);
+        }
+        if direction == layout.inward() {
+            let back = self
+                .chrome_return
+                .take()
+                .filter(|target| controls.iter().any(|c| &c.target == target));
+            let x = controls
+                .iter()
+                .find(|c| c.target == self.focus)
+                .map_or(960., |c| c.rect.center().0);
+            // Below the mirrored bar, Home starts with its top band.
+            let top_band = (self.page == Page::Home && layout == crate::layout::Layout::Flip)
+                .then(|| home_band_entry(controls, &layout.home_bands(), x, 0.))
+                .flatten();
+            if let Some(target) = back.or(top_band) {
+                self.focus(target, controls);
+            } else if !matches!(self.focus, Target::Nav(_))
+                && controls.iter().any(|c| c.target == Target::MiniCover)
+            {
+                self.focus(Target::MiniCover, controls);
+            } else {
+                if self.page == Page::Settings {
+                    self.subpage = None;
+                    self.section = 0;
+                }
+                self.focus(self.first_content(), controls);
+            }
+        }
+        // Away from the page there is only the screen edge.
+        Some(vec![])
+    }
+
+    /// Up and Down between Home's parts in the order the layout stacks
+    /// them. None leaves the press to the classic rules.
+    fn home_band_direction(
+        &mut self,
+        direction: Direction,
+        controls: &[Control],
+    ) -> Option<Vec<Effect>> {
+        use crate::layout::{HomeBand, home_band};
+        if self.page != Page::Home
+            || !matches!(direction, Direction::Up | Direction::Down)
+            || self.overlay.is_some()
+            || self.moving.is_some()
+            || self.widget_edit.is_some()
+            || self.widget_detail.is_some()
+            || self.movie.is_some()
+            || self.game.is_some()
+            || self.album.is_some()
+            || self.library.is_some()
+            || self.playback.is_some()
+            || self.ha_detail.is_some()
+            || self.ha_camera.is_some()
+        {
+            return None;
+        }
+        let band = home_band(&self.focus)?;
+        let current = controls.iter().find(|c| c.target == self.focus)?.rect;
+        let down = direction == Direction::Down;
+        match (band, &self.focus) {
+            // Between content rows the classic rules apply.
+            (HomeBand::Stacks, Target::StackCard(row, _)) => {
+                let below = crate::stacks::row_len(self, row + 1) > 0
+                    || controls
+                        .iter()
+                        .any(|c| matches!(c.target, Target::StackCard(r, _) if r == row + 1));
+                if (!down && *row > 0) || (down && below) {
+                    return None;
+                }
+            }
+            // A widget straight above or below in the same band.
+            (HomeBand::Info, _) => {
+                let next = controls
+                    .iter()
+                    .filter(|c| c.target != self.focus && home_band(&c.target) == Some(band))
+                    .filter(|c| c.rect.x < current.x + current.w && current.x < c.rect.x + c.rect.w)
+                    .filter(|c| {
+                        if down {
+                            c.rect.y >= current.y + current.h - 1.
+                        } else {
+                            c.rect.y + c.rect.h <= current.y + 1.
+                        }
+                    })
+                    .min_by(|a, b| {
+                        (a.rect.y - current.y)
+                            .abs()
+                            .total_cmp(&(b.rect.y - current.y).abs())
+                    })
+                    .map(|c| c.target.clone());
+                if let Some(next) = next {
+                    self.focus(next, controls);
+                    return Some(vec![]);
+                }
+            }
+            _ => {}
+        }
+        let order = self.preferences.layout.home_bands();
+        let at = order.iter().position(|b| *b == band)?;
+        let further: Vec<HomeBand> = if down {
+            order[at + 1..].to_vec()
+        } else {
+            order[..at].iter().rev().copied().collect()
+        };
+        let from_y = if down {
+            current.y + current.h
+        } else {
+            current.y
+        };
+        // Coming back up to Favorites lands on the tile last chosen.
+        let entering = further
+            .iter()
+            .find(|b| controls.iter().any(|c| home_band(&c.target) == Some(**b)));
+        let picked = self
+            .home_pick
+            .as_ref()
+            .filter(|_| !down && entering == Some(&HomeBand::Apps))
+            .map(|id| Target::App(id.clone()))
+            .filter(|t| controls.iter().any(|c| &c.target == t));
+        // Down from the Jellyfin tile: its row, from the first card.
+        let jellyfin_row = (down
+            && entering == Some(&HomeBand::Stacks)
+            && self.jellyfin_rows_shown()
+            && matches!(&self.focus, Target::App(id)
+                if self.jellyfin_tile_id().as_deref() == Some(id.as_str())))
+        .then_some(Target::StackCard(0, 0))
+        .filter(|t| controls.iter().any(|c| &c.target == t));
+        if let Some(next) = picked
+            .or(jellyfin_row)
+            .or_else(|| home_band_entry(controls, &further, current.center().0, from_y))
+        {
+            self.focus(next, controls);
+        } else if direction == self.preferences.layout.outward() {
+            // The page ends here; the chrome is next.
+            self.enter_chrome(self.focus.clone(), controls);
+        }
+        Some(vec![])
+    }
+
+    fn direction_classic(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         if self.ambient_on() {
             // Left and Right flip the clip, as on the caption; the rest wakes.
             if matches!(direction, Direction::Left | Direction::Right)
@@ -2498,14 +2982,17 @@ impl State {
             return self.library_direction(direction);
         }
         if let Some(id) = self.moving.clone() {
-            let mut ids = self.preferences.favorites(&self.inventory.apps);
+            // The Jellyfin tile moves like an app; its place is saved too.
+            let mut ids = self.home_favorite_ids();
+            let tile = self.jellyfin_tile_id().as_deref() == Some(JELLYFIN_TILE);
             let slots: Vec<_> = ids
                 .iter()
                 .enumerate()
                 .filter_map(|(index, id)| {
                     (!self.preferences.hidden.contains(id)
-                        && self.inventory.apps.iter().any(|app| &app.id == id))
-                    .then_some(index)
+                        && (self.inventory.apps.iter().any(|app| &app.id == id)
+                            || (tile && id == JELLYFIN_TILE)))
+                        .then_some(index)
                 })
                 .collect();
             if let Some(index) = slots.iter().position(|slot| ids[*slot] == id) {
@@ -2628,11 +3115,41 @@ impl State {
                     }
                     Direction::Up => self.focus(Target::Nav(0), controls),
                     Direction::Down => {
+                        if let Some(live) = live_controls(controls).first() {
+                            self.focus(live.clone(), controls);
+                        } else if let Some(app) = self.apps().first() {
+                            let id = app.id.clone();
+                            self.focus(Target::App(id), controls);
+                        }
+                    }
+                }
+                return vec![];
+            }
+            // The live input buttons sit between the headline and Favorites.
+            if self.page == Page::Home
+                && let Target::LiveInput(_) = &self.focus
+            {
+                let live = live_controls(controls);
+                let at = live.iter().position(|t| *t == self.focus).unwrap_or(0);
+                match direction {
+                    Direction::Left if at > 0 => self.focus(live[at - 1].clone(), controls),
+                    Direction::Right if at + 1 < live.len() => {
+                        self.focus(live[at + 1].clone(), controls)
+                    }
+                    Direction::Up => {
+                        if controls.iter().any(|c| c.target == Target::VideoTitle) {
+                            self.focus(Target::VideoTitle, controls)
+                        } else {
+                            self.focus(Target::Nav(0), controls)
+                        }
+                    }
+                    Direction::Down => {
                         if let Some(app) = self.apps().first() {
                             let id = app.id.clone();
                             self.focus(Target::App(id), controls);
                         }
                     }
+                    _ => {}
                 }
                 return vec![];
             }
@@ -2665,9 +3182,18 @@ impl State {
                     // Changing rows always lands on the first card of the new row.
                     Direction::Up if row > 0 => self.focus(Target::StackCard(row - 1, 0), controls),
                     Direction::Up => {
+                        // Back to the tile these rows belong to (Jellyfin's
+                        // rows vanish when another tile is chosen).
                         let apps = self.apps();
-                        if let Some(app) = apps.get(index.min(apps.len().saturating_sub(1))) {
-                            let id = app.id.clone();
+                        let picked = self
+                            .home_pick
+                            .as_ref()
+                            .filter(|id| apps.iter().any(|app| &app.id == *id))
+                            .cloned();
+                        if let Some(id) = picked.or_else(|| {
+                            apps.get(index.min(apps.len().saturating_sub(1)))
+                                .map(|app| app.id.clone())
+                        }) {
                             self.focus(Target::App(id), controls);
                         }
                     }
@@ -2694,7 +3220,9 @@ impl State {
                             self.focus(Target::App(id), controls);
                         }
                         Direction::Up => {
-                            if controls.iter().any(|c| c.target == Target::VideoTitle) {
+                            if let Some(live) = live_controls(controls).first() {
+                                self.focus(live.clone(), controls)
+                            } else if controls.iter().any(|c| c.target == Target::VideoTitle) {
                                 self.focus(Target::VideoTitle, controls)
                             } else {
                                 self.focus(Target::Nav(0), controls)
@@ -2706,7 +3234,15 @@ impl State {
                                 .filter(|c| matches!(c.target, Target::StackCard(0, _)))
                                 .count();
                             if visible > 0 {
-                                self.focus(Target::StackCard(0, index.min(visible - 1)), controls);
+                                // The Jellyfin tile's own row starts at its first card.
+                                let card = if self.jellyfin_rows_shown()
+                                    && self.jellyfin_tile_id().as_deref() == Some(id.as_str())
+                                {
+                                    0
+                                } else {
+                                    index.min(visible - 1)
+                                };
+                                self.focus(Target::StackCard(0, card), controls);
                                 return vec![];
                             }
                             let x = controls
@@ -2912,6 +3448,24 @@ impl State {
                     self.focus(next, controls);
                     return vec![];
                 }
+            }
+            // Settings › Layout: one column of designs under the Back arrow.
+            if self.page == Page::Settings
+                && self.subpage.is_none()
+                && self.settings_level == SettingsLevel::Section
+                && self.section == LAYOUT_SECTION
+                && let Target::LayoutChoice(i) = self.focus
+            {
+                let last = crate::layout::Layout::ALL.len() - 1;
+                let next = match direction {
+                    Direction::Up if i == 0 => Target::SettingsBack,
+                    Direction::Up => Target::LayoutChoice(i - 1),
+                    Direction::Down => Target::LayoutChoice((i + 1).min(last)),
+                    Direction::Left => Target::SettingsBack,
+                    Direction::Right => return self.activate(),
+                };
+                self.focus(next, controls);
+                return vec![];
             }
             // Dedicated UI density choice. Always return to parent cell on Back.
             if self.page == Page::Settings
@@ -3307,13 +3861,29 @@ impl State {
                         && candidate.rect.x < HOME_VIEWPORT_RIGHT)
             })
             .filter_map(|candidate| {
-                // Header controls never steal an Up route from the active tab.
-                if self.overlay.is_none()
-                    && matches!(direction, Direction::Up)
-                    && candidate.rect.y < 150.
-                    && candidate.target != Target::Nav(self.page_index())
-                {
-                    return None;
+                let layout = self.preferences.layout;
+                if layout.keeps_scroll() {
+                    // The rail and the dock are entered at the page's edge
+                    // only, never by a diagonal shortcut.
+                    if crate::layout::is_chrome(&candidate.target) {
+                        return None;
+                    }
+                } else {
+                    // Header controls never steal an Up route from the active tab.
+                    if self.overlay.is_none()
+                        && matches!(direction, Direction::Up)
+                        && candidate.rect.y < 150.
+                        && candidate.target != Target::Nav(self.page_index())
+                    {
+                        return None;
+                    }
+                    // Mirrored bar: the circles are reached along the bar.
+                    if layout != crate::layout::Layout::Classic
+                        && !matches!(direction, Direction::Up)
+                        && crate::layout::is_chrome(&candidate.target)
+                    {
+                        return None;
+                    }
                 }
                 let (cx, cy) = candidate.rect.center();
                 let (primary, cross, overlap) = match direction {
@@ -3348,6 +3918,11 @@ impl State {
                         (current.rect.h + candidate.rect.h) / 2.,
                     ),
                 };
+                // Toward the rail or the dock only a control straight ahead
+                // counts; otherwise the page ends here and the chrome is next.
+                if cross >= overlap && layout.keeps_scroll() && direction == layout.outward() {
+                    return None;
+                }
                 (primary > 1.).then_some((
                     candidate.target.clone(),
                     primary + cross * 2. + if cross >= overlap { 10000. } else { 0. },
@@ -3361,11 +3936,58 @@ impl State {
         vec![]
     }
 
+    /// Uninstall is offered only for an app hidden first, that the TV lets
+    /// be removed (never Luma itself or its companions).
+    pub fn can_uninstall(&self, id: &str) -> bool {
+        self.preferences.hidden.iter().any(|item| item == id)
+            && !id.starts_with("com.archbtw.luma")
+            && self
+                .inventory
+                .apps
+                .iter()
+                .any(|app| app.id == id && app.removable)
+    }
+
+    /// An uninstall finished: the app leaves Luma's lists, or the menu says why not.
+    pub fn uninstalled(&mut self, id: &str, result: Result<(), String>) -> bool {
+        let title = self
+            .inventory
+            .apps
+            .iter()
+            .find(|app| app.id == id)
+            .map_or(id.to_owned(), |app| app.title.clone());
+        self.dirty = true;
+        match result {
+            Ok(()) => {
+                self.inventory.apps.retain(|app| app.id != id);
+                self.preferences.hidden.retain(|item| item != id);
+                if let Some(favorites) = self.preferences.favorites.as_mut() {
+                    favorites.retain(|item| item != id);
+                }
+                if self.focus == Target::App(id.to_owned()) {
+                    self.focus = self.first_content();
+                }
+                if self.filter == 5 && self.hidden_count() == 0 {
+                    self.filter = 0;
+                }
+                self.notify(format!("{title} uninstalled"));
+                true
+            }
+            Err(error) => {
+                self.notify(format!("{title} could not be uninstalled: {error}"));
+                false
+            }
+        }
+    }
+
     pub fn options(&mut self) {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
-        if let Target::App(id) = &self.focus {
+        self.uninstall_armed = None;
+        if let Target::App(id) = &self.focus
+            && id != JELLYFIN_TILE
+        {
             self.overlay = Some(Overlay::Options {
                 id: id.clone(),
                 restore: self.focus.clone(),
@@ -3722,6 +4344,22 @@ impl State {
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.activate_target();
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.activate_target();
+        crate::debug_log!(
+            "key OK: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn activate_target(&mut self) -> Vec<Effect> {
         if self.ambient_on() {
             self.leave_ambient();
             return vec![];
@@ -4331,6 +4969,14 @@ impl State {
                 self.preferences.ui_sounds = !self.preferences.ui_sounds;
                 return vec![Effect::Save];
             }
+            Target::LayoutChoice(index) => {
+                if let Some(&layout) = crate::layout::Layout::ALL.get(index) {
+                    self.preferences.layout = layout;
+                    self.chrome_return = None;
+                    self.dirty = true;
+                    return vec![Effect::Save];
+                }
+            }
             Target::Screensaver => {
                 let steps = SCREENSAVER_STEPS;
                 let now = self.preferences.screensaver_minutes;
@@ -4590,7 +5236,25 @@ impl State {
             Target::DismissNotice => self.notice = None,
             Target::CloseDialog => return self.back(),
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(id) | Target::Input(id) if !self.launching => {
+            Target::App(id) if id == JELLYFIN_TILE => {
+                // OK on Luma's own tile: down into the first Jellyfin row.
+                self.home_pick = Some(id);
+                let row = (0..)
+                    .take_while(|r| crate::stacks::row_stack(self, *r).is_some())
+                    .find(|r| {
+                        crate::stacks::row_stack(self, *r)
+                            .and_then(|i| self.preferences.stacks.get(i))
+                            .is_some_and(|s| s.source == "jellyfin")
+                    });
+                if let Some(row) = row {
+                    self.change_focus(Target::StackCard(row, 0));
+                    self.dirty = true;
+                    return vec![];
+                }
+                self.notify("Loading Jellyfin…");
+                return vec![Effect::StacksRefresh];
+            }
+            Target::App(id) | Target::Input(id) | Target::LiveInput(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::Filter(index) => {
@@ -4721,6 +5385,10 @@ impl State {
                     self.settings_push(SettingsLevel::WallpaperImmich, Target::ImmichUse);
                     return vec![Effect::ImmichFormStart];
                 }
+                5 => {
+                    self.preferences.usb_wallpapers = !self.preferences.usb_wallpapers;
+                    return vec![Effect::Save];
+                }
                 3 => {
                     self.video_upload_qr.clear();
                     self.video_upload_link = None;
@@ -4760,6 +5428,27 @@ impl State {
                         return vec![];
                     }
                     5 => return vec![Effect::Quit],
+                    12 => self.preferences.truehd = self.preferences.truehd.next(),
+                    13 => self.preferences.dts = self.preferences.dts.next(),
+                    11 => {
+                        self.preferences.debug_log = !self.preferences.debug_log;
+                        self.dirty = true;
+                        return vec![Effect::Save, Effect::DebugLog(self.preferences.debug_log)];
+                    }
+                    14 => {
+                        let Some(root) = self.root.as_mut() else {
+                            return vec![];
+                        };
+                        root.home = !root.home;
+                        let on = root.home;
+                        self.notify(if on {
+                            "Making Luma the Home screen. Luma restarts as Home."
+                        } else {
+                            "Going back to LG Home. Luma closes."
+                        });
+                        self.dirty = true;
+                        return vec![Effect::Root(Some(crate::platform::RootSet::Home(on)))];
+                    }
                     9 | 10 => {
                         let Some(root) = self.root.as_mut() else {
                             return vec![];
@@ -4776,7 +5465,7 @@ impl State {
                         return vec![Effect::Root(Some(change))];
                     }
                     7 => return vec![Effect::Launch("com.webos.app.home".into())],
-                    8 => return vec![Effect::Launch("com.archbtw.luma.aerials".into())],
+                    8 => return vec![Effect::Launch(crate::platform::AERIALS_ID.into())],
                     6 => {
                         self.subpage = Some(Subpage::Greeting);
                         self.focus = Target::GreetingStyle;
@@ -4948,7 +5637,7 @@ impl State {
                             GreetingStyle::Rude
                         } else {
                             GreetingStyle::Classic
-                        }
+                        };
                     }
                     Some(Subpage::ClockFormat) => self.preferences.hour_24 = index == 1,
                     Some(Subpage::TimeFormat) => self.preferences.show_seconds = index == 1,
@@ -4985,7 +5674,37 @@ impl State {
                 self.close_subpage();
                 return vec![Effect::Save];
             }
+            Target::Option(2) => {
+                // Uninstall: only for a hidden app the TV lets be removed, and
+                // only on a second press.
+                let Some(Overlay::Options { id, restore }) = self.overlay.clone() else {
+                    return vec![];
+                };
+                if !self.can_uninstall(&id) {
+                    return vec![];
+                }
+                if self.uninstall_armed.as_deref() != Some(id.as_str()) {
+                    self.uninstall_armed = Some(id);
+                    self.dirty = true;
+                    return vec![];
+                }
+                self.uninstall_armed = None;
+                self.overlay = None;
+                self.panel_started = None;
+                self.focus = restore;
+                self.pointer = false;
+                let title = self
+                    .inventory
+                    .apps
+                    .iter()
+                    .find(|app| app.id == id)
+                    .map_or(id.clone(), |app| app.title.clone());
+                self.notify(format!("Uninstalling {title}…"));
+                self.dirty = true;
+                return vec![Effect::Uninstall(id)];
+            }
             Target::Option(index) => {
+                self.uninstall_armed = None;
                 let Some(Overlay::Options { id, restore }) = self.overlay.take() else {
                     return vec![];
                 };
@@ -5085,6 +5804,22 @@ impl State {
     }
 
     pub fn back(&mut self) -> Vec<Effect> {
+        if !crate::debug_log::enabled() {
+            return self.back_step();
+        }
+        let before = (self.page, self.focus.clone());
+        let effects = self.back_step();
+        crate::debug_log!(
+            "key Back: {:?} {:?} -> {:?} {:?}",
+            before.0,
+            before.1,
+            self.page,
+            self.focus
+        );
+        effects
+    }
+
+    fn back_step(&mut self) -> Vec<Effect> {
         if self.ambient_on() {
             self.leave_ambient();
             return vec![];
@@ -5397,6 +6132,33 @@ impl State {
         })
     }
 
+    /// Home with nothing open over it: a click beside everything may clear it.
+    pub fn home_can_clear(&self) -> bool {
+        self.page == Page::Home
+            && !self.ambient_on()
+            && self.playback.is_none()
+            && self.movie.is_none()
+            && self.game.is_none()
+            && self.album.is_none()
+            && self.library.is_none()
+            && self.overlay.is_none()
+            && self.ha_detail.is_none()
+            && self.ha_camera.is_none()
+            && self.widget_detail.is_none()
+            && self.widget_edit.is_none()
+            && self.moving.is_none()
+    }
+
+    /// The Magic Remote clicked on no app, button or widget: everything
+    /// leaves in the clean-wallpaper animation (the screensaver's).
+    pub fn clear_home(&mut self) {
+        if self.home_can_clear() {
+            crate::debug_log!("clicked beside everything: Home clears to the wallpaper");
+            self.ambient = Some((true, Instant::now()));
+            self.dirty = true;
+        }
+    }
+
     /// Any key, click or wheel brings the interface back, like tvOS.
     pub fn leave_ambient(&mut self) {
         if self.ambient_on() {
@@ -5458,4 +6220,31 @@ impl State {
             1. - back_out(t, 1.)
         }
     }
+}
+
+/// The first of `bands` with anything on screen, at its control nearest to
+/// `x` (and, among those, nearest to the line `y` the remote comes from).
+fn home_band_entry(
+    controls: &[Control],
+    bands: &[crate::layout::HomeBand],
+    x: f32,
+    y: f32,
+) -> Option<Target> {
+    bands.iter().find_map(|band| {
+        controls
+            .iter()
+            .filter(|c| crate::layout::home_band(&c.target) == Some(*band))
+            .filter(|c| c.rect.x + c.rect.w > HOME_VIEWPORT_LEFT && c.rect.x < HOME_VIEWPORT_RIGHT)
+            .min_by(|a, b| {
+                // Straight across first (0 when the control spans `x`),
+                // then the nearer row, then the nearer centre.
+                let score = |c: &Control| {
+                    let (cx, cy) = c.rect.center();
+                    let across = (c.rect.x - x).max(x - (c.rect.x + c.rect.w)).max(0.);
+                    across + 0.25 * (cy - y).abs() + 0.01 * (cx - x).abs()
+                };
+                score(a).total_cmp(&score(b))
+            })
+            .map(|c| c.target.clone())
+    })
 }

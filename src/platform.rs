@@ -8,22 +8,185 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::mpsc, thread};
 
+#[path = "platform-install.rs"]
+mod installation;
+
 pub const APP_ID: &str = "com.archbtw.luma";
+
+/// The app id the TV knows Luma's window by: LG Home's while Luma runs as
+/// Home. Video planes are shown only for the app whose window is on screen,
+/// so media must be opened under this id, not always APP_ID.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+pub fn surface_id() -> String {
+    std::env::var("APPID")
+        .ok()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| APP_ID.to_owned())
+}
 pub const HOME_ID: &str = "com.webos.app.home";
+pub const FULL_HOME_ID: &str = "com.webos.app.fullhome";
+
+pub fn is_home_id(id: &str) -> bool {
+    matches!(id, HOME_ID | FULL_HOME_ID)
+}
+
+/// Keep the window surface and SAM lifecycle identity aligned with the executed Home app.
+fn home_identity(executable: Option<&std::path::Path>, metadata: Option<&Value>) -> &'static str {
+    if let Some(executable) = executable {
+        if executable == std::path::Path::new("/usr/bin/com.webos.app.fullhome") {
+            return FULL_HOME_ID;
+        }
+        if executable == std::path::Path::new(LG_HOME_EXE) {
+            return HOME_ID;
+        }
+    }
+    if metadata.is_some_and(|value| {
+        ["nid", "appId"]
+            .iter()
+            .any(|key| value.get(key).and_then(Value::as_str) == Some(FULL_HOME_ID))
+    }) {
+        FULL_HOME_ID
+    } else {
+        HOME_ID
+    }
+}
+
+/// Derive the identity from SAM's actual launch, never from a saved preference.
+pub fn home_id() -> &'static str {
+    let executable = std::env::current_exe().ok();
+    let metadata = std::env::args()
+        .nth(1)
+        .and_then(|arg| serde_json::from_str::<Value>(&arg).ok());
+    home_identity(executable.as_deref(), metadata.as_ref())
+}
+
+/// LG's Home executable. The root integration may bind-mount Luma over it (webOS 5/6/24), so
+/// sam starts Luma under LG's own Home manifest and LS2 role (lifecycle v2, keep-alive).
+pub const LG_HOME_EXE: &str = "/usr/bin/com.webos.app.home";
+
+/// Whether this process runs in place of LG's Home executable.
+pub fn runs_as_lg_home() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        exe == std::path::Path::new(LG_HOME_EXE)
+            || exe == std::path::Path::new("/usr/bin/com.webos.app.fullhome")
+    })
+}
+
+/// While this file exists, a staged Home (webOS 10/11) does not register with sam and is
+/// restarted per Home key as before. Luma creates it when a relaunch did not bring it to the
+/// front; delete it to try registering again.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+pub const HOME_LIFECYCLE_OFF: &str = "/var/lib/luma-home/no-lifecycle";
+
+/// Whether a relaunch actually brought a staged Home (webOS 10/11) to the front. Only the
+/// compositor's focus or remote input counts: SDL_ShowWindow emits Shown by itself, so Shown
+/// and Restored say nothing about whether the raise reached the screen.
+#[derive(Debug, Default)]
+pub struct ForegroundCheck {
+    deadline: Option<std::time::Instant>,
+}
+
+impl ForegroundCheck {
+    pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// A relaunch arrived. `in_front`: Luma was already focused and visible, so nothing to check.
+    #[cfg_attr(
+        not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+        allow(dead_code)
+    )]
+    pub fn relaunched(&mut self, now: std::time::Instant, in_front: bool) {
+        if !in_front {
+            self.deadline = Some(now + Self::TIMEOUT);
+        }
+    }
+
+    /// The compositor focused Luma, or remote input reached it.
+    pub fn confirmed(&mut self) {
+        self.deadline = None;
+    }
+
+    /// Whether a pending relaunch has failed by `now`. Reports each failure once.
+    pub fn failed(&mut self, now: std::time::Instant) -> bool {
+        let failed = self.deadline.is_some_and(|deadline| now >= deadline);
+        if failed {
+            self.deadline = None;
+        }
+        failed
+    }
+}
+
+/// What sam asks of a registered Home, from one lifecycle reply. Only TV builds register.
+#[cfg_attr(
+    not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// Bring the running instance to the front instead of a restart.
+    Relaunch,
+    /// Exit.
+    Close,
+}
+
+impl Lifecycle {
+    /// Lifecycle v2 (`registerApp`) names the event in `event`; v1 (`registerNativeApp`) in
+    /// `message`. Other replies (`registered`, `pause`, keep-alive) need no action.
+    #[cfg_attr(
+        not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
+        allow(dead_code)
+    )]
+    pub fn from_reply(reply: &Value) -> Option<Self> {
+        let name = reply
+            .get("event")
+            .or_else(|| reply.get("message"))
+            .and_then(Value::as_str)?;
+        match name {
+            "relaunch" => Some(Self::Relaunch),
+            "close" => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+/// Directory holding assets/, lib/ and splash/: next to the executable, or the installed
+/// package when the executable runs in place of LG's Home.
+pub fn install_dir() -> Result<std::path::PathBuf, String> {
+    static DIRECTORY: std::sync::OnceLock<Result<std::path::PathBuf, String>> =
+        std::sync::OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            installation::find_directory(&executable, installation::directories())
+        })
+        .clone()
+}
 /// LG's web browser; `target` in its launch parameters is the page to open.
 pub const BROWSER_ID: &str = "com.webos.app.browser";
 
 pub fn redirect_to_home() -> Result<bool, String> {
     // The root-only integration mounts this marker with its native Home
-    // manifest. A normal tile launch then opens that same instance instead of
-    // starting a second renderer writing the same preferences.
-    if std::fs::read_to_string("/usr/palm/applications/com.webos.app.home/.luma-home")
-        .is_ok_and(|marker| marker.trim() == APP_ID)
+    // manifest, or writes it to /var/run on webOS 5/6/24, where it mounts this
+    // executable over LG's (a tile's jail sees /usr/bin without that mount).
+    // A normal tile launch then opens that same instance instead of starting
+    // a second renderer writing the same preferences.
+    let marked = |file| std::fs::read_to_string(file).is_ok_and(|marker| marker.trim() == APP_ID);
+    if marked("/usr/palm/applications/com.webos.app.home/.luma-home")
+        || marked("/var/run/luma-home")
     {
         thread::spawn(|| {
+            let target = std::fs::read_to_string("/var/run/luma-home-target")
+                .ok()
+                .filter(|id| is_home_id(id.trim()))
+                .map_or_else(|| HOME_ID.to_owned(), |id| id.trim().to_owned());
             call(
                 "luna://com.webos.applicationManager/launch",
-                json!({"id": HOME_ID}),
+                json!({"id": target}),
             )
         })
         .join()
@@ -48,10 +211,14 @@ pub enum Request {
     Root(Option<RootSet>),
     /// Which HDMI ports carry a picture right now.
     Signals,
+    /// Uninstall an app (its id, and whether it is a developer install).
+    Uninstall(String, bool),
 }
 pub enum Response {
     Inventory(Result<(Inventory, Option<String>), String>),
     Launched(Result<(), String>),
+    /// An uninstall finished (the app's id).
+    Uninstalled(String, Result<(), String>),
     /// `None` when Homebrew Channel has no root: Luma runs as a plain app.
     Root(Result<Option<RootStatus>, String>),
     /// (HDMI port number, picture present).
@@ -64,12 +231,16 @@ pub struct RootStatus {
     pub wake: bool,
     /// LG «Home Auto Launch»; `None` when the TV did not answer.
     pub home_auto_launch: Option<bool>,
+    /// Luma replaces LG Home (home.sh enable), as saved in /var/lib/luma-home.
+    pub home: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RootSet {
     Wake(bool),
     HomeAutoLaunch(bool),
+    /// Make Luma the Home screen (home.sh enable) or go back to LG Home.
+    Home(bool),
 }
 
 pub struct Platform {
@@ -90,6 +261,14 @@ impl Platform {
                     } else {
                         Ok((demo_inventory(), None))
                     }),
+                    Request::Uninstall(id, developer) => Response::Uninstalled(
+                        id.clone(),
+                        if webos {
+                            uninstall(&id, developer)
+                        } else {
+                            Ok(())
+                        },
+                    ),
                     Request::Signals => Response::Signals(if webos {
                         hdmi_signals().unwrap_or_default()
                     } else {
@@ -101,6 +280,7 @@ impl Platform {
                         Ok(std::env::var_os("LUMA_ROOT_PREVIEW").map(|_| RootStatus {
                             wake: true,
                             home_auto_launch: Some(false),
+                            home: false,
                         }))
                     }),
                     Request::WebPlayer(params) => Response::Launched(if webos {
@@ -170,6 +350,14 @@ impl Platform {
                                 json!({"id": id}),
                             )
                             .map(|_| ())
+                            .map_err(|error| {
+                                // The full-screen video library is a companion app.
+                                if id == AERIALS_ID && player_not_installed(&error) {
+                                    INSTALL_AERIALS_MESSAGE.to_owned()
+                                } else {
+                                    error
+                                }
+                            })
                         }
                     } else {
                         Ok(())
@@ -195,14 +383,18 @@ impl Platform {
 /// Luma's own player: a small web app around the TV's web video element.
 pub const WEB_PLAYER_ID: &str = "com.archbtw.luma.player";
 pub const INSTALL_PLAYER_MESSAGE: &str = "Install Luma Player from Homebrew Channel";
+/// The full-screen video library (Settings › System), also a companion app.
+pub const AERIALS_ID: &str = "com.archbtw.luma.aerials";
+pub const INSTALL_AERIALS_MESSAGE: &str = "Install Luma Aerials to open the video library";
 
 // webOS versions use slightly different texts for unknown application IDs.
-fn player_not_installed(error: &str) -> bool {
+pub(crate) fn player_not_installed(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "not installed",
         "not found",
-        "does not exist",
+        // webOS 6 answers a missing app ID with just "not exist".
+        "not exist",
         "unknown application",
         "invalid appid",
     ]
@@ -247,6 +439,51 @@ fn inventory_read(uri: &str, field: &str) -> Result<Value, String> {
             .and_then(|reply| reply.get(field).cloned())
             .ok_or(root_error)
     })
+}
+
+/// Removes an app through LG's install service: as root through Homebrew
+/// Channel when it can (the service answers root for any app the TV lets be
+/// removed), else as Luma itself. Developer-mode and Homebrew installs go
+/// through its developer method.
+fn uninstall(id: &str, developer: bool) -> Result<(), String> {
+    if !valid_app_id(id) || id == APP_ID || id.starts_with("com.archbtw.luma") {
+        return Err("This app cannot be uninstalled from Luma".into());
+    }
+    let uri = format!(
+        "luna://com.webos.appInstallService/{}",
+        if developer { "dev/remove" } else { "remove" }
+    );
+    let payload = json!({ "id": id, "subscribe": false });
+    let command = format!(
+        "if [ \"$(id -u)\" = 0 ]; then /usr/bin/luna-send -n 1 -w 20000 {uri} '{payload}'; \
+         else echo noroot; fi"
+    );
+    if let Ok(envelope) = call(
+        "luna://org.webosbrew.hbchannel.service/exec",
+        json!({ "command": command }),
+    ) {
+        let out = envelope
+            .get("stdoutString")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        if !out.trim().starts_with("noroot") {
+            let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact.contains("\"returnValue\":true") {
+                return Ok(());
+            }
+            let reason = serde_json::from_str::<Value>(out.trim())
+                .ok()
+                .and_then(|v| {
+                    v.get("errorText")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| out.trim().chars().take(160).collect());
+            return Err(reason);
+        }
+    }
+    call(&uri, payload).map(|_| ())
 }
 
 fn root_inventory_read(uri: &str, field: &str) -> Result<Value, String> {
@@ -375,6 +612,8 @@ fn inventory_payload(envelope: &Value, field: &str) -> Result<Value, String> {
 }
 
 const WAKE_SCRIPT: &str = "/var/lib/webosbrew/init.d/71-luma-wake";
+/// Where home.sh keeps Luma-as-Home's saved state and its own copy.
+const HOME_STATE: &str = "/var/lib/luma-home";
 const WAKE_OFF: &str = "/var/lib/webosbrew/luma-autostart-disabled";
 
 fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> {
@@ -388,6 +627,28 @@ fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> 
             quote(include_str!("../tv/luma-wake.sh"))
         ),
         Some(RootSet::Wake(false)) => format!("touch {WAKE_OFF}; {stop}; "),
+        // Detached: enabling closes this Luma (it comes back as Home) and
+        // disabling ends Luma as Home, so the switch must outlive the call.
+        // home.sh asks to confirm on a terminal; the switch is that answer.
+        Some(RootSet::Home(on)) => {
+            let app = install_dir().map_or_else(
+                |_| "/media/developer/apps/usr/palm/applications/com.archbtw.luma".to_owned(),
+                |dir| dir.display().to_string(),
+            );
+            let run = if on {
+                format!("printf 'y\\n' | sh {}/home.sh enable", quote(&app))
+            } else {
+                format!(
+                    "if [ -f {HOME_STATE}/home.sh ]; then sh {HOME_STATE}/home.sh disable; \
+                     else sh {}/home.sh disable; fi",
+                    quote(&app)
+                )
+            };
+            format!(
+                "nohup sh -c {} > /tmp/luma-home-switch.log 2>&1 < /dev/null & ",
+                quote(&format!("sleep 1; {run}"))
+            )
+        }
         Some(RootSet::HomeAutoLaunch(on)) => format!(
             "/usr/bin/luna-send -n 1 -w 4000 luna://com.webos.settingsservice/setSystemSettings '{{\"category\":\"general\",\"settings\":{{\"homeAutoLaunch\":\"{}\"}}}}' >/dev/null; ",
             if on { "on" } else { "off" }
@@ -402,9 +663,21 @@ fn root_features(change: Option<RootSet>) -> Result<Option<RootStatus>, String> 
          [ {bin} -nt {pid} ] && kill \"$p\" && p=; else p=; fi; \
          if [ -z \"$p\" ] && [ -x {bin} ]; then nohup {bin} --pad-watch > /tmp/luma-pad-watch.log 2>&1 < /dev/null & fi; "
     );
+    // An installed wake watcher from an older Luma is replaced by this one
+    // (it opened a second Luma beside Luma as Home), and restarted.
+    let refresh = if matches!(change, Some(RootSet::Wake(_))) {
+        String::new()
+    } else {
+        format!(
+            "if [ -f {WAKE_SCRIPT} ] && [ ! -e {WAKE_OFF} ] && ! grep -q 'luma-wake v2' {WAKE_SCRIPT}; then \
+             {stop}; printf '%s' {} > {WAKE_SCRIPT} && chmod 755 {WAKE_SCRIPT} && {WAKE_SCRIPT}; fi; ",
+            quote(include_str!("../tv/luma-wake.sh"))
+        )
+    };
     let command = format!(
-        "if [ \"$(id -u)\" != 0 ]; then echo noroot; exit 0; fi; {apply}{pad}echo root; \
+        "if [ \"$(id -u)\" != 0 ]; then echo noroot; exit 0; fi; {apply}{refresh}{pad}echo root; \
          if [ -f {WAKE_SCRIPT} ] && [ ! -e {WAKE_OFF} ]; then echo wake; fi; \
+         if grep -Eq '\"enabled\" *: *true' {HOME_STATE}/state.json 2>/dev/null; then echo home; fi; \
          /usr/bin/luna-send -n 1 -w 4000 luna://com.webos.settingsservice/getSystemSettings '{{\"category\":\"general\",\"keys\":[\"homeAutoLaunch\"]}}'"
     );
     // Without Homebrew Channel the exec service does not exist: no root.
@@ -429,6 +702,7 @@ pub fn parse_root_status(stdout: &str) -> Option<RootStatus> {
     let compact: String = stdout.chars().filter(|c| !c.is_whitespace()).collect();
     Some(RootStatus {
         wake: lines.contains(&"wake"),
+        home: lines.contains(&"home"),
         home_auto_launch: if compact.contains("\"homeAutoLaunch\":\"on\"") {
             Some(true)
         } else if compact.contains("\"homeAutoLaunch\":\"off\"") {
@@ -553,6 +827,12 @@ pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
         }
         let mut app = App::new(id, &title(entry.get("title").and_then(Value::as_str), id));
         app.icon = Some(app_artwork::Source::new(id, entry));
+        app.removable = entry.get("removable") == Some(&json!(true))
+            && entry.get("systemApp") != Some(&json!(true));
+        app.developer = entry
+            .get("folderPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.starts_with("/media/developer/"));
         apps.push(app);
     }
     apps.sort_by_key(|a| a.title.to_lowercase());

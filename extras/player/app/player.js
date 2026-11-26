@@ -2,7 +2,13 @@
 // Signed media server stream URLs remain in memory, never logged.
 'use strict';
 
+// Debug log (log.js): a no-op unless Luma's debug log is on.
+function plog() {
+  if (window.LumaLog) window.LumaLog.line.apply(null, arguments);
+}
+window.addEventListener('unhandledrejection', (e) => plog('unhandled rejection:', e.reason));
 window.onerror = (message, source, line) => {
+  plog(`script error: ${message} (${String(source).split('/').pop()}:${line})`);
   const n = document.getElementById('note');
   if (n) {
     n.classList.remove('hidden');
@@ -17,6 +23,7 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
+const PLAYER_VERSION = '0.5.3';
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -28,7 +35,7 @@ let p = {}; // launch params from Luma
 let icons = {}; // name -> svg text
 let focus = 'bar'; // 'close' | 'bar' | 'row:N' | 'panelClose' | 'opt:KIND:N'
 let rowItems = []; // [{id, icon, label, trailing, act}]
-let panel = null; // null | 'tracks' | 'quality'
+let panel = null; // null | 'tracks' | 'quality' | 'chapters'
 let audioIndex = 0;
 let subtitleIndex = -1;
 let qualityIndex = 0;
@@ -41,6 +48,12 @@ let hoverSec = null;
 let playing = false;
 let lastMark = 0;
 let leaving = false;
+// Jellyfin: what the TV decodes, the file's streams, the choices made and
+// the stream chosen from them (streams.js). null for other sources.
+let jf = null;
+let ticksKey = '';
+let previewKey = '';
+let previewUntil = 0; // the preview stays up a moment after D-pad seeks
 
 // ---------- helpers ----------
 function clock(sec) {
@@ -54,12 +67,15 @@ function clock(sec) {
 function hm(d) {
   return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+function pos() {
+  return video.currentTime || 0;
+}
 function duration() {
   const d = video.duration;
   return isFinite(d) && d > 0 ? d : (p.durationMs || 0) / 1000;
 }
 function now() {
-  return pendingSeek !== null ? pendingSeek : video.currentTime || 0;
+  return pendingSeek !== null ? pendingSeek : pos();
 }
 function icon(name) {
   return icons[name] || '';
@@ -116,6 +132,77 @@ function applyAccent() {
   s.setProperty('--accent-ink', hex(p.accentInk, '#121519'));
 }
 
+// ---------- TV screensaver ----------
+// webOS asks every app that registered before it starts its own screensaver,
+// at the TV's own idle time (com.webos.service.tvpower, the same calls Kodi
+// and Jellyfin's webOS clients use). The player lets it start while a film is
+// paused, stopped or failed, and holds it off while one plays.
+// Its own name per start: a player left running (or relaunched) is refused
+// with "The client is already registered" under the same name.
+const SAVER_CLIENT = `com.archbtw.luma.player.${Date.now().toString(36)}`;
+const TVPOWER = 'luna://com.webos.service.tvpower/power/';
+// Backup for a TV that never asks during a long pause: start it ourselves.
+const SAVER_BACKUP_MS = 10 * 60 * 1000;
+let saverBridge = null;
+let saverAskedAt = 0;
+let pausedAt = 0;
+let saverStarted = false;
+function playingNow() {
+  return !document.hidden && !video.paused && !video.ended && video.readyState >= 2;
+}
+function watchScreensaver() {
+  if (saverBridge || typeof PalmServiceBridge === 'undefined') return;
+  try {
+    // The bridge must stay referenced: the subscription lives as long as it.
+    saverBridge = new PalmServiceBridge();
+    saverBridge.onservicecallback = (text) => {
+      let m = null;
+      try {
+        m = JSON.parse(text);
+      } catch {
+        m = null;
+      }
+      if (!m) return;
+      if (m.returnValue === false) {
+        plog('TV screensaver: not available here', m.errorText || '');
+        return;
+      }
+      if (m.state !== 'Active' || m.timestamp === undefined) return;
+      saverAskedAt = Date.now();
+      const allow = !playingNow();
+      plog(`TV screensaver asked: ${allow ? 'allowed (not playing)' : 'held off (playing)'}`);
+      luna(`${TVPOWER}responseScreenSaverRequest`, {
+        clientName: SAVER_CLIENT,
+        ack: allow,
+        timestamp: m.timestamp,
+      });
+    };
+    saverBridge.call(
+      `${TVPOWER}registerScreenSaverRequest`,
+      JSON.stringify({ subscribe: true, clientName: SAVER_CLIENT }),
+    );
+  } catch (e) {
+    plog('TV screensaver: no access', e && e.message);
+  }
+}
+function screensaverTick() {
+  if (!pausedAt || saverStarted || playingNow()) return;
+  const idle = Date.now() - Math.max(pausedAt, lastInput);
+  if (idle < SAVER_BACKUP_MS || saverAskedAt > pausedAt) return;
+  saverStarted = true;
+  plog(`paused ${Math.round(idle / 60000)} min and the TV never asked: starting its screensaver`);
+  luna(`${TVPOWER}turnOnScreenSaver`, {});
+}
+video.addEventListener('pause', () => {
+  pausedAt = Date.now();
+  saverStarted = false;
+});
+video.addEventListener('playing', () => {
+  pausedAt = 0;
+  // Playing again: a later break may be reopened again.
+  if (jf && pos() > 5) jf.reopened = 0;
+});
+
 // ---------- controls visibility ----------
 function reveal() {
   lastInput = Date.now();
@@ -126,6 +213,7 @@ function tick() {
   if (!keep && Date.now() - lastInput > HIDE_MS) document.body.classList.remove('controls');
   render();
   renderMusic();
+  screensaverTick();
   if (playing && !video.paused && Date.now() - lastMark > MARK_EVERY_MS) mark();
 }
 
@@ -148,8 +236,10 @@ function render() {
   $('clock').textContent = hm(date);
   $('ends').textContent = d ? 'Ends at ' + hm(new Date(date.getTime() + (d - t) * 1000)) : '';
   $('bar').classList.toggle('focused', focus === 'bar' && !panel);
+  drawTicks(d);
+  const previewing = drawPreview(d);
   const chip = $('chip');
-  if (hoverSec !== null && d) {
+  if (hoverSec !== null && d && !previewing) {
     chip.classList.remove('hidden');
     chip.textContent = clock(hoverSec);
     chip.style.left = Math.min(WIDE - 40, Math.max(40, (hoverSec / d) * WIDE)) + 'px';
@@ -162,7 +252,7 @@ function render() {
   } else next.classList.add('hidden');
   // Subtitles from the downloaded file.
   const cap = $('caption');
-  const ms = video.currentTime * 1000;
+  const ms = pos() * 1000;
   const cue = subtitleIndex >= 0 ? cues.find((c) => c.start <= ms && c.end >= ms) : null;
   if (cue) {
     cap.textContent = cue.text;
@@ -172,6 +262,174 @@ function render() {
   $('badgeIcon').innerHTML = icon(video.paused ? 'pause' : 'play');
   paintFocus();
 }
+// ---------- chapters and trickplay ----------
+function drawTicks(d) {
+  const list = (jf && jf.chapters) || [];
+  const key = list.length && d ? `${list.length}:${Math.round(d)}` : '';
+  if (key === ticksKey) return;
+  ticksKey = key;
+  const box = $('ticks');
+  box.innerHTML = '';
+  if (!key) return;
+  list.forEach((c) => {
+    if (c.start < 1 || c.start >= d - 1) return;
+    const t = el('div', 'tick');
+    t.style.left = (c.start / d) * WIDE + 'px';
+    box.appendChild(t);
+  });
+}
+// While seeking (D-pad, pointer hover or drag): the frame at that point from
+// Jellyfin's trickplay images, with the time and the chapter's name.
+function drawPreview(d) {
+  const box = $('preview');
+  const sec =
+    hoverSec !== null
+      ? hoverSec
+      : pendingSeek !== null
+        ? pendingSeek
+        : Date.now() < previewUntil
+          ? pos()
+          : null;
+  const S = window.LumaStreams;
+  const have = jf && (jf.trickplay || (jf.chapters && jf.chapters.length));
+  if (!have || sec === null || !d || panel) {
+    box.classList.add('hidden');
+    previewKey = '';
+    return false;
+  }
+  box.classList.remove('hidden');
+  box.style.left = Math.min(WIDE - 168, Math.max(168, (sec / d) * WIDE)) + 'px';
+  $('previewTime').textContent = clock(sec);
+  const at = S.chapterAt(jf.chapters || [], sec);
+  $('previewName').textContent = at >= 0 ? jf.chapters[at].name : '';
+  box.classList.toggle('textOnly', !jf.trickplay);
+  if (jf.trickplay) {
+    wantTilesAround(jf.trickplay, sec);
+    const f = S.trickplayFrame(jf.trickplay, sec, 320);
+    const key = `${f.url} ${f.position}`;
+    if (key !== previewKey) {
+      previewKey = key;
+      const img = $('previewImg');
+      img.style.height = f.height + 'px';
+      img.style.backgroundImage = `url("${f.url}")`;
+      img.style.backgroundSize = f.size;
+      img.style.backgroundPosition = f.position;
+    }
+  }
+  return true;
+}
+// Chapters and trickplay are on the item, not the media source Luma passed:
+// ask Jellyfin once per title. Without them the player works as before.
+function jfExtras() {
+  const j = p.jellyfin;
+  const r = p.report || {};
+  const want = jf;
+  const x = new XMLHttpRequest();
+  // The current item address; the user's id narrows it to their library.
+  const user = r.user ? `&userId=${encodeURIComponent(r.user)}` : '';
+  x.open('GET', `${j.base}/Items/${j.item}?Fields=Chapters,Trickplay${user}`);
+  x.setRequestHeader(
+    'Authorization',
+    `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${j.deviceId || r.deviceId || ''}", Version="${r.version || '1'}", Token="${j.token}"`,
+  );
+  x.onload = () => {
+    if (jf !== want || x.status >= 300) {
+      if (x.status >= 300) plog(`chapters and trickplay: HTTP ${x.status}`);
+      return;
+    }
+    let item = null;
+    try {
+      item = JSON.parse(x.responseText || 'null');
+    } catch {
+      item = null;
+    }
+    const S = window.LumaStreams;
+    const ctx = { base: j.base, item: j.item, token: j.token };
+    jf.chapters = S.chapters(item, ctx);
+    jf.trickplay = S.trickplay(item, ctx, jf.info.id);
+    const tp = jf.trickplay;
+    plog(
+      `chapters: ${jf.chapters.length}`,
+      tp
+        ? `· trickplay: ${tp.width}x${tp.height} every ${tp.interval / 1000} s, ${tp.count} frames`
+        : item && item.Trickplay
+          ? `· trickplay: none for this version (Jellyfin has ${Object.keys(item.Trickplay).length})`
+          : '· trickplay: none (Jellyfin made no trickplay images for this title)',
+    );
+    if (tp && tp.reported !== tp.count) {
+      plog(
+        `trickplay: Jellyfin reports ${tp.reported} thumbnails, the film needs ${tp.count}: using ${tp.count}`,
+      );
+    }
+    if (tp) preloadTiles(tp);
+    ticksKey = '';
+    buildRow();
+    render();
+  };
+  x.onerror = () => plog('chapters and trickplay: no answer');
+  x.send();
+}
+// A tile holds up to 100 frames and is a large image (3200x1800 decoded is
+// ~23 MB): keep only the tiles around where the preview is, at most
+// TILES_KEPT, loading the next ones before they are needed.
+const TILES_KEPT = 6;
+let tiles = new Map(); // tile index -> Image, oldest first
+let tileReported = false;
+function wantTile(tp, i) {
+  const last = Math.ceil(tp.count / (tp.cols * tp.rows)) - 1;
+  if (i < 0 || i > last) return;
+  if (tiles.has(i)) {
+    const img = tiles.get(i);
+    tiles.delete(i);
+    tiles.set(i, img);
+    return;
+  }
+  const img = new Image();
+  const want = jf;
+  img.onload = () => {
+    if (!tileReported && jf === want) {
+      tileReported = true;
+      plog(`trickplay: tile ${i} loaded, ${img.naturalWidth}x${img.naturalHeight}`);
+    }
+  };
+  img.onerror = () => plog(`trickplay: tile ${i} did not load`);
+  img.src = tp.tile(i);
+  tiles.set(i, img);
+  while (tiles.size > TILES_KEPT) tiles.delete(tiles.keys().next().value);
+}
+// The tile for this moment and its neighbours.
+function wantTilesAround(tp, sec) {
+  const i = window.LumaStreams.trickplayTile(tp, sec);
+  wantTile(tp, i);
+  wantTile(tp, i + 1);
+  wantTile(tp, i - 1);
+}
+function preloadTiles(tp) {
+  tiles = new Map();
+  tileReported = false;
+  const tileCount = Math.ceil(tp.count / (tp.cols * tp.rows));
+  plog(
+    `trickplay: ${tileCount} tile${tileCount === 1 ? '' : 's'}, loading those near ${clock(pos())}`,
+  );
+  wantTilesAround(tp, pos());
+}
+// Channel up/down: the next chapter, or the start of this one (the previous
+// one when this one has only just begun).
+function chapterStep(dir) {
+  const list = (jf && jf.chapters) || [];
+  if (!list.length) return false;
+  const S = window.LumaStreams;
+  const t = now();
+  const at = S.chapterAt(list, t);
+  let to;
+  if (dir > 0) to = at + 1 < list.length ? at + 1 : -1;
+  else to = at >= 0 && t - list[at].start > 3 ? at : Math.max(0, at - 1);
+  if (to < 0) return true;
+  plog(`chapter ${to + 1}:`, list[to].name);
+  previewUntil = Date.now() + 2500;
+  seekTo(list[to].start, true);
+  return true;
+}
 function paintFocus() {
   document.querySelectorAll('.focus').forEach((e) => e.classList.remove('focus'));
   const target = document.querySelector(`[data-focus="${focus}"]`);
@@ -180,6 +438,7 @@ function paintFocus() {
 function header() {
   const series = p.source === 'series';
   $('kind').textContent = series ? 'SERIES' : 'MOVIE';
+  $('mode').textContent = jf && jf.plan ? jf.plan.label.toUpperCase() : 'MEDIA';
   const title = $('title');
   title.textContent = p.title || '';
   title.classList.toggle('long', (p.title || '').length > 42);
@@ -210,6 +469,13 @@ function buildRow() {
       icon: 'quality',
       label: p.qualities[qualityIndex].name,
       act: () => openPanel('quality', 'quality'),
+    });
+  }
+  if (jf && jf.chapters && jf.chapters.length) {
+    rowItems.push({
+      icon: 'list',
+      label: `Chapters · ${jf.chapters.length}`,
+      act: () => openPanel('chapters', 'chapter'),
     });
   }
   const right = [];
@@ -274,6 +540,7 @@ function esc(s) {
 
 // ---------- tracks ----------
 function audioList() {
+  if (jf) return jf.info.audio.map((a) => a.name);
   const t = video.audioTracks;
   const n = t && t.length ? t.length : (p.audio || []).length;
   const out = [];
@@ -283,21 +550,48 @@ function audioList() {
 // The stream's own label first ("01. Дубляж. MovieDalen (RUS)"); media's
 // list may be ordered differently from the playlist.
 function audioName(i) {
+  if (jf) return (jf.info.audio[i] || {}).name || 'Audio';
   const t = video.audioTracks && video.audioTracks[i];
   const label = t && (t.label || '').trim();
   if (label) return label.replace(/^\d+\.\s*/, '');
   return (p.audio || [])[i] || (t && t.language) || `Track ${i + 1}`;
 }
+// Turn on one of the file's own audio tracks (Direct Play keeps them all).
+function enableTrack(i) {
+  const t = video.audioTracks;
+  if (t && t.length > i) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
+}
 function setAudio(i) {
+  plog(`choose audio ${i}:`, audioName(i));
+  if (jf) {
+    const a = jf.info.audio[i];
+    if (!a) return;
+    audioIndex = i;
+    jf.audio = a.index;
+    jfReplan();
+    buildRow();
+    return;
+  }
   const t = video.audioTracks;
   if (t && t.length) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
   audioIndex = i;
   buildRow();
 }
 function setSubtitle(i) {
+  plog(
+    `choose subtitle ${i}:`,
+    i >= 0 && p.subtitles && p.subtitles[i] ? p.subtitles[i].name : 'off',
+  );
   subtitleIndex = i;
   cues = [];
   const track = (p.subtitles || [])[i];
+  if (jf) {
+    // An image subtitle is burned into the picture; leaving one, or
+    // picking one, needs another stream from Jellyfin.
+    const wasBurned = jf.plan && jf.plan.burn;
+    jf.subtitle = track ? track.index : null;
+    if ((track && track.image) || wasBurned) jfReplan();
+  }
   if (track && track.url) {
     const x = new XMLHttpRequest();
     x.open('GET', track.url);
@@ -336,6 +630,16 @@ function parseSubtitles(text) {
   return out.sort((x, y) => x.start - y.start);
 }
 function setQuality(i) {
+  plog(`choose quality ${i}:`, p.qualities && p.qualities[i] ? p.qualities[i].name : '?');
+  if (jf) {
+    const q = (p.qualities || [])[i];
+    if (!q) return;
+    qualityIndex = i;
+    jf.quality = q.bitrate ? { bitrate: q.bitrate, height: q.height } : null;
+    jfReplan();
+    buildRow();
+    return;
+  }
   const q = (p.qualities || [])[i];
   if (!q || !q.url || i === qualityIndex) {
     qualityIndex = i;
@@ -352,42 +656,57 @@ function setQuality(i) {
 function openPanel(kind, column) {
   panel = kind;
   $('tracks').classList.remove('hidden');
-  $('panelTitle').textContent = kind === 'quality' ? 'Quality' : 'Audio and subtitles';
+  $('panelTitle').textContent =
+    kind === 'quality' ? 'Quality' : kind === 'chapters' ? 'Chapters' : 'Audio and subtitles';
   const cols = $('cols');
   cols.innerHTML = '';
   const inner = 1120 - 96;
+  const current = kind === 'chapters' ? window.LumaStreams.chapterAt(jf.chapters, now()) : -1;
   const defs =
-    kind === 'quality'
+    kind === 'chapters'
       ? [
           {
-            key: 'quality',
-            title: 'QUALITY',
-            rows: p.qualities.map((q) => q.name),
-            chosen: qualityIndex,
+            key: 'chapter',
+            title: 'CHAPTERS',
+            rows: jf.chapters.map((c) => c.name),
+            times: jf.chapters.map((c) => clock(c.start)),
+            images: jf.chapters.map((c) => c.image),
+            chosen: current,
             x: 48,
             w: inner,
           },
         ]
-      : [
-          {
-            key: 'audio',
-            title: 'AUDIO',
-            rows: audioList(),
-            chosen: audioIndex,
-            x: 48,
-            w: (inner - 40) / 2,
-          },
-          {
-            key: 'sub',
-            title: 'SUBTITLES',
-            rows: ['Off'].concat((p.subtitles || []).map((s) => s.name)),
-            chosen: subtitleIndex + 1,
-            x: 48 + (inner - 40) / 2 + 40,
-            w: (inner - 40) / 2,
-          },
-        ];
+      : kind === 'quality'
+        ? [
+            {
+              key: 'quality',
+              title: 'QUALITY',
+              rows: p.qualities.map((q) => q.name),
+              chosen: qualityIndex,
+              x: 48,
+              w: inner,
+            },
+          ]
+        : [
+            {
+              key: 'audio',
+              title: 'AUDIO',
+              rows: audioList(),
+              chosen: audioIndex,
+              x: 48,
+              w: (inner - 40) / 2,
+            },
+            {
+              key: 'sub',
+              title: 'SUBTITLES',
+              rows: ['Off'].concat((p.subtitles || []).map((s) => s.name)),
+              chosen: subtitleIndex + 1,
+              x: 48 + (inner - 40) / 2 + 40,
+              w: (inner - 40) / 2,
+            },
+          ];
   defs.forEach((d) => {
-    if (kind !== 'quality' && d.key === 'sub' && !(p.subtitles || []).length) return;
+    if (kind === 'tracks' && d.key === 'sub' && !(p.subtitles || []).length) return;
     const col = el('div', 'col');
     col.style.left = d.x + 'px';
     col.style.width = d.w + 'px';
@@ -397,7 +716,14 @@ function openPanel(kind, column) {
     list.style.maxHeight = 68 * 8 + 'px';
     list.style.overflow = 'hidden';
     d.rows.forEach((name, i) => {
-      const o = el('div', 'opt', `<span>${esc(name)}</span>${i === d.chosen ? icon('check') : ''}`);
+      const o = d.times
+        ? el(
+            'div',
+            'opt chapter',
+            (d.images[i] ? `<img src="${esc(d.images[i])}" alt="">` : '<i class="noimg"></i>') +
+              `<span>${esc(name)}</span><em>${d.times[i]}</em>${i === d.chosen ? icon('check') : ''}`,
+          )
+        : el('div', 'opt', `<span>${esc(name)}</span>${i === d.chosen ? icon('check') : ''}`);
       o.dataset.focus = `opt:${d.key}:${i}`;
       list.appendChild(o);
     });
@@ -405,7 +731,13 @@ function openPanel(kind, column) {
     cols.appendChild(col);
   });
   const chosen =
-    column === 'sub' ? subtitleIndex + 1 : column === 'quality' ? qualityIndex : audioIndex;
+    column === 'sub'
+      ? subtitleIndex + 1
+      : column === 'quality'
+        ? qualityIndex
+        : column === 'chapter'
+          ? Math.max(0, current)
+          : audioIndex;
   focus = `opt:${column}:${chosen}`;
   scrollToFocus();
   reveal();
@@ -416,13 +748,26 @@ function closePanel() {
   panel = null;
   $('tracks').classList.add('hidden');
   const at = rowItems.findIndex((r) =>
-    was === 'quality' ? r.icon === 'quality' : r.icon === 'volume' || r.icon === 'captions',
+    was === 'quality'
+      ? r.icon === 'quality'
+      : was === 'chapters'
+        ? r.icon === 'list'
+        : r.icon === 'volume' || r.icon === 'captions',
   );
   focus = at >= 0 ? 'row:' + at : 'bar';
   reveal();
   render();
 }
 function chooseOption(kind, i) {
+  if (kind === 'chapter') {
+    const c = jf && jf.chapters[i];
+    closePanel();
+    if (c) {
+      plog(`chapter ${i + 1}:`, c.name);
+      seekTo(c.start, true);
+    }
+    return;
+  }
   if (kind === 'audio') setAudio(i);
   else if (kind === 'sub') setSubtitle(i - 1);
   else setQuality(i);
@@ -442,9 +787,204 @@ function scrollToFocus() {
   }
 }
 
+// ---------- Jellyfin ----------
+// The TV is asked once per title what it decodes; streams.js turns that
+// and the viewer's choices into Direct Play, Direct Stream or a transcode.
+function jfStart(at) {
+  const j = p.jellyfin;
+  const S = window.LumaStreams;
+  const info = S.sourceInfo(j.source);
+  jf = {
+    caps: S.capabilities(video, p.audioSupport),
+    info,
+    audio: typeof j.audio === 'number' ? j.audio : null,
+    subtitle: typeof j.subtitle === 'number' ? j.subtitle : null,
+    quality: j.quality || null,
+    forceStream: false,
+    fallback: 0,
+    plan: null,
+    chapters: [],
+    trickplay: null,
+  };
+  ticksKey = '';
+  previewKey = '';
+  jfExtras();
+  const chosenAudio = info.audio.findIndex((a) => a.index === jf.audio);
+  audioIndex =
+    chosenAudio >= 0
+      ? chosenAudio
+      : Math.max(
+          0,
+          info.audio.findIndex((a) => a.isDefault),
+        );
+  p.audio = info.audio.map((a) => a.name);
+  const yes = (o) => Object.keys(o).filter((k) => o[k]);
+  plog('TV decodes video:', yes(jf.caps.video).join(','), '· audio:', yes(jf.caps.audio).join(','));
+  const support = p.audioSupport || {};
+  plog(
+    `TrueHD: TV says ${jf.caps.asked.truehd ? 'yes' : 'no'}, setting ${support.truehd || 'auto'}`,
+    `· DTS: TV says ${jf.caps.asked.dts ? 'yes' : 'no'}, setting ${support.dts || 'auto'}`,
+  );
+  plog(
+    'file:',
+    info.container,
+    info.video.codec,
+    info.video.rangeType || (info.video.hdr ? 'HDR' : 'SDR'),
+    `${info.video.height || '?'}p`,
+    '· audio tracks:',
+    info.audio.map((a) => a.codec + (a.isDefault ? '*' : '')).join(','),
+    '· subtitles:',
+    info.subtitles.length,
+  );
+  const ctx = jfContext();
+  p.subtitles = info.subtitles.map((sub) => ({
+    name: S.subtitleLabel(info, sub),
+    url: S.subtitleUrl(ctx, sub),
+    image: sub.image,
+    index: sub.index,
+  }));
+  p.qualities = [{ name: info.video.hdr ? 'Original · HDR' : 'Original' }].concat(
+    S.qualities(info),
+  );
+  qualityIndex = jf.quality
+    ? Math.max(
+        0,
+        p.qualities.findIndex((q) => q.bitrate === jf.quality.bitrate),
+      )
+    : 0;
+  const sub = p.subtitles.findIndex((t) => t.index === jf.subtitle);
+  subtitleIndex = -1;
+  cues = [];
+  jf.plan = S.plan(jfContext());
+  logPlan('plan');
+  showSwap();
+  header();
+  buildRow();
+  if (sub >= 0) {
+    subtitleIndex = sub;
+    const track = p.subtitles[sub];
+    if (track.url) setSubtitle(sub);
+  }
+  open(jf.plan.url, at);
+}
+// The default track gave way to a playable one: show that one as chosen.
+function showSwap() {
+  if (!jf || !jf.plan || !jf.plan.audioSwappedFrom) return;
+  const playing = jf.info.audio.findIndex((a) => a.index === jf.plan.audioIndex);
+  if (playing >= 0) audioIndex = playing;
+  plog(`audio: ${jf.plan.audioSwappedFrom} is not playable here, playing`, audioName(audioIndex));
+  buildRow();
+}
+function jfContext() {
+  const j = p.jellyfin;
+  return {
+    base: j.base,
+    token: j.token,
+    deviceId: j.deviceId,
+    item: j.item,
+    session: j.session,
+    info: jf.info,
+    caps: jf.caps,
+    audio: jf.audio,
+    subtitle: jf.subtitle,
+    quality: jf.quality,
+    forceStream: jf.forceStream,
+    fallback: jf.fallback,
+  };
+}
+// A choice changed: the same stream only switches tracks; another stream
+// reopens where the picture was.
+function logPlan(why) {
+  const q = jf.plan;
+  plog(
+    `${why}:`,
+    q.method,
+    '·',
+    q.label,
+    q.reasons && q.reasons.length ? `· because ${q.reasons.join(', ')}` : '',
+  );
+}
+function jfReplan() {
+  const at = pos();
+  const next = window.LumaStreams.plan(jfContext());
+  const old = jf.plan;
+  jf.plan = next;
+  logPlan('new plan');
+  header();
+  if (old && old.url === next.url) {
+    enableTrack(next.audioPosition);
+    return;
+  }
+  open(next.url, at);
+}
+// The next or previous episode: Jellyfin is asked for its file first.
+function jfEpisode(e, done) {
+  const r = p.report;
+  const x = new XMLHttpRequest();
+  x.open(
+    'POST',
+    `${r.base}/Items/${e.item}/PlaybackInfo?UserId=${encodeURIComponent(r.user || '')}`,
+  );
+  x.setRequestHeader('Content-Type', 'application/json');
+  x.setRequestHeader(
+    'Authorization',
+    `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${r.deviceId}", Version="${r.version || '1'}", Token="${r.token}"`,
+  );
+  x.onload = () => {
+    let info = null;
+    try {
+      info = JSON.parse(x.responseText || 'null');
+    } catch {
+      info = null;
+    }
+    const source = info && info.MediaSources && info.MediaSources[0];
+    if (x.status >= 300 || !source) return done(false);
+    p.jellyfin = Object.assign({}, p.jellyfin, {
+      item: e.item,
+      source,
+      session: info.PlaySessionId || p.jellyfin.session,
+      audio: null,
+      subtitle: null,
+      quality: null,
+    });
+    r.source = source.Id;
+    r.session = p.jellyfin.session;
+    done(true);
+  };
+  x.onerror = () => done(false);
+  x.send(JSON.stringify({ UserId: r.user || undefined }));
+}
+
 // ---------- playback ----------
 let opening = null;
+// The stream's settings for the log: what Jellyfin is asked to copy or
+// convert. The address and its keys stay out (log.js drops query strings).
+const STREAM_KEYS = [
+  'static',
+  'SegmentContainer',
+  'StartTimeTicks',
+  'VideoCodec',
+  'AllowVideoStreamCopy',
+  'AudioCodec',
+  'AudioStreamIndex',
+  'TranscodingMaxAudioChannels',
+  'SubtitleStreamIndex',
+  'SubtitleMethod',
+  'VideoBitrate',
+  'MaxHeight',
+];
+function streamSettings(url) {
+  try {
+    const q = new URL(url).searchParams;
+    return STREAM_KEYS.filter((k) => q.has(k))
+      .map((k) => `${k}=${q.get(k)}`)
+      .join(' ');
+  } catch {
+    return '';
+  }
+}
 function open(url, at) {
+  plog('open stream', url, at > 0 ? `at ${Math.round(at)} s` : '', streamSettings(url));
   playing = false;
   showNote('Loading…');
   // Tear the previous stream down first: on webOS a bare src swap can leave
@@ -458,11 +998,13 @@ function open(url, at) {
     video.removeEventListener('loadedmetadata', start);
     opening = null;
     if (at > 0) video.currentTime = at;
-    if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
+    if (jf) enableTrack(jf.plan ? jf.plan.audioPosition : 0);
+    else if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
   };
   opening = start;
   video.addEventListener('loadedmetadata', start);
-  video.play();
+  const started = video.play();
+  if (started && started.catch) started.catch(() => {});
   if (p.report) setTimeout(() => report('start'), 0);
 }
 function showNote(title, sub) {
@@ -478,6 +1020,7 @@ function showNote(title, sub) {
   $('noteSub').textContent = sub || '';
 }
 function seekBy(delta) {
+  previewUntil = Date.now() + 2500;
   const d = duration();
   const base = now();
   seekTo(Math.max(0, Math.min(d ? d - 1 : base + delta, base + delta)), false);
@@ -496,8 +1039,11 @@ function seekTo(sec, immediate) {
   render();
 }
 function toggle() {
-  if (video.paused) video.play();
-  else {
+  if (video.paused) {
+    // A stream that failed has nothing to play: no unhandled rejection.
+    const started = video.play();
+    if (started && started.catch) started.catch(() => {});
+  } else {
     video.pause();
     mark();
   }
@@ -511,9 +1057,12 @@ function report(event, done) {
     if (done) done();
     return;
   }
-  const ms = Math.floor((video.currentTime || 0) * 1000);
+  const ms = Math.floor(pos() * 1000);
   const x = new XMLHttpRequest();
   x.onloadend = () => {
+    if (x.status < 200 || x.status >= 300) {
+      plog(`progress report "${event}" to ${r.service || 'jellyfin'} failed: HTTP ${x.status}`);
+    }
     if (done) done();
   };
   if (r.service === 'plex') {
@@ -580,15 +1129,28 @@ function episode(target) {
     p.subtitles = [];
     subtitleIndex = -1;
     cues = [];
+    if (jf) {
+      showNote('Loading…');
+      jfEpisode(e, (ok) => {
+        if (ok) return jfStart(0);
+        jf = null;
+        header();
+        buildRow();
+        open(e.url, 0);
+      });
+      return;
+    }
     header();
     buildRow();
     open(e.url, 0);
     return;
   }
 }
-function leave(_why) {
+function leave(why) {
   if (leaving) return;
   leaving = true;
+  plog('close:', why || 'back', `at ${clock(pos())}`);
+  if (window.LumaLog) window.LumaLog.flush();
   video.pause();
   // Luma reloads the card on return, so the watch time is saved first (1.5 s at most).
   let gone = false;
@@ -621,8 +1183,122 @@ video.addEventListener('playing', () => {
 video.addEventListener('waiting', () => {
   if (playing) render();
 });
-video.addEventListener('error', () => showNote("Can't play this video", 'The stream did not open'));
+// For the debug log: what Jellyfin answers at the address that failed (its
+// status, and for HLS the variant lines with their CODECS).
+function probe(url) {
+  if (!url || !window.LumaLog || !window.LumaLog.active()) return;
+  const x = new XMLHttpRequest();
+  x.onload = () => {
+    const text = String(x.responseText || '').slice(0, 4000);
+    const lines = /m3u8/.test(url)
+      ? text.split('\n').filter((l) => /^#EXT-X-(STREAM-INF|MEDIA|VERSION|MAP)/.test(l))
+      : [];
+    plog(`server answered HTTP ${x.status}`, lines.slice(0, 4).join(' | '));
+  };
+  x.onerror = () => plog('server did not answer');
+  try {
+    x.open('GET', url);
+    // A peek is enough for a video file.
+    if (!/m3u8/.test(url)) x.setRequestHeader('Range', 'bytes=0-1023');
+    x.send();
+  } catch {
+    plog('server could not be asked');
+  }
+}
+
+// What the TV's media pipeline does, for the debug log.
+['loadstart', 'canplay', 'stalled', 'pause', 'seeked', 'emptied', 'abort'].forEach((name) =>
+  video.addEventListener(name, () => plog(`video ${name} at ${clock(video.currentTime)}`)),
+);
+video.addEventListener('loadedmetadata', () => {
+  plog(
+    `video metadata: ${video.videoWidth}x${video.videoHeight}, ${clock(video.duration)},`,
+    `${video.audioTracks ? video.audioTracks.length : '?'} audio tracks`,
+  );
+  // Copied video keeps the file's size; a much smaller picture means the
+  // server is converting it.
+  const wanted = jf && jf.plan && jf.plan.method !== 'Transcode' && jf.info.video.height;
+  if (wanted && video.videoHeight && video.videoHeight < wanted * 0.75) {
+    plog(`warning: the server sends ${video.videoHeight}p, the file is ${wanted}p (converted?)`);
+  }
+});
+video.addEventListener('playing', () => plog(`video playing at ${clock(video.currentTime)}`));
+video.addEventListener('waiting', () => plog(`video buffering at ${clock(video.currentTime)}`));
+video.addEventListener('ended', () => plog('video ended'));
+const MEDIA_ERRORS = ['', 'aborted', 'network', 'decode', 'format not supported'];
+video.addEventListener('error', () => {
+  // The TV refused the original file after all: retry once with the video
+  // copied into a new container (still no re-encoding, HDR intact).
+  // Only a format or decode refusal: a network hiccup is not the file's fault.
+  const code = video.error ? video.error.code : 0;
+  const detail = video.error && video.error.message ? `: ${video.error.message}` : '';
+  plog(`video error ${code} (${MEDIA_ERRORS[code] || 'unknown'})${detail}`);
+  if (jf && jf.plan && jf.plan.method === 'DirectPlay' && !jf.forceStream && code >= 3) {
+    // Set to "TV plays it" (or the TV said yes), but this TV refused.
+    const track = jf.info.audio.find((a) => a.index === jf.audio) || jf.info.audio[audioIndex];
+    const kind = track && window.LumaStreams.family(track.codec);
+    if (kind === 'truehd' || kind === 'dts') {
+      jf.caps.audio[kind] = false;
+      const name = kind === 'truehd' ? 'TrueHD' : 'DTS';
+      // Not picked by the viewer: play the file's own playable companion
+      // track (AC-3, E-AC-3) directly before converting anything.
+      const companion =
+        jf.audio === null && window.LumaStreams.fallbackTrack(jf.info, jf.caps, track);
+      if (companion) {
+        plog(`${name} refused after all: switching to`, companion.name);
+        jfReplan();
+        showSwap();
+        return;
+      }
+      plog(`${name} refused after all: converting it`);
+    }
+    jf.forceStream = true;
+    plog('Direct Play refused: retrying as Direct Stream');
+    jfReplan();
+    return;
+  }
+  // A stream that played and then broke (Jellyfin ends a stream left paused
+  // for a while): open it again where it was, paused if it was paused.
+  if (jf && jf.plan && jf.plan.method !== 'DirectPlay' && pos() > 5 && (jf.reopened || 0) < 2) {
+    jf.reopened = (jf.reopened || 0) + 1;
+    const at = pos();
+    const wasPaused = video.paused;
+    plog(`stream broke off at ${clock(at)}: opening it again there`);
+    open(jf.plan.url, at);
+    if (wasPaused) {
+      const hold = () => {
+        video.removeEventListener('canplay', hold);
+        video.pause();
+      };
+      video.addEventListener('canplay', hold);
+    }
+    return;
+  }
+  if (jfFallback('refused')) return;
+  plog('gave up: "The stream did not open"');
+  probe(video.currentSrc || video.src);
+  showNote("Can't play this video", 'The stream did not open');
+});
+// The TV refused a converted stream, or it broke off: the same video copy
+// with plainer audio (E-AC-3, then AC-3, then AAC). False when none is left.
+function jfFallback(why) {
+  if (!jf || !jf.plan || !jf.plan.fallbackLeft) return false;
+  jf.fallback = (jf.fallback || 0) + 1;
+  plog(`stream ${why}: retrying with plainer audio`);
+  jfReplan();
+  return true;
+}
 video.addEventListener('ended', () => {
+  // An end long before the film's own is the stream breaking off, not the
+  // film finishing: try again from there rather than closing.
+  const total = (p.durationMs || 0) / 1000;
+  if (!music && jf && total > 0 && pos() < total - 60) {
+    plog(`stream ended early at ${clock(pos())} of ${clock(total)}`);
+    if (!jfFallback('broke off')) {
+      showNote("Can't play this video", 'The stream stopped early');
+    }
+    return;
+  }
   if (music) {
     if (music.at + 1 < music.order.length) step(1);
     else {
@@ -660,7 +1336,13 @@ function move(dir) {
 }
 function movePanel(dir) {
   if (focus === 'panelClose') {
-    if (dir === 'down') focus = panel === 'quality' ? 'opt:quality:0' : 'opt:audio:0';
+    if (dir === 'down')
+      focus =
+        panel === 'quality'
+          ? 'opt:quality:0'
+          : panel === 'chapters'
+            ? 'opt:chapter:0'
+            : 'opt:audio:0';
     return;
   }
   const [, kind, n] = focus.split(':');
@@ -689,6 +1371,7 @@ function activate() {
   }
 }
 document.addEventListener('keydown', (e) => {
+  plog(`key ${e.keyCode}`, music ? '(music)' : `focus ${focus}${panel ? ` panel ${panel}` : ''}`);
   if (music) {
     musicKey(e);
     return;
@@ -726,6 +1409,12 @@ document.addEventListener('keydown', (e) => {
     leave('stop');
     return;
   } // Stop
+  if ((k === 33 || k === 34) && !panel && chapterStep(k === 33 ? 1 : -1)) {
+    e.preventDefault();
+    reveal();
+    render();
+    return;
+  } // Channel up / down: next or previous chapter
   if (hidden && !panel) {
     // The first press shows the controls; left/right already seek.
     if (k === 37 || k === 39) {
@@ -921,6 +1610,7 @@ function current() {
 function playSong(i, fresh) {
   const song = music.songs[i];
   if (!song) return;
+  plog(`song ${i + 1} of ${music.songs.length}`);
   if (p.report) {
     if (fresh !== false && playing) report('stop');
     p.report.item = song.item;
@@ -1103,7 +1793,24 @@ function params() {
 }
 function start() {
   const next = params();
-  if (!next.url) return;
+  if (window.LumaLog) window.LumaLog.configure(next.debugLog);
+  if (!next.url) {
+    plog('launched without a stream');
+    return;
+  }
+  plog(
+    'start:',
+    next.music
+      ? 'music'
+      : next.jellyfin
+        ? 'jellyfin'
+        : next.report
+          ? next.report.service || 'media'
+          : 'url',
+    next.title ? `"${next.title}"` : '',
+    next.resumeMs ? `resume at ${clock(next.resumeMs / 1000)}` : '',
+    `· player ${PLAYER_VERSION} · ${navigator.userAgent}`,
+  );
   leaving = false;
   p = next;
   p.qualities = p.qualities || [];
@@ -1124,6 +1831,13 @@ function start() {
     renderMusic();
     return;
   }
+  jf = null;
+  if (p.jellyfin && p.jellyfin.source && window.LumaStreams) {
+    jfStart((p.resumeMs || 0) / 1000);
+    reveal();
+    render();
+    return;
+  }
   header();
   buildRow();
   if (typeof p.subtitle === 'number' && p.subtitle >= 0) setSubtitle(p.subtitle);
@@ -1131,7 +1845,22 @@ function start() {
   reveal();
   render();
 }
-document.addEventListener('webOSRelaunch', start);
+// With handlesRelaunch, webOS leaves a relaunched app where it is: a player
+// left running in the background (Home pressed during a film) must bring
+// itself to the front, or it opens the next film hidden and video never starts.
+function bringToFront() {
+  try {
+    const system = window.webOSSystem || window.PalmSystem;
+    if (system && typeof system.activate === 'function') system.activate();
+  } catch (e) {
+    plog(`could not come to the front: ${e && e.message}`);
+  }
+}
+document.addEventListener('webOSRelaunch', () => {
+  plog('relaunched: coming to the front');
+  bringToFront();
+  start();
+});
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     mark();
@@ -1154,6 +1883,7 @@ loadIcons(
     'shuffle',
   ],
   () => {
+    watchScreensaver();
     start();
     setInterval(tick, 250);
   },

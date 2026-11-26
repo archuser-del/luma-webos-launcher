@@ -107,13 +107,26 @@ pub fn row_stack(state: &crate::state::State, row: usize) -> Option<usize> {
     visible_rows(state).nth(row).map(|(i, _)| i)
 }
 
+/// Home's rows in the order they are shown: as set in Settings, except
+/// that while the Jellyfin tile is selected its rows come first, right
+/// under Favorites. Indices into preferences.stacks.
+pub fn home_order(state: &crate::state::State) -> Vec<usize> {
+    let stacks = &state.preferences.stacks;
+    let mut order: Vec<usize> = (0..stacks.len()).collect();
+    if state.jellyfin_tile_id().is_some() && state.jellyfin_rows_shown() {
+        // A stable sort: Jellyfin rows first, each group in its own order.
+        order.sort_by_key(|i| stacks[*i].source != "jellyfin");
+    }
+    order
+}
+
 fn visible_rows(state: &crate::state::State) -> impl Iterator<Item = (usize, &StackConfig)> + '_ {
-    state
-        .preferences
-        .stacks
-        .iter()
-        .enumerate()
+    home_order(state)
+        .into_iter()
+        .map(|i| (i, &state.preferences.stacks[i]))
         .filter(|(i, s)| s.show && state.stack_items.get(*i).is_some_and(|v| !v.is_empty()))
+        // Jellyfin rows only while the Jellyfin tile is selected.
+        .filter(|(_, s)| s.source != "jellyfin" || state.jellyfin_rows_shown())
 }
 
 /// (id, name, available now).

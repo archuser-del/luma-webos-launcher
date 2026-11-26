@@ -39,10 +39,11 @@ pub const CARD_STAGGER: f32 = 0.045;
 pub const REVEAL_TIME: f32 = ROW_DELAY + 6. * CARD_STAGGER + BLOCK_TIME;
 pub const BACKDROP_TIME: f32 = 0.35;
 
-/// Pills: 0 audio, 1 subtitles, 2 quality.
+/// Pills: 0 audio, 1 subtitles, 2 quality, 3 version.
 pub const AUDIO: usize = 0;
 pub const SUBTITLES: usize = 1;
 pub const QUALITY: usize = 2;
+pub const VERSION: usize = 3;
 
 #[derive(Clone, Debug)]
 pub struct MovieCard {
@@ -57,6 +58,8 @@ pub struct MovieCard {
     pub quality: usize,
     /// 0 = Off, n = detail.subtitles[n - 1].
     pub subtitle: usize,
+    /// Index into detail.versions (0 = the first file).
+    pub version: usize,
     /// Open side panel (AUDIO, SUBTITLES or QUALITY) and when it opened.
     pub panel: Option<(usize, Instant)>,
     pub opened: Instant,
@@ -95,10 +98,15 @@ impl MovieCard {
         // No audio pill: the voice-over can only be switched inside the
         // player, so a picker here did nothing (remove it).
         let mut out = vec![];
+        if d.versions.len() > 1 {
+            out.push(VERSION);
+        }
         if !d.subtitles.is_empty() {
             out.push(SUBTITLES);
         }
-        if d.qualities.len() > 1 {
+        // A named original (Jellyfin) is worth showing even with nothing
+        // else to pick: it says the file plays as it is.
+        if d.qualities.len() > 1 || (d.default_quality.is_some() && !d.qualities.is_empty()) {
             out.push(QUALITY);
         }
         out
@@ -114,13 +122,23 @@ impl MovieCard {
                 .get(self.subtitle - 1)
                 .map_or("Off".into(), |s| s.0.clone()),
             SUBTITLES => "Off".into(),
+            VERSION => d
+                .versions
+                .get(self.version)
+                .map_or_else(String::new, |v| v.0.clone()),
             _ if self.quality > 0 => d
                 .qualities
                 .get(self.quality - 1)
                 .cloned()
-                .unwrap_or_else(|| "Auto".into()),
-            _ => "Auto".into(),
+                .unwrap_or_else(|| self.default_quality()),
+            _ => self.default_quality(),
         }
+    }
+    fn default_quality(&self) -> String {
+        self.detail
+            .as_ref()
+            .and_then(|d| d.default_quality.clone())
+            .unwrap_or_else(|| "Auto".into())
     }
     /// Rows of the open side panel.
     pub fn options(&self, kind: usize) -> Vec<String> {
@@ -132,7 +150,8 @@ impl MovieCard {
             SUBTITLES => std::iter::once("Off".to_owned())
                 .chain(d.subtitles.iter().map(|s| s.0.clone()))
                 .collect(),
-            _ => std::iter::once("Auto".to_owned())
+            VERSION => d.versions.iter().map(|v| v.0.clone()).collect(),
+            _ => std::iter::once(self.default_quality())
                 .chain(d.qualities.iter().cloned())
                 .collect(),
         }
@@ -142,6 +161,7 @@ impl MovieCard {
         match kind {
             AUDIO => 0,
             SUBTITLES => self.subtitle,
+            VERSION => self.version,
             _ => self.quality,
         }
     }
@@ -188,6 +208,7 @@ impl MovieCard {
             subtitle: (self.subtitle > 0)
                 .then(|| d.and_then(|d| d.subtitles.get(self.subtitle - 1).map(|s| s.0.clone())))
                 .flatten(),
+            version: d.and_then(|d| d.versions.get(self.version).map(|v| v.1.clone())),
         }
     }
     /// Stills of the shown season that were not asked for yet.
@@ -237,6 +258,7 @@ impl State {
             season: 0,
             quality: 0,
             subtitle: 0,
+            version: 0,
             panel: None,
             opened: now,
             shown: None,
@@ -651,6 +673,7 @@ impl State {
                     match kind {
                         Some(SUBTITLES) => m.subtitle = i,
                         Some(QUALITY) => m.quality = i,
+                        Some(VERSION) => m.version = i,
                         _ => {}
                     }
                 }
@@ -903,6 +926,8 @@ impl State {
             audio: vec!["Russian · HDRezka".into(), "English · Original".into()],
             subtitles: (0..12).map(|i| (format!("Language {i}"), String::new())).collect(),
             qualities: vec!["2160p".into(), "1080p".into(), "720p".into()],
+            default_quality: None,
+            versions: vec![],
             trailer: Some("http://example.invalid/trailer".into()),
             seasons: if serial { vec![1, 2, 3] } else { vec![] },
             episodes: if serial { episodes } else { vec![] },

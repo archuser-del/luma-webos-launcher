@@ -2732,7 +2732,9 @@ fn load_font(directory: &Path, id: u16) -> Result<Font, String> {
     } else if id >= 2000 {
         format!("font-cjk-{}.ttf", id - 2000)
     } else if id >= 1000 {
-        format!("font-display-{}.ttf", id - 1000)
+        // The display face ships up to 800; a heavier request (the title
+        // card's 900) uses the heaviest one there is.
+        format!("font-display-{}.ttf", (id - 1000).min(800))
     } else {
         format!("font-{id}.ttf")
     };

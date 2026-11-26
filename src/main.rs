@@ -1,7 +1,11 @@
 mod aerial_video;
 mod app_artwork;
+#[cfg(all(feature = "webos", unix))]
+#[path = "app-subscription.rs"]
+mod app_subscription;
 mod branding;
 mod custom_videos;
+mod debug_log;
 mod diagnostics;
 mod font;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
@@ -9,6 +13,7 @@ mod hw_wallpaper;
 mod i18n;
 mod immich_frame;
 mod jellyfin;
+mod layout;
 mod library;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
@@ -36,6 +41,7 @@ mod steam;
 mod storage;
 mod typography;
 mod ui_sound;
+mod usb_videos;
 mod vector;
 mod video_catalog;
 mod view;
@@ -83,6 +89,8 @@ struct Options {
     resolution: Option<Size>,
     capture_size: Option<Size>,
     diagnostics: Option<PathBuf>,
+    /// Write the debug log from the start (also: Settings › System).
+    debug_log: bool,
     profile_frames: Option<usize>,
     weather_test_server: Option<String>,
     test_extra_apps: usize,
@@ -104,15 +112,19 @@ impl Options {
             if let Some(argument) = args.next() {
                 let metadata: serde_json::Value =
                     serde_json::from_str(&argument).map_err(|error| error.to_string())?;
-                result.webos_home = metadata.get("nid").and_then(serde_json::Value::as_str)
-                    == Some(platform::HOME_ID);
+                result.webos_home = ["nid", "appId"].iter().any(|key| {
+                    metadata
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(platform::is_home_id)
+                });
             }
             eprintln!("Luma webOS launch parameters accepted");
         }
         while let Some(arg) = args.next() {
             if arg == "--help" {
                 println!(
-                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
+                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n  --debug-log         Write a debug log next to the preferences file\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
                 );
                 println!(
                     "\n  --test-extra-apps N  Explicit scroll preview with up to 300 non-launchable extra cards; separate preferences"
@@ -121,6 +133,10 @@ impl Options {
             }
             if arg == "--fullscreen" {
                 result.fullscreen = true;
+                continue;
+            }
+            if arg == "--debug-log" {
+                result.debug_log = true;
                 continue;
             }
             let value = args
@@ -244,7 +260,23 @@ fn effects(
     home: &smart_home::Service,
 ) -> bool {
     for effect in effects {
+        let name = effect_name(&effect);
+        debug_log!("effect {name}");
+        if matches!(name.as_str(), "MediaDetails" | "MediaPlay") || name.starts_with("Launch") {
+            HEAVY_EFFECT.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         match effect {
+            Effect::DebugLog(on) => {
+                if on {
+                    // The zone read at startup; set_offset keeps the first one.
+                    start_debug_log(preferences, time::UtcOffset::UTC, "Settings › System");
+                } else {
+                    debug_log::stop();
+                }
+                state.debug_log_file = debug_log::current()
+                    .filter(|_| debug_log::enabled())
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+            }
             Effect::Save => {
                 if let Err(error) = storage::save(preferences, &state.preferences) {
                     eprintln!("{error}");
@@ -269,6 +301,15 @@ fn effects(
                 } else {
                     state.notify(format!("Would open {url} in the TV browser"));
                 }
+            }
+            Effect::Uninstall(id) => {
+                let developer = state
+                    .inventory
+                    .apps
+                    .iter()
+                    .any(|app| app.id == id && app.developer);
+                debug_log!("uninstall {id} (developer install: {developer})");
+                platform.send(Request::Uninstall(id, developer));
             }
             Effect::Launch(id) => {
                 if scroll_preview::is_placeholder(&id) {
@@ -346,6 +387,7 @@ fn effects(
                         selected_subtitle: None,
                         report: None,
                         music: None,
+                        jellyfin: None,
                     };
                     if let Ok(request) = request.sanitize() {
                         open_player(state, platform, request);
@@ -471,8 +513,7 @@ fn effects(
                     media::PlayRequest {
                         id,
                         episode: Some((season, number)),
-                        quality: None,
-                        subtitle: None,
+                        ..Default::default()
                     },
                 ));
             }
@@ -483,8 +524,7 @@ fn effects(
                     media::PlayRequest {
                         id,
                         episode: Some((season, number)),
-                        quality: None,
-                        subtitle: None,
+                        ..Default::default()
                     },
                 ));
             }
@@ -535,6 +575,7 @@ fn effects(
                     selected_subtitle: None,
                     report: None,
                     music: None,
+                    jellyfin: None,
                 };
                 match request.sanitize() {
                     Ok(request) => open_player(state, platform, request),
@@ -759,6 +800,12 @@ fn script(
         }
         "hold" => state.hold(),
         "wait" => vec![],
+        // Desktop screenshots: focus one app, e.g. focus-app:netflix.
+        action if action.starts_with("focus-app:") => {
+            state.focus = state::Target::App(action["focus-app:".len()..].to_owned());
+            state.dirty = true;
+            vec![]
+        }
         action if action.starts_with("notice:") => {
             state.notify(&action["notice:".len()..]);
             vec![]
@@ -1027,6 +1074,7 @@ fn immich_tick(state: &mut State, preferences_path: &std::path::Path, visible: b
             match update {
                 immich_frame::Update::Frame(frame) => state.immich_show(frame),
                 immich_frame::Update::Failed(error) => {
+                    debug_log!("ImmichFrame failed: {error}");
                     state.immich_status = Some((error, true));
                     state.dirty = true;
                 }
@@ -1234,6 +1282,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                 }
             }
             jellyfin::Response::Failed(message) => {
+                debug_log!("Jellyfin failed: {message}");
                 if state.launching {
                     state.launching = false;
                     state.notify(message.clone());
@@ -1280,6 +1329,7 @@ fn jellyfin_tick(state: &mut State, preferences_path: &std::path::Path, platform
                     .send(jellyfin::Command::Views(state.preferences.jellyfin.clone()));
             }
             jellyfin::Response::Items(index, items) => {
+                debug_log!("Jellyfin row {index}: {} cards", items.len());
                 if state.stack_items.len() <= index {
                     state.stack_items.resize(index + 1, vec![]);
                 }
@@ -1345,6 +1395,7 @@ fn plex_tick(state: &mut State, preferences_path: &std::path::Path, platform: &P
                 state.plex_status = Some("Waiting for sign-in…".into());
             }
             plex::Response::Failed(message) => {
+                debug_log!("Plex failed: {message}");
                 if state.launching {
                     state.launching = false;
                     state.notify(message.clone());
@@ -1754,6 +1805,7 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
             "base": r.base,
             "token": r.token,
             "deviceId": r.device_id,
+            "user": r.user,
             "version": env!("CARGO_PKG_VERSION"),
             "item": r.item,
             "source": r.source,
@@ -1781,6 +1833,14 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
                 "ms": s.ms,
             })).collect::<Vec<_>>(),
         })),
+        "jellyfin": request.jellyfin,
+        // While the debug log is on: where the player sends its lines.
+        "debugLog": debug_log::player_sink(),
+        // Settings › System: TrueHD and DTS asked of the TV, or set by hand.
+        "audioSupport": {
+            "truehd": state.preferences.truehd.key(),
+            "dts": state.preferences.dts.key(),
+        },
         "accentA": hex(a),
         "accentB": hex(if gradient { b } else { a }),
         "accentKind": if gradient { "gradient" } else { "solid" },
@@ -1788,7 +1848,54 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
     })
 }
 
+/// Signed in to Jellyfin with rows to show, and not one card in them.
+fn jellyfin_rows_empty(state: &State) -> bool {
+    state.preferences.jellyfin.linked()
+        && state
+            .preferences
+            .stacks
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.show && s.source == "jellyfin")
+            .all(|(i, _)| state.stack_items.get(i).is_none_or(Vec::is_empty))
+        && state
+            .preferences
+            .stacks
+            .iter()
+            .any(|s| s.show && s.source == "jellyfin")
+}
+
+/// First retry of empty rows, and the longest wait between retries.
+const STACKS_RETRY: Duration = Duration::from_secs(20);
+const STACKS_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// Auto UI resolution judges frames only once the first seconds after
+/// start (fonts loading) are over.
+const AUTO_SETTLE: Duration = Duration::from_secs(5);
+/// Opening a film's page or starting a player or app draws a few slow frames
+/// (artwork, a new surface) that say nothing about steady animation; Auto UI
+/// resolution ignores frames for this long after one.
+const AUTO_HEAVY_PAUSE: Duration = Duration::from_millis(2500);
+static HEAVY_EFFECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Home's media rows refresh this often while Luma is on screen.
+const STACKS_EVERY: Duration = Duration::from_secs(30 * 60);
+/// Coming back on screen refreshes them when the last load is this old.
+const STACKS_AGAIN: Duration = Duration::from_secs(60);
+
 fn stacks_refresh(state: &mut State) {
+    let signed_in = |on: bool| if on { "signed in" } else { "not signed in" };
+    debug_log!(
+        "Home rows: loading {} (Jellyfin {}, Plex {}, Moonlight {})",
+        state.preferences.stacks.len(),
+        signed_in(state.preferences.jellyfin.linked()),
+        signed_in(state.preferences.plex.linked()),
+        if state.preferences.moonlight.paired {
+            "paired"
+        } else {
+            "not paired"
+        },
+    );
     if state.preferences.plex.linked() {
         let wanted = state
             .preferences
@@ -1880,8 +1987,19 @@ fn weather_tick(
     } else {
         None
     };
-    let local =
+    let mut local =
         time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let mut now = now;
+    // Desktop check of the headline rules at another moment:
+    // LUMA_HEADLINE_TIME=2026-12-31T20:30:00-06:00 (the weather stays real).
+    if !cfg!(feature = "webos")
+        && let Some(at) = std::env::var("LUMA_HEADLINE_TIME").ok().and_then(|value| {
+            OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339).ok()
+        })
+    {
+        local = at;
+        now = at.unix_timestamp();
+    }
     let previous_phrase = state.rude_weather.current.clone();
     let saved = state.rude_weather.sync(
         &mut state.preferences,
@@ -1890,6 +2008,27 @@ fn weather_tick(
         local.date().to_julian_day(),
         local.hour(),
     );
+    if previous_phrase != state.rude_weather.current
+        && let Some(phrase) = &state.rude_weather.current
+    {
+        debug_log!(
+            "headline ({:?}): {} | {}",
+            phrase.category,
+            phrase.title,
+            phrase.subtitle
+        );
+    }
+    // Desktop preview of one headline: LUMA_HEADLINE_PREVIEW="Title|Subtitle".
+    if !cfg!(feature = "webos")
+        && let Ok(preview) = std::env::var("LUMA_HEADLINE_PREVIEW")
+    {
+        let (title, subtitle) = preview.split_once('|').unwrap_or((&preview, ""));
+        state.rude_weather.current = Some(weather_phrases::Phrase {
+            category: weather_phrases::Category::Us,
+            title: title.into(),
+            subtitle: subtitle.into(),
+        });
+    }
     state.dirty |= previous_phrase != state.rude_weather.current;
     if saved {
         let _ = storage::save(preferences_path, &state.preferences);
@@ -2015,9 +2154,159 @@ fn scripted_click(
 /// (visible, fullscreen camera, live cameras, hidden cameras) last sent to Smart Home.
 type HaView = (bool, Option<String>, Vec<String>, Vec<String>);
 
+/// Register with sam as Home, so the Home key relaunches the running Luma instead of
+/// restarting it. Returns the SDL event type lifecycle events arrive as, and for a staged
+/// Home a way to end the registration.
+#[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
+#[allow(clippy::type_complexity)]
+fn home_lifecycle(
+    sdl: &sdl2::Sdl,
+    as_home: bool,
+) -> Result<(Option<u32>, Option<Box<dyn Fn()>>), String> {
+    if !as_home {
+        return Ok((None, None));
+    }
+    let subsystem = sdl.event()?;
+    // SAFETY: registers one SDL user event type before any are pushed.
+    let event_type = unsafe { subsystem.register_event()? };
+    let pusher = move |sender: sdl2::event::EventSender| {
+        move |lifecycle: platform::Lifecycle| {
+            let code = match lifecycle {
+                platform::Lifecycle::Relaunch => 1,
+                platform::Lifecycle::Close => 2,
+            };
+            let _ = sender.push_event(Event::User {
+                timestamp: 0,
+                window_id: 0,
+                type_: event_type,
+                code,
+                data1: std::ptr::null_mut(),
+                data2: std::ptr::null_mut(),
+            });
+        }
+    };
+    // SAFETY: geteuid has no preconditions.
+    let as_root = unsafe { libc::geteuid() } == 0;
+    if platform::runs_as_lg_home() {
+        // In place of LG's Home executable (webOS 5/6/24), LG's role is bound to that path,
+        // so Luma registers through lifecycle v2 on its own connection.
+        let push = pusher(subsystem.event_sender());
+        luna::subscribe(
+            Some(platform::home_id()),
+            "luna://com.webos.applicationManager/registerApp",
+            &serde_json::json!({"id": platform::home_id()}),
+            // sam answers "registered" at once; without it sam would end Home later.
+            Duration::from_secs(10),
+            move |message| {
+                eprintln!("Luma lifecycle: {message}");
+                let refused = message
+                    .get("returnValue")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false);
+                match platform::Lifecycle::from_reply(&message) {
+                    Some(lifecycle) => push(lifecycle),
+                    // Registration lost (e.g. sam restarted): quit, so sam starts Home afresh.
+                    None if refused => push(platform::Lifecycle::Close),
+                    None => {}
+                }
+            },
+        )?;
+        return Ok((Some(event_type), None));
+    }
+    if !as_root {
+        return Ok((None, None));
+    }
+    if std::path::Path::new(platform::HOME_LIFECYCLE_OFF).exists() {
+        eprintln!(
+            "Luma lifecycle: {} exists; Home stays unregistered",
+            platform::HOME_LIFECYCLE_OFF
+        );
+        return Ok((None, None));
+    }
+    // A staged Home manifest (webOS 25/26) runs Luma's own executable as root under LG's
+    // app-ID based Home role, which Luma's connection cannot claim. Hold the registration as
+    // that app through `luna-send -a`; sam then expects lifecycle v1. Until sam answers, Home
+    // is simply unregistered.
+    let push = pusher(subsystem.event_sender());
+    let close = pusher(subsystem.event_sender());
+    match luna::subscribe_as_app(
+        platform::home_id(),
+        "luna://com.webos.applicationManager/registerNativeApp",
+        &serde_json::json!({}),
+        Duration::from_secs(10),
+        move |message| {
+            eprintln!("Luma lifecycle: {message}");
+            if let Some(lifecycle) = platform::Lifecycle::from_reply(&message) {
+                push(lifecycle);
+            }
+        },
+        // A registration sam had accepted is gone: quit, so sam starts Home afresh.
+        move |registered| {
+            if registered {
+                close(platform::Lifecycle::Close);
+            }
+        },
+    ) {
+        Ok(subscription) => Ok((
+            Some(event_type),
+            Some(Box::new(move || subscription.end()) as Box<dyn Fn()>),
+        )),
+        Err(error) => {
+            eprintln!("Luma lifecycle: {error}; Home stays unregistered");
+            Ok((None, None))
+        }
+    }
+}
+
+/// sam discards a system app's output. As Home, keep it in a small log.
+#[cfg(all(feature = "webos", unix))]
+fn log_home_output() {
+    use std::os::unix::io::IntoRawFd;
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("/tmp/luma-home.log")
+    {
+        // SAFETY: duplicates a valid, owned descriptor onto stderr.
+        unsafe { libc::dup2(file.into_raw_fd(), 2) };
+    }
+}
+
+/// Turns the debug log on and says where it goes.
+fn start_debug_log(preferences: &std::path::Path, offset: time::UtcOffset, why: &str) {
+    match debug_log::start(&debug_log::directory(preferences), offset, why) {
+        Ok(path) => eprintln!("Luma debug log: {}", path.display()),
+        Err(error) => eprintln!("Luma debug log could not start: {error}"),
+    }
+}
+
+/// "OpenUrl" for Effect::OpenUrl(…): the kind, never what it carries.
+fn effect_name(effect: &Effect) -> String {
+    let full = format!("{effect:?}");
+    full.split(['(', '{', ' '])
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn run() -> Result<(), String> {
     let startup = Instant::now();
+    // In place of LG's Home executable, before parsing, so option errors are kept too.
+    #[cfg(all(feature = "webos", unix))]
+    if platform::runs_as_lg_home() {
+        log_home_output();
+    }
     let mut options = Options::parse()?;
+    // Running as LG's Home executable (webOS 5/6/24) is Home whatever the launch says.
+    if cfg!(feature = "webos") && platform::runs_as_lg_home() {
+        options.webos_home = true;
+    }
+    // A staged Home manifest (webOS 25/26) is only recognised from its launch parameters.
+    #[cfg(all(feature = "webos", unix))]
+    if options.webos_home && !platform::runs_as_lg_home() {
+        log_home_output();
+    }
     let webos = cfg!(feature = "webos");
     let startup_stage = |stage: &str| {
         if webos {
@@ -2035,7 +2324,7 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         let surface_id = if options.webos_home {
-            platform::HOME_ID
+            platform::home_id()
         } else {
             platform::APP_ID
         };
@@ -2048,20 +2337,23 @@ fn run() -> Result<(), String> {
         }
         eprintln!("Luma webOS surface: {surface_id}");
         sdl2::hint::set("SDL_WEBOS_ACCESS_POLICY_KEYS_BACK", "true");
+        // In place of LG's Home executable, SDL's own registration cannot reach the bus under
+        // LG's Home role; Luma registers with sam itself below (lifecycle v2).
+        if platform::runs_as_lg_home() {
+            sdl2::hint::set("SDL_WEBOS_REGISTER_APP", "0");
+        }
     }
     // Resolve the local offset before artwork, HTTP or platform workers start.
     let local_offset = OffsetDateTime::now_local()
         .map(|now| now.offset())
         .unwrap_or(time::UtcOffset::UTC);
-    let root = options.assets.clone().unwrap_or_else(|| {
-        if webos {
-            std::env::current_exe()
-                .unwrap_or_default()
-                .with_file_name("assets")
-        } else {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".build/assets")
-        }
-    });
+    debug_log::set_offset(local_offset);
+    // As LG's Home executable, assets are in the installed package, not beside /usr/bin.
+    let root = match options.assets.clone() {
+        Some(root) => root,
+        None if webos => platform::install_dir()?.join("assets"),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".build/assets"),
+    };
     let assets = view::Assets::load(root, webos)?;
     startup_stage("asset metadata");
     let default_preferences = options
@@ -2074,6 +2366,17 @@ fn run() -> Result<(), String> {
     } else {
         default_preferences.clone()
     };
+    // The debug log starts before anything else can go wrong: by option, or
+    // by a debug-log file a person put next to preferences.json.
+    let log_flag = debug_log::flag(&preferences_path);
+    if options.debug_log || log_flag.exists() {
+        let why = if options.debug_log {
+            "--debug-log".to_owned()
+        } else {
+            format!("{} exists", log_flag.display())
+        };
+        start_debug_log(&preferences_path, local_offset, &why);
+    }
     // Uploaded video wallpapers join the catalog before preferences load, so
     // their saved selection survives normalization.
     custom_videos::init(&preferences_path);
@@ -2088,7 +2391,13 @@ fn run() -> Result<(), String> {
     } else {
         storage::load(&preferences_path)?
     };
+    if initial_preferences.debug_log {
+        start_debug_log(&preferences_path, local_offset, "Settings › System");
+    }
     let mut state = State::new(initial_preferences);
+    state.debug_log_file = debug_log::current()
+        .filter(|_| debug_log::enabled())
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     let _ = moonlight_service();
     // Desktop game-card mockup and game Home row, using synthetic preview entries.
     #[cfg(debug_assertions)]
@@ -2689,6 +2998,34 @@ fn run() -> Result<(), String> {
     if let Err(error) = video.gl_set_swap_interval(1) {
         eprintln!("VSync: {error}");
     }
+    // Animations run at the screen's own rate (VSync); say what that is.
+    if let Some(mode) = window
+        .display_index()
+        .ok()
+        .and_then(|index| video.current_display_mode(index).ok())
+    {
+        let (dw, dh) = window.drawable_size();
+        let rate = if mode.refresh_rate > 0 {
+            format!("{} Hz", mode.refresh_rate)
+        } else {
+            "an unreported rate".to_owned()
+        };
+        let setting = state.preferences.ui_resolution;
+        eprintln!(
+            "Luma display: {}x{} at {rate}, drawing {dw}x{dh} (UI resolution: {}{})",
+            mode.w,
+            mode.h,
+            setting.label(),
+            if setting == model::UiResolution::Auto {
+                format!(
+                    ", now {}",
+                    state.preferences.resolved_ui_resolution().short()
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
     let mut renderer = renderer::Renderer::new(&assets.root.join("font.ttf"), webos)?;
     renderer.set_fonts(
         state.preferences.heading_font,
@@ -2702,7 +3039,15 @@ fn run() -> Result<(), String> {
     let mut applied_surface = requested;
     let mut last_working_choice = state.preferences.ui_resolution;
     let mut last_working_auto = state.preferences.auto_ui_cap;
-    let mut animation_pacing: VecDeque<(Instant, f64)> = VecDeque::with_capacity(320);
+    let mut auto_pacing = diagnostics::AutoPacing::default();
+    let mut heavy_until = startup;
+    // Debug log: each animation's frames, time and slowest frame.
+    let mut burst: Option<(Instant, u32, f64)> = None;
+    // The weather sky draws at the screen's rate unless this TV cannot keep
+    // up; then every 33 ms (30 fps), as before.
+    let mut sky_every = Duration::ZERO;
+    let mut sky_window: Option<(Instant, u32)> = None;
+    let mut sky_logged = false;
     let mut prior_present: Option<Instant> = None;
     let mut auto_downshifts = 0usize;
     let mut resolution_change_count = 0usize;
@@ -2721,7 +3066,21 @@ fn run() -> Result<(), String> {
     let mut captured = None;
     let mut last_drawable = None;
     let mut events = sdl.event_pump()?;
+    // Lifecycle as Home: sam sends "relaunch" (bring the running Luma to the front) instead of
+    // killing and restarting it, and "close" when it wants Luma to exit. `end_registration`
+    // drops a staged Home's registration (webOS 25/26) if a relaunch did not reach the front.
+    type EndRegistration = Box<dyn Fn()>;
+    #[cfg(not(all(feature = "webos", target_os = "linux", target_arch = "arm")))]
+    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) = (None, None);
+    #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
+    let (lifecycle_event, end_registration): (Option<u32>, Option<EndRegistration>) =
+        home_lifecycle(&sdl, webos && options.webos_home)?;
+    // Whether a staged Home's relaunch reached the front; see platform::ForegroundCheck.
+    let mut foreground = platform::ForegroundCheck::default();
     let mut press: Option<Press> = None;
+    // A Magic Remote press on nothing at all on Home: its release clears
+    // Home away to the wallpaper.
+    let mut empty_press = false;
     // When Up/Down started being held, to speed up long Settings lists.
     let mut vertical_held: Option<std::time::Instant> = None;
     let mut drag: Option<Drag> = None;
@@ -2736,16 +3095,27 @@ fn run() -> Result<(), String> {
     let mut signals_at = Instant::now();
     let mut retry_at = Instant::now();
     let mut signals_pending = false;
-    let initial_nav =
-        view::navigation_for(&assets, state.preferences.language, state.show_smart_tab());
-    let mut pill = initial_nav.items[0].x;
-    let mut pill_width = initial_nav.items[0].w;
+    let initial_nav = view::navigation_in(
+        state.preferences.layout,
+        &assets,
+        state.preferences.language,
+        state.show_smart_tab(),
+    );
+    let (mut pill, mut pill_width) =
+        view::nav_pill_target(state.preferences.layout, initial_nav.items[0]);
     let mut last_frame = Instant::now();
     let mut last_sky_frame = Instant::now();
-    let mut last_art_frame = Instant::now();
     let mut last_minute = None;
     let mut frame = 0u64;
     let mut visible = true;
+    // Home's media rows (Jellyfin, Plex, Moonlight): loaded at start, again
+    // when Luma comes back on screen, and every STACKS_EVERY while shown.
+    let mut stacks_at: Option<Instant> = None;
+    // Rows that came back empty (the network not up yet after a cold boot)
+    // are asked for again soon: 20 s, then twice as long, up to 5 minutes.
+    let mut stacks_retry: Option<(Instant, Duration)> = None;
+    // Cameras without a picture, logged once until they have one again.
+    let mut blank_cameras = std::collections::BTreeSet::new();
     let mut last_ha_view: Option<HaView> = None;
     let mut last_ha_connect = false;
     // Starfish requires a fully displayed/foreground native Wayland window.
@@ -2753,6 +3123,7 @@ fn run() -> Result<(), String> {
     let video_init_after = Instant::now() + Duration::from_secs(2);
     let mut video_diag_count = 0usize;
     let mut still_preload_key = None;
+    let mut usb_generation = 0;
     #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
     let mut aerial_player = if webos {
         match hw_wallpaper::Player::new() {
@@ -2811,6 +3182,24 @@ fn run() -> Result<(), String> {
             last_ha_view = Some(ha_view);
         }
         while let Some(update) = home_service.try_recv() {
+            match &update {
+                smart_home::Update::Offline => debug_log!("Home Assistant offline"),
+                smart_home::Update::Connected => debug_log!("Home Assistant connected"),
+                smart_home::Update::Error(error) => debug_log!("Home Assistant error: {error}"),
+                smart_home::Update::PairingError(error) => {
+                    debug_log!("Home Assistant pairing error: {error}")
+                }
+                smart_home::Update::SnapshotFailed { id } => {
+                    if blank_cameras.insert(id.clone()) {
+                        debug_log!("Home Assistant camera {id}: no picture (retrying quietly)")
+                    }
+                }
+                smart_home::Update::Snapshot { id, .. } => {
+                    blank_cameras.remove(id);
+                }
+                smart_home::Update::SignedOut => debug_log!("Home Assistant signed out"),
+                _ => {}
+            }
             let should_save = matches!(&update, smart_home::Update::Authorized { .. });
             state.accept_ha(update);
             if should_save {
@@ -2980,6 +3369,18 @@ fn run() -> Result<(), String> {
                 state.dirty = true;
             }
         }
+        // Keep the selected clips on a USB drive (Settings › Wallpaper); copies
+        // wait while a film plays so they never take its bandwidth.
+        usb_videos::configure(
+            state.preferences.usb_wallpapers,
+            state.playback.is_some(),
+            &state.preferences.video_excluded,
+            state.preferences.video_index,
+        );
+        if usb_videos::generation() != usb_generation {
+            usb_generation = usb_videos::generation();
+            state.dirty |= state.page == state::Page::Settings;
+        }
         // Decode the stills a swap can show next ahead of time, off the GL
         // thread, so Next Video and the automatic swap never stall a frame.
         if state.preferences.background == "video" {
@@ -3032,6 +3433,17 @@ fn run() -> Result<(), String> {
                     if state.set_inventory(inventory, warning) {
                         let _ = storage::save(&preferences_path, &state.preferences);
                     }
+                    // Desktop QA of the HDMI buttons: LUMA_SIGNALS_PREVIEW=1:false,2:true
+                    // (port number: has a picture). The desktop has no HDMI.
+                    #[cfg(debug_assertions)]
+                    if let Ok(spec) = std::env::var("LUMA_SIGNALS_PREVIEW") {
+                        let signals: Vec<(u8, bool)> = spec
+                            .split(',')
+                            .filter_map(|pair| pair.split_once(':'))
+                            .filter_map(|(port, on)| Some((port.parse().ok()?, on == "true")))
+                            .collect();
+                        model::apply_signals(&mut state.inventory.inputs, &signals);
+                    }
                     if initial_focus
                         && state.focus == Target::Nav(0)
                         && state.page == state::Page::Home
@@ -3047,6 +3459,18 @@ fn run() -> Result<(), String> {
                     if initial_focus {
                         state.focus = state.first_content();
                         initial_focus = false;
+                    }
+                }
+                Response::Uninstalled(id, result) => {
+                    debug_log!(
+                        "uninstall {id}: {}",
+                        result
+                            .as_ref()
+                            .map_or_else(|e| e.clone(), |_| "done".into())
+                    );
+                    if state.uninstalled(&id, result) {
+                        let _ = storage::save(&preferences_path, &state.preferences);
+                        platform.send(Request::Refresh);
                     }
                 }
                 Response::Signals(signals) => {
@@ -3070,8 +3494,10 @@ fn run() -> Result<(), String> {
                     match result {
                         Err(error) => {
                             eprintln!("{error}");
-                            if error == platform::INSTALL_PLAYER_MESSAGE {
-                                state.notify(platform::INSTALL_PLAYER_MESSAGE);
+                            if error == platform::INSTALL_PLAYER_MESSAGE
+                                || error == platform::INSTALL_AERIALS_MESSAGE
+                            {
+                                state.notify(error);
                             } else {
                                 state.notify(state.preferences.language.t("appOpenError"));
                             }
@@ -3354,6 +3780,32 @@ fn run() -> Result<(), String> {
                     let _ = x;
                 }
                 Event::Quit { .. } => running = false,
+                Event::User { type_, code, .. } if Some(type_) == lifecycle_event => {
+                    if code == 1 {
+                        eprintln!("Luma lifecycle: relaunch, back to Home");
+                        press = None;
+                        pending = state.return_home();
+                        // A staged Home must come forward itself. If it does not, its
+                        // registration would leave the Home key dead: checked below.
+                        if end_registration.is_some() {
+                            foreground.relaunched(Instant::now(), visible);
+                        }
+                        // SAFETY: the window outlives the event loop.
+                        unsafe {
+                            sdl2::sys::SDL_RestoreWindow(window.raw());
+                            sdl2::sys::SDL_ShowWindow(window.raw());
+                            sdl2::sys::SDL_RaiseWindow(window.raw());
+                        }
+                        visible = true;
+                        state.dirty = true;
+                        pending.push(Effect::Refresh);
+                        if stacks_at.is_some_and(|at| at.elapsed() >= STACKS_AGAIN) {
+                            stacks_at = None;
+                        }
+                    } else if code == 2 {
+                        running = false;
+                    }
+                }
                 Event::Window {
                     window_id,
                     win_event,
@@ -3371,6 +3823,14 @@ fn run() -> Result<(), String> {
                     WindowEvent::FocusLost => press = None,
                     WindowEvent::Shown | WindowEvent::Restored | WindowEvent::FocusGained => {
                         visible = true;
+                        // Back from an app: Continue Watching may have moved on.
+                        if stacks_at.is_some_and(|at| at.elapsed() >= STACKS_AGAIN) {
+                            stacks_at = None;
+                        }
+                        // Shown and Restored can come from SDL itself; only focus confirms.
+                        if matches!(win_event, WindowEvent::FocusGained) {
+                            foreground.confirmed();
+                        }
                         state.dirty = true;
                         // Double Start+Select on a TV gamepad (pad_watch): close the game.
                         let quit = std::fs::remove_file(pad_watch::FLAG).is_ok();
@@ -3661,6 +4121,10 @@ fn run() -> Result<(), String> {
                         });
                         state.stop_kinetic();
                     }
+                    empty_press = mouse_btn == MouseButton::Left
+                        && scene.modal.is_none()
+                        && hit(&scene.controls, &window, x, y, &state).is_none()
+                        && state.home_can_clear();
                     if let Some(target) = hit(&scene.controls, &window, x, y, &state)
                         && state.moving.is_none()
                     {
@@ -3734,6 +4198,13 @@ fn run() -> Result<(), String> {
                         }
                         state.dirty = true;
                         press = None;
+                    } else if std::mem::take(&mut empty_press)
+                        && hit(&scene.controls, &window, x, y, &state).is_none()
+                        && state.home_can_clear()
+                    {
+                        // Clicked beside everything: Home clears to the wallpaper.
+                        press = None;
+                        state.clear_home();
                     } else {
                         match press.take() {
                             Some(held)
@@ -3987,8 +4458,9 @@ fn run() -> Result<(), String> {
             }
             text_active = keyboard;
         }
-        // NOPE sky animates at up to 30fps, only on a visible Home.
-        // Prefer video decoding and remote navigation over decorative weather.
+        // NOPE sky animates at the display rate, only on a visible Home; on a
+        // TV that cannot keep that up it drops to 30 fps (sky_every), as
+        // video decoding and remote navigation come before decorative weather.
         let sky_running = visible
             && state.page == state::Page::Home
             && state.preferences.show_weather
@@ -4000,11 +4472,10 @@ fn run() -> Result<(), String> {
             && state.page == state::Page::Settings
             && state.settings_art_live
             && !state.preferences.reduced_motion;
-        if art_running && last_art_frame.elapsed() >= Duration::from_millis(15) {
-            last_art_frame = Instant::now();
+        if art_running {
             state.dirty = true;
         }
-        if sky_running && last_sky_frame.elapsed() >= Duration::from_millis(33) {
+        if sky_running && last_sky_frame.elapsed() >= sky_every {
             last_sky_frame = Instant::now();
             state.dirty = true;
         }
@@ -4015,7 +4486,7 @@ fn run() -> Result<(), String> {
             let target = state.preferences.resolved_ui_size();
             if target != applied_surface {
                 // Do not request a second resize while the previous SDL event is queued.
-                animation_pacing.clear();
+                auto_pacing.clear();
                 prior_present = None;
                 match window.set_size(target.width, target.height) {
                     Ok(()) => {
@@ -4050,10 +4521,17 @@ fn run() -> Result<(), String> {
         assets.active_text.set(state.preferences.text_font);
         assets.heading_pct.set(state.preferences.heading_size_pct);
         assets.text_pct.set(state.preferences.text_size_pct);
-        let navigation =
-            view::navigation_for(&assets, state.preferences.language, state.show_smart_tab());
-        let target = navigation.items[state.page_index()].x;
-        let target_width = navigation.items[state.page_index()].w;
+        let navigation = view::navigation_in(
+            state.preferences.layout,
+            &assets,
+            state.preferences.language,
+            state.show_smart_tab(),
+        );
+        // Along the bar: across for the top bars and the dock, down the rail.
+        let (target, target_width) = view::nav_pill_target(
+            state.preferences.layout,
+            navigation.items[state.page_index()],
+        );
         if state.preferences.reduced_motion
             || ((pill - target).abs() < 0.2 && (pill_width - target_width).abs() < 0.2)
         {
@@ -4165,50 +4643,76 @@ fn run() -> Result<(), String> {
                     && state.preferences.resolved_ui_resolution() != model::UiResolution::Hd
                     && options.profile_frames.is_none()
                 {
-                    if let Some(previous) = prior_present {
-                        let delta = present_at.duration_since(previous).as_secs_f64() * 1000.;
-                        if animated && (0.0..250.0).contains(&delta) {
-                            animation_pacing.push_back((present_at, delta));
-                            while animation_pacing.front().is_some_and(|(t, _)| {
-                                present_at.duration_since(*t) > Duration::from_secs(5)
-                            }) {
-                                animation_pacing.pop_front();
-                            }
-                        } else if !animated {
-                            animation_pacing.clear();
-                        }
+                    // Animations and the weather sky count; the first
+                    // seconds after start (fonts loading) do not.
+                    if HEAVY_EFFECT.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        auto_pacing.clear();
+                        heavy_until = present_at + AUTO_HEAVY_PAUSE;
                     }
-                    if animation_pacing.len() >= 55
-                        && animation_pacing.front().is_some_and(|(t, _)| {
-                            present_at.duration_since(*t) >= Duration::from_secs(3)
-                        })
-                    {
-                        let mut sorted = animation_pacing
-                            .iter()
-                            .map(|(_, dt)| *dt)
-                            .collect::<Vec<_>>();
-                        sorted.sort_by(f64::total_cmp);
-                        let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
-                        let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+                    let measured = (animated || (sky_running && sky_every.is_zero()))
+                        && startup.elapsed() > AUTO_SETTLE
+                        && present_at >= heavy_until;
+                    if let Some((p95, mean, slow)) = auto_pacing.frame(present_at, measured) {
                         observed_resolutions.push((applied_surface, p95));
-                        if p95 > 18.5 && mean > 17.5 {
+                        debug_log!(
+                            "Auto UI resolution: {} p95 {p95:.1} ms, mean {mean:.1} ms over {} frames",
+                            state.preferences.resolved_ui_resolution().short(),
+                            diagnostics::AutoPacing::SAMPLES
+                        );
+                        if slow {
                             let new_cap = state.preferences.resolved_ui_resolution().lower();
                             eprintln!(
                                 "LUMA_AUTO_RESOLUTION_DOWNGRADE {} -> {} p95_ms={p95:.2} mean_ms={mean:.2} samples={}",
                                 state.preferences.resolved_ui_resolution().short(),
                                 new_cap.short(),
-                                sorted.len()
+                                diagnostics::AutoPacing::SAMPLES
                             );
                             state.preferences.auto_ui_cap = new_cap;
                             auto_downshifts += 1;
                             state.dirty = true;
                             let _ = storage::save(&preferences_path, &state.preferences);
-                            animation_pacing.clear();
-                        } else {
-                            // Stable Auto tier. Recheck only if a new animation window begins.
-                            animation_pacing.clear();
+                            auto_pacing.clear();
                         }
                     }
+                }
+                // Debug log: how fast each animation actually ran.
+                if animated {
+                    let gap = prior_present
+                        .map_or(0., |p| present_at.duration_since(p).as_secs_f64() * 1000.);
+                    burst = Some(match burst {
+                        Some((start, frames, slowest)) => (start, frames + 1, slowest.max(gap)),
+                        None => (present_at, 1, 0.),
+                    });
+                } else if let Some((start, frames, slowest)) = burst.take()
+                    && frames >= 8
+                {
+                    let seconds = present_at.duration_since(start).as_secs_f64();
+                    debug_log!(
+                        "animation: {frames} frames in {:.0} ms = {:.0} fps, slowest frame {slowest:.1} ms",
+                        seconds * 1000.,
+                        f64::from(frames) / seconds.max(0.001)
+                    );
+                }
+                // The sky alone on screen: if this TV draws it under 45 fps,
+                // it goes back to 30 fps and leaves the GPU to the rest.
+                if sky_running && !animated && sky_every.is_zero() {
+                    let (start, frames) = sky_window.unwrap_or((present_at, 0));
+                    let elapsed = present_at.duration_since(start).as_secs_f64();
+                    if elapsed >= 2. {
+                        let fps = f64::from(frames) / elapsed;
+                        if fps < 45. {
+                            sky_every = Duration::from_millis(33);
+                            eprintln!("Luma weather sky: {fps:.0} fps on this TV, drawn at 30 fps");
+                        } else if !sky_logged {
+                            debug_log!("weather sky: {fps:.0} fps");
+                        }
+                        sky_logged = true;
+                        sky_window = None;
+                    } else {
+                        sky_window = Some((start, frames + 1));
+                    }
+                } else {
+                    sky_window = None;
                 }
                 prior_present = Some(present_at);
                 if presented == 0 {
@@ -4270,9 +4774,39 @@ fn run() -> Result<(), String> {
         if final_frame {
             running = false;
         }
+        if foreground.failed(Instant::now())
+            && let Some(end_registration) = &end_registration
+        {
+            // Fall back to the restart sam does for an unregistered Home: remember that and
+            // end the registration, which quits Luma so sam starts it afresh.
+            eprintln!(
+                "Luma lifecycle: a relaunch did not bring Luma to the front; creating {}",
+                platform::HOME_LIFECYCLE_OFF
+            );
+            if let Err(error) = std::fs::write(platform::HOME_LIFECYCLE_OFF, b"") {
+                eprintln!("Luma lifecycle: {error}");
+            }
+            end_registration();
+        }
         // Block until input instead of polling at frame rate on idle screens.
         // VSync paces animation; holds, scripted checks and icons still being
         // decoded need short timed wakes.
+        if visible && stacks_at.is_none_or(|at| at.elapsed() >= STACKS_EVERY) {
+            stacks_at = Some(Instant::now());
+            stacks_refresh(&mut state);
+            stacks_retry = Some((Instant::now() + STACKS_RETRY, STACKS_RETRY));
+        }
+        if let Some((due, gap)) = stacks_retry
+            && Instant::now() >= due
+        {
+            stacks_retry = None;
+            if visible && jellyfin_rows_empty(&state) {
+                debug_log!("Home rows: Jellyfin rows still empty, asking again");
+                stacks_refresh(&mut state);
+                let gap = (gap * 2).min(STACKS_RETRY_MAX);
+                stacks_retry = Some((Instant::now() + gap, gap));
+            }
+        }
         let timeout = if !visible {
             250
         } else if pill != target
@@ -4280,12 +4814,12 @@ fn run() -> Result<(), String> {
             || state.animating()
             || edge_moving
             || options.profile_frames.is_some()
+            // Settings illustrations draw at the display rate.
+            || art_running
         {
             0
-        } else if art_running {
-            15
         } else if sky_running {
-            33
+            sky_every.as_millis() as u32
         } else if press.is_some()
             || options.frames.is_some()
             || assets.artwork.pending()
@@ -4403,8 +4937,8 @@ fn hit(
             control.rect.contains(x, y)
                 && (!control.scrollable
                     || ((state::HOME_VIEWPORT_LEFT..state::HOME_VIEWPORT_RIGHT).contains(&x)
-                        && y >= 108.8
-                        && y < state.main_bottom()))
+                        && y >= 108.8 + state.preferences.layout.body_offset().1
+                        && y < state.preferences.layout.pointer_bottom(state.main_bottom())))
         })
         .map(|control| control.target.clone())
 }

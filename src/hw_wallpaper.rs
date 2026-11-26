@@ -164,11 +164,8 @@ pub struct Player {
 }
 impl Player {
     pub fn new() -> Result<Self, String> {
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let path = exe
-            .parent()
-            .ok_or("No application directory")?
-            .join("lib/libluma_hwplayer.so");
+        // The installed package, also when Luma runs in place of LG's Home executable.
+        let path = crate::platform::install_dir()?.join("lib/libluma_hwplayer.so");
         let c = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
         let lib = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if lib.is_null() {
@@ -310,14 +307,14 @@ impl Player {
         let entry = crate::video_catalog::all()
             .get(index)
             .ok_or("Invalid video")?;
-        if !playable_source(&entry.url) {
+        let source = source_for(entry);
+        if !playable_source(&source) {
             return Err("Invalid streaming URL".into());
         }
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let demux = exe
-            .parent()
-            .ok_or("No application directory")?
-            .join("luma-demux");
+        if source != entry.url {
+            crate::debug_log!("Wallpaper {index} plays from the USB drive");
+        }
+        let demux = crate::platform::install_dir()?.join("luma-demux");
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -325,7 +322,7 @@ impl Player {
             .ok();
         let mut cmd = Command::new(demux);
         cmd.arg(if entry.is_hevc() { "h265" } else { "h264" })
-            .arg(&entry.url)
+            .arg(&source)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(log.map_or_else(Stdio::null, Stdio::from));
@@ -409,10 +406,10 @@ impl Player {
         let entry = crate::video_catalog::all()
             .get(index)
             .ok_or("Invalid video")?;
-        if !playable_source(&entry.url) {
+        if !playable_source(&source_for(entry)) {
             return Err("Invalid streaming URL".into());
         }
-        let app = CString::new("com.archbtw.luma").unwrap();
+        let app = CString::new(crate::platform::surface_id()).unwrap_or_default();
         let codec = if entry.is_hevc() { "H265" } else { "H264" };
         let codec_c = CString::new(codec).unwrap();
         let tuning = if codec == "H264" {
@@ -453,6 +450,8 @@ impl Player {
         let ready = Arc::clone(&self.ready);
         let feed = self.feed;
         let metrics = self.metrics;
+        let rendered = self.rendered;
+        let clip_name = entry.name.clone();
         let metric_source = CString::new(entry.source.clone()).unwrap();
         let metric_codec = codec_c;
         let handle = handle as usize;
@@ -472,6 +471,12 @@ impl Player {
                 let mut lateness_total = 0.0f64;
                 let mut lateness_max = 0.0f64;
                 let mut max_au = 0usize;
+                // Debug log: the clip's real frame rates, 5 s in and then
+                // every 30 s.
+                let mut stats = crate::video_catalog::FeedStats::default();
+                let mut stats_start = started;
+                let mut stats_rendered = 0i64;
+                let mut stats_every = Duration::from_secs(5);
                 while !stopping.load(Ordering::Relaxed) {
                     let mut hdr = [0u8; 12];
                     if stdout.read_exact(&mut hdr).is_err() {
@@ -525,6 +530,20 @@ impl Player {
                         * 1000.0;
                     lateness_total += lateness_ms;
                     lateness_max = lateness_max.max(lateness_ms);
+                    stats.push(decode_ns, lateness_ms);
+                    if crate::debug_log::enabled() && stats_start.elapsed() >= stats_every {
+                        let now = unsafe { rendered(handle as *mut c_void) };
+                        let shown = (now > 0).then(|| (now - stats_rendered).max(0) as u64);
+                        crate::debug_log!(
+                            "wallpaper video ({clip_name}, {codec_name}): {}",
+                            stats.line(stats_start.elapsed().as_secs_f64(), shown),
+                            codec_name = if has_separate_pts { "H.264" } else { "HEVC" }
+                        );
+                        stats = crate::video_catalog::FeedStats::default();
+                        stats_start = Instant::now();
+                        stats_rendered = now;
+                        stats_every = Duration::from_secs(30);
+                    }
                     max_au = max_au.max(len);
                     loop {
                         let rc = unsafe {
@@ -690,11 +709,18 @@ impl Drop for Player {
         unsafe { libc::dlclose(self.lib) };
     }
 }
-/// An HTTPS stream from the catalog, or an uploaded clip on local storage.
+/// The clip's copy on the USB drive when one is saved, else its usual source.
+fn source_for(entry: &crate::video_catalog::Video) -> String {
+    crate::usb_videos::local_path(&entry.id).unwrap_or_else(|| entry.url.clone())
+}
+/// An HTTPS stream from the catalog, an uploaded clip on local storage, or
+/// a catalog clip saved on the USB drive.
 fn playable_source(url: &str) -> bool {
     url.len() <= 2048
         && !url.contains(['\n', '\r', '\0'])
-        && (url.starts_with("https://") || crate::custom_videos::is_upload_path(url))
+        && (url.starts_with("https://")
+            || crate::custom_videos::is_upload_path(url)
+            || crate::usb_videos::is_saved_path(url))
 }
 fn dlerror() -> String {
     unsafe {
