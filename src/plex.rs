@@ -790,13 +790,14 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
     let container = media(&target)
         .map(|m| text(m, "container"))
         .unwrap_or_default();
+    let hls = hls_url(link, &target_key, &session);
     let url = if matches!(container.as_str(), "mp4" | "mov") {
         format!(
             "{}{file}?X-Plex-Token={}",
             link.server_uri, link.server_token
         )
     } else {
-        hls_url(link, &target_key, &session)
+        hls.clone()
     };
     let subtitles: Vec<crate::player::Track> = streams(&target, 3)
         .iter()
@@ -893,13 +894,73 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         selected_subtitle,
         report: Some(report),
         music: None,
+        media: Some(player_media(&target, hls)),
     })));
+}
+
+/// The first part's video and audio streams for the web player, which picks
+/// the audio track and HDR mode itself.
+fn player_media(target: &Value, hls: String) -> crate::player::MediaInfo {
+    let streams = streams(target, 1).into_iter().chain(streams(target, 2));
+    crate::player::MediaInfo {
+        service: "plex".into(),
+        streams: crate::player::trim_streams(
+            streams,
+            &[
+                "streamType",
+                "id",
+                "codec",
+                "profile",
+                "channels",
+                "bitrate",
+                "languageCode",
+                "languageTag",
+                "language",
+                "title",
+                "displayTitle",
+                "extendedDisplayTitle",
+                "default",
+                "selected",
+                "visualImpaired",
+                "DOVIPresent",
+                "colorTrc",
+            ],
+        ),
+        hls,
+        part: part(target)
+            .and_then(|p| p.get("id"))
+            .map(|id| match id {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn player_media_names_the_part_and_keeps_video_and_audio() {
+        let item = json!({"Media": [{"Part": [{"id": 4417, "key": "/library/parts/4417/file.mkv",
+        "Stream": [
+            {"streamType": 1, "id": 1, "codec": "hevc", "DOVIPresent": true, "bitDepth": 10},
+            {"streamType": 2, "id": 2, "codec": "truehd", "languageCode": "eng", "channels": 8},
+            {"streamType": 3, "id": 3, "codec": "srt", "key": "/library/streams/3"}
+        ]}]}]});
+        let media = player_media(&item, "https://plex.invalid/start.m3u8".into());
+        assert_eq!(media.service, "plex");
+        assert_eq!(media.part, "4417");
+        assert_eq!(
+            media.streams,
+            vec![
+                json!({"streamType": 1, "id": 1, "codec": "hevc", "DOVIPresent": true}),
+                json!({"streamType": 2, "id": 2, "codec": "truehd", "languageCode": "eng", "channels": 8}),
+            ]
+        );
+    }
 
     #[test]
     fn episodes_and_seasons_open_their_show() {

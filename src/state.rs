@@ -2563,6 +2563,8 @@ impl State {
                     && self.section != APPEARANCE_SECTION
                     && matches!(direction, Direction::Left)
                     && !matches!(self.focus, Target::Nav(_))
+                    // Left lowers the HDR player level, as on Appearance's size rows.
+                    && self.focus != Target::Setting(11)
                 {
                     // The first content row navigates to the visible Back
                     // arrow, rather than silently popping an entire level.
@@ -3094,6 +3096,26 @@ impl State {
             ) && matches!(direction, Direction::Right)
             {
                 return self.activate();
+            }
+            // Left and Right step the HDR player level by 10 nits.
+            if self.focus == Target::Setting(11)
+                && self.page == Page::Settings
+                && self.subpage.is_none()
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                let step = crate::model::HDR_UI_NITS_STEP as i32;
+                let delta = if matches!(direction, Direction::Right) {
+                    step
+                } else {
+                    -step
+                };
+                let now = self.preferences.hdr_ui_nits() as i32;
+                self.preferences.hdr_ui_nits = (now + delta).clamp(
+                    crate::model::HDR_UI_NITS_MIN as i32,
+                    crate::model::HDR_UI_NITS_MAX as i32,
+                ) as u16;
+                self.dirty = true;
+                return vec![Effect::Save];
             }
             if matches!(self.focus, Target::Setting(_) | Target::WeatherToggle)
                 && matches!(direction, Direction::Right)
@@ -4774,6 +4796,14 @@ impl State {
                         };
                         self.dirty = true;
                         return vec![Effect::Root(Some(change))];
+                    }
+                    11 => {
+                        let now = self.preferences.hdr_ui_nits();
+                        self.preferences.hdr_ui_nits = crate::model::HDR_UI_NITS_LEVELS
+                            .into_iter()
+                            .find(|&n| n > now)
+                            .unwrap_or(crate::model::HDR_UI_NITS_LEVELS[0]);
+                        self.dirty = true;
                     }
                     7 => return vec![Effect::Launch("com.webos.app.home".into())],
                     8 => return vec![Effect::Launch("com.archbtw.luma.aerials".into())],

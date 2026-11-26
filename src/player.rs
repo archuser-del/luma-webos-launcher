@@ -143,6 +143,40 @@ pub struct OpenRequest {
     pub report: Option<Report>,
     /// An album: the web player shows its "now playing" screen instead of video.
     pub music: Option<Music>,
+    /// Audio and video streams for the web player to choose the audio track
+    /// and HDR mode on the TV, where codec support can be checked.
+    pub media: Option<MediaInfo>,
+}
+
+/// A title's streams as the media server lists them, trimmed to the fields
+/// the web player reads. Holds no token; the HLS URL does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaInfo {
+    /// "jellyfin" or "plex".
+    pub service: String,
+    /// Video and audio stream entries in server order.
+    pub streams: Vec<serde_json::Value>,
+    /// HLS URL the player adds the chosen audio track and codecs to.
+    pub hls: String,
+    /// Plex part ID, where the chosen audio stream is set. Empty for Jellyfin.
+    pub part: String,
+}
+
+/// Copies only `keys` of each stream, so launch parameters stay small.
+pub fn trim_streams<'a>(
+    streams: impl IntoIterator<Item = &'a serde_json::Value>,
+    keys: &[&str],
+) -> Vec<serde_json::Value> {
+    streams
+        .into_iter()
+        .map(|s| {
+            serde_json::Value::Object(
+                keys.iter()
+                    .filter_map(|k| s.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// Songs the web player plays one after another, with the album's cover.
@@ -272,6 +306,7 @@ impl OpenRequest {
             selected_subtitle: Some(0),
             report: None,
             music: None,
+            media: None,
         }
     }
 }

@@ -1003,6 +1003,7 @@ fn play_album(
             start,
             shuffle,
         }),
+        media: None,
     })));
 }
 
@@ -1295,13 +1296,14 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         .split(',')
         .any(|c| c == "mp4" || c == "mov")
         && source.get("SupportsDirectPlay").and_then(Value::as_bool) == Some(true);
+    let hls = hls_url(link, &target_id, &source_id, &session);
     let url = if direct {
         format!(
             "{}/Videos/{target_id}/stream?static=true&MediaSourceId={source_id}&ApiKey={}",
             link.server, link.token
         )
     } else {
-        hls_url(link, &target_id, &source_id, &session)
+        hls.clone()
     };
     let subtitles: Vec<crate::player::Track> = streams(&source, "Subtitle")
         .iter()
@@ -1395,12 +1397,64 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         selected_subtitle,
         report: Some(report),
         music: None,
+        media: Some(player_media(&source, hls)),
     })));
+}
+
+/// The source's video and audio streams for the web player, which picks the
+/// audio track and HDR mode itself.
+fn player_media(source: &Value, hls: String) -> crate::player::MediaInfo {
+    let streams = streams(source, "Video")
+        .into_iter()
+        .chain(streams(source, "Audio"));
+    crate::player::MediaInfo {
+        service: "jellyfin".into(),
+        streams: crate::player::trim_streams(
+            streams,
+            &[
+                "Type",
+                "Index",
+                "Codec",
+                "Profile",
+                "Channels",
+                "BitRate",
+                "Language",
+                "Title",
+                "DisplayTitle",
+                "IsDefault",
+                "AudioSpatialFormat",
+                "VideoRange",
+                "VideoRangeType",
+            ],
+        ),
+        hls,
+        part: String::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_media_keeps_video_and_audio_in_server_order() {
+        let source = serde_json::json!({"MediaStreams": [
+            {"Type": "Audio", "Index": 1, "Codec": "truehd", "Language": "eng", "Path": "x"},
+            {"Type": "Video", "Index": 0, "Codec": "hevc", "VideoRange": "HDR"},
+            {"Type": "Subtitle", "Index": 2, "Codec": "srt"},
+            {"Type": "Audio", "Index": 3, "Codec": "ac3", "Language": "eng"}
+        ]});
+        let media = player_media(&source, "https://jf.invalid/master.m3u8".into());
+        assert_eq!(media.service, "jellyfin");
+        assert!(media.part.is_empty());
+        let kinds: Vec<_> = media
+            .streams
+            .iter()
+            .map(|s| (s["Type"].as_str().unwrap(), s["Index"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(kinds, vec![("Video", 0), ("Audio", 1), ("Audio", 3)]);
+        assert!(media.streams[1].get("Path").is_none());
+    }
 
     /// Real LAN: `cargo test discover_lan -- --ignored --nocapture`.
     #[test]

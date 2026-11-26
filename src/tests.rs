@@ -3767,3 +3767,96 @@ fn unsupported_saved_media_source_is_ignored_without_losing_other_settings() {
     assert_eq!(prefs.stacks[0].collection, "recent");
     assert!(prefs.luma_player);
 }
+
+#[test]
+fn hdr_player_level_defaults_to_150_nits_and_stays_in_bounds() {
+    assert_eq!(Preferences::default().hdr_ui_nits(), 150);
+    // Settings saved before the option existed get the default.
+    let old: Preferences = serde_json::from_value(json!({"luma_player": true})).unwrap();
+    assert_eq!(old.hdr_ui_nits(), 150);
+    let low: Preferences = serde_json::from_value(json!({"hdr_ui_nits": 3})).unwrap();
+    assert_eq!(low.hdr_ui_nits(), crate::model::HDR_UI_NITS_MIN);
+    let high: Preferences = serde_json::from_value(json!({"hdr_ui_nits": 4000})).unwrap();
+    assert_eq!(high.hdr_ui_nits(), crate::model::HDR_UI_NITS_MAX);
+}
+
+#[test]
+fn general_settings_set_the_hdr_player_level() {
+    use crate::renderer::Draw;
+    let mut state = ready();
+    state.open(2);
+    state.focus = Target::Sidebar(0);
+    state.activate();
+    assert_eq!(state.section, 0);
+    assert_eq!(state.settings_level, crate::state::SettingsLevel::Section);
+    let shown = scene(&state);
+    assert!(
+        shown
+            .draw
+            .iter()
+            .any(|d| matches!(d, Draw::Text(t, ..) if t == "150 nits"))
+    );
+    // The row sits below the greeting and inside the panel.
+    let row = shown
+        .controls
+        .iter()
+        .find(|c| c.target == Target::Setting(11))
+        .expect("HDR row");
+    let greeting = shown
+        .controls
+        .iter()
+        .find(|c| c.target == Target::Setting(6))
+        .expect("greeting row");
+    assert!(row.rect.y > greeting.rect.y);
+    state.focus = Target::Setting(6);
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::Setting(11));
+    // OK steps through the levels and wraps around.
+    assert_eq!(state.activate(), vec![Effect::Save]);
+    assert_eq!(state.preferences.hdr_ui_nits, 180);
+    state.activate();
+    assert_eq!(state.preferences.hdr_ui_nits, 200);
+    state.activate();
+    assert_eq!(state.preferences.hdr_ui_nits, 80);
+    // Left and Right fine-tune by 10 nits, within bounds.
+    assert_eq!(
+        state.direction(Direction::Right, &controls(&state)),
+        vec![Effect::Save]
+    );
+    assert_eq!(state.preferences.hdr_ui_nits, 90);
+    for _ in 0..10 {
+        state.direction(Direction::Left, &controls(&state));
+    }
+    assert_eq!(state.preferences.hdr_ui_nits, crate::model::HDR_UI_NITS_MIN);
+    assert_eq!(state.focus, Target::Setting(11));
+}
+
+#[test]
+fn web_player_gets_the_hdr_level_and_the_streams_to_choose_from() {
+    let mut state = ready();
+    state.preferences.hdr_ui_nits = 120;
+    let mut request = crate::player::OpenRequest::preview(crate::player::Source::Movie);
+    request.media = Some(crate::player::MediaInfo {
+        service: "jellyfin".into(),
+        streams: vec![json!({"Type": "Audio", "Index": 2, "Codec": "truehd"})],
+        hls: "https://jf.invalid/Videos/1/master.m3u8?ApiKey=k".into(),
+        part: String::new(),
+    });
+    let params = super::web_player_params(&state, &request);
+    assert_eq!(params["hdrUiNits"], 120);
+    assert_eq!(params["media"]["service"], "jellyfin");
+    assert_eq!(params["media"]["streams"][0]["Codec"], "truehd");
+    assert_eq!(
+        params["media"]["hls"],
+        "https://jf.invalid/Videos/1/master.m3u8?ApiKey=k"
+    );
+    request.media = None;
+    assert!(super::web_player_params(&state, &request)["media"].is_null());
+}
+
+#[test]
+fn player_streams_keep_only_the_fields_the_player_reads() {
+    let streams = [json!({"Type": "Audio", "Codec": "eac3", "Path": "/srv/a.mkv"})];
+    let trimmed = crate::player::trim_streams(streams.iter(), &["Type", "Codec", "Language"]);
+    assert_eq!(trimmed, vec![json!({"Type": "Audio", "Codec": "eac3"})]);
+}

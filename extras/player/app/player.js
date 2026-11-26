@@ -23,6 +23,11 @@ const SEEK_SETTLE_MS = 450;
 const MARK_EVERY_MS = 30000;
 const PAD = 88;
 const WIDE = 1744;
+// In HDR the TV puts the white of the graphics layer at the BT.2408
+// reference level, 203 nits; the controls are scaled down from there.
+const HDR_REFERENCE_NITS = 203;
+const HDR_UI_NITS = 150; // Luma's default (Settings › General)
+const META_WAIT_MS = 4000;
 
 let p = {}; // launch params from Luma
 let icons = {}; // name -> svg text
@@ -41,6 +46,10 @@ let hoverSec = null;
 let playing = false;
 let lastMark = 0;
 let leaving = false;
+// Audio tracks and HDR of the title, from Luma or fetched for another episode:
+// {service, hls, part, tracks, hdr, hlsMode, at, codecs}. hlsMode: the server
+// streams one chosen track, so switching tracks reloads the stream.
+let media = null;
 
 // ---------- helpers ----------
 function clock(sec) {
@@ -114,6 +123,18 @@ function applyAccent() {
   s.setProperty('--accent-b', b);
   s.setProperty('--accent-mid', mixHex(a, b, 0.55));
   s.setProperty('--accent-ink', hex(p.accentInk, '#121519'));
+}
+
+// ---------- HDR ----------
+// Controls and captions of an HDR title are drawn at the level chosen in Luma
+// (150 nits unless changed). The brightness filter scales gamma-encoded
+// values, hence the 1/2.2 power on the linear light ratio.
+function applyHdr() {
+  const nits = p.hdrUiNits === undefined ? HDR_UI_NITS : +p.hdrUiNits || 0;
+  const on = !!(media && media.hdr) && !music && nits > 0 && nits < HDR_REFERENCE_NITS;
+  const k = on ? Math.pow(nits / HDR_REFERENCE_NITS, 1 / 2.2) : 1;
+  document.documentElement.style.setProperty('--hdr-ui', k.toFixed(3));
+  document.body.classList.toggle('hdr', on);
 }
 
 // ---------- controls visibility ----------
@@ -275,24 +296,215 @@ function esc(s) {
 // ---------- tracks ----------
 function audioList() {
   const t = video.audioTracks;
-  const n = t && t.length ? t.length : (p.audio || []).length;
+  const n =
+    media && media.hlsMode
+      ? media.tracks.length
+      : t && t.length
+        ? t.length
+        : (p.audio || []).length;
   const out = [];
   for (let i = 0; i < n; i++) out.push(audioName(i));
   return out;
 }
 // The stream's own label first ("01. Дубляж. MovieDalen (RUS)"); media's
-// list may be ordered differently from the playlist.
+// list may be ordered differently from the playlist. A server stream carries
+// one track only, so its names come from the server's list.
 function audioName(i) {
+  if (media && media.hlsMode) {
+    const m = media.tracks[i];
+    return (p.audio || [])[i] || (m && m.title) || `Track ${i + 1}`;
+  }
   const t = video.audioTracks && video.audioTracks[i];
   const label = t && (t.label || '').trim();
   if (label) return label.replace(/^\d+\.\s*/, '');
   return (p.audio || [])[i] || (t && t.language) || `Track ${i + 1}`;
 }
-function setAudio(i) {
+// Turns on the track the file plays; a server stream has one, the first.
+function enableAudio() {
   const t = video.audioTracks;
-  if (t && t.length) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
-  audioIndex = i;
+  const i = media && media.hlsMode ? 0 : audioIndex;
+  if (t && t.length > i) for (let j = 0; j < t.length; j++) t[j].enabled = j === i;
+}
+function setAudio(i) {
+  if (media && media.hlsMode) {
+    switchServerAudio(i);
+  } else {
+    audioIndex = i;
+    enableAudio();
+  }
   buildRow();
+}
+
+// ---------- audio choice ----------
+const tvCodecs = {};
+// Asks the TV itself whether it decodes a codec; answers are kept.
+function tvPlays(codec) {
+  if (codec in tvCodecs) return tvCodecs[codec];
+  const yes = (LumaMedia.MIME[codec] || []).some((type) => {
+    try {
+      const answer = video.canPlayType(type);
+      if (answer && answer !== 'no') return true;
+      return !!(window.MediaSource && MediaSource.isTypeSupported(type));
+    } catch {
+      return false;
+    }
+  });
+  tvCodecs[codec] = yes;
+  return yes;
+}
+// Picks the audio track and the stream URL for `url`, then calls done(url).
+function chooseStream(url, done) {
+  if (!media || !media.tracks.length || !media.hls) {
+    if (media) media.hlsMode = false;
+    done(url);
+    return;
+  }
+  const plan = LumaMedia.plan(media.tracks, {
+    direct: url !== media.hls,
+    switchable: 'audioTracks' in HTMLMediaElement.prototype,
+    tvPlays,
+  });
+  if (!plan) {
+    media.hlsMode = false;
+    done(url);
+    return;
+  }
+  media.hlsMode = plan.hls;
+  media.codecs = plan.codecs;
+  media.at = plan.track.pos;
+  audioIndex = plan.track.pos;
+  if ((p.audio || []).length < media.tracks.length) p.audio = media.tracks.map((t) => t.title);
+  buildRow();
+  if (!plan.hls) done(url);
+  else serverStream(plan.track, done);
+}
+// HLS for one track: Jellyfin takes it in the URL; Plex keeps it as the
+// part's selected stream, so it is set there first.
+function serverStream(track, done) {
+  if (media.service !== 'plex') {
+    done(LumaMedia.jellyfinUrl(media.hls, track, media.codecs));
+    return;
+  }
+  const url = LumaMedia.plexUrl(media.hls, media.codecs);
+  const r = p.report;
+  if (!r || !media.part || track.index === undefined) {
+    done(url);
+    return;
+  }
+  let sent = false;
+  const go = () => {
+    if (!sent) {
+      sent = true;
+      done(url);
+    }
+  };
+  const x = new XMLHttpRequest();
+  x.onloadend = go;
+  x.open(
+    'PUT',
+    `${r.base}/library/parts/${media.part}?audioStreamID=${track.index}&allParts=1&X-Plex-Token=${r.token}`,
+  );
+  x.send();
+  setTimeout(go, 2500);
+}
+// Another track of a server stream: the running encode is stopped and the
+// stream reopened at the same time with the new track.
+function switchServerAudio(i) {
+  const track = media.tracks[i];
+  if (!track || i === media.at) return;
+  const at = video.currentTime || 0;
+  media.at = i;
+  audioIndex = i;
+  stopEncode(() => {
+    if (media.service === 'plex' && p.report) {
+      const session = Math.random().toString(16).slice(2, 14) + Date.now().toString(16);
+      p.report.session = session;
+      media.hls = LumaMedia.setQuery(
+        LumaMedia.setQuery(media.hls, 'session', session),
+        'X-Plex-Session-Identifier',
+        session,
+      );
+    }
+    serverStream(track, (url) => open(url, at));
+  });
+}
+function stopEncode(done) {
+  const r = p.report;
+  if (!r || !r.base) {
+    done();
+    return;
+  }
+  let sent = false;
+  const go = () => {
+    if (!sent) {
+      sent = true;
+      done();
+    }
+  };
+  const x = new XMLHttpRequest();
+  x.onloadend = go;
+  if (r.service === 'plex') {
+    x.open(
+      'GET',
+      `${r.base}/video/:/transcode/universal/stop?session=${r.session}&X-Plex-Token=${r.token}`,
+    );
+  } else {
+    x.open(
+      'DELETE',
+      `${r.base}/Videos/ActiveEncodings?DeviceId=${encodeURIComponent(r.deviceId)}&PlaySessionId=${r.session}`,
+    );
+    x.setRequestHeader('Authorization', jellyfinAuth(r));
+  }
+  x.send();
+  setTimeout(go, 1500);
+}
+function jellyfinAuth(r) {
+  return `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${r.deviceId}", Version="${r.version || '1'}", Token="${r.token}"`;
+}
+// Streams and HDR of another episode, asked of the server; null if it can't say.
+function fetchMedia(item, url, done) {
+  const r = p.report;
+  if (!r || !r.base || !item) {
+    done(null);
+    return;
+  }
+  let sent = false;
+  const finish = (info) => {
+    if (!sent) {
+      sent = true;
+      done(info);
+    }
+  };
+  const x = new XMLHttpRequest();
+  x.onload = () => {
+    let info = null;
+    try {
+      const reply = JSON.parse(x.responseText || '{}');
+      if (r.service === 'plex') {
+        const m = ((reply.MediaContainer || {}).Metadata || [])[0] || {};
+        const part = (((m.Media || [])[0] || {}).Part || [])[0] || {};
+        info = { service: 'plex', streams: part.Stream || [], hls: url, part: part.id };
+      } else {
+        const source = (reply.MediaSources || [])[0] || {};
+        info = { service: 'jellyfin', streams: source.MediaStreams || [], hls: url };
+      }
+    } catch {
+      info = null;
+    }
+    finish(info);
+  };
+  x.onerror = () => finish(null);
+  if (r.service === 'plex') {
+    x.open('GET', `${r.base}/library/metadata/${item}?X-Plex-Token=${r.token}`);
+    x.setRequestHeader('Accept', 'application/json');
+    x.send();
+  } else {
+    x.open('POST', `${r.base}/Items/${item}/PlaybackInfo`);
+    x.setRequestHeader('Content-Type', 'application/json');
+    x.setRequestHeader('Authorization', jellyfinAuth(r));
+    x.send('{}');
+  }
+  setTimeout(() => finish(null), META_WAIT_MS);
 }
 function setSubtitle(i) {
   subtitleIndex = i;
@@ -458,7 +670,7 @@ function open(url, at) {
     video.removeEventListener('loadedmetadata', start);
     opening = null;
     if (at > 0) video.currentTime = at;
-    if (video.audioTracks && video.audioTracks.length > audioIndex) setAudio(audioIndex);
+    enableAudio();
   };
   opening = start;
   video.addEventListener('loadedmetadata', start);
@@ -536,10 +748,8 @@ function report(event, done) {
   }[event];
   x.open('POST', r.base + path);
   x.setRequestHeader('Content-Type', 'application/json');
-  x.setRequestHeader(
-    'Authorization',
-    `MediaBrowser Client="Luma", Device="LG TV", DeviceId="${r.deviceId}", Version="${r.version || '1'}", Token="${r.token}"`,
-  );
+  x.setRequestHeader('Authorization', jellyfinAuth(r));
+  const track = media && media.tracks[audioIndex];
   x.send(
     JSON.stringify({
       ItemId: r.item,
@@ -549,6 +759,7 @@ function report(event, done) {
       PositionTicks: ms * 10000,
       IsPaused: video.paused,
       CanSeek: true,
+      AudioStreamIndex: track ? track.index : undefined,
     }),
   );
 }
@@ -579,10 +790,21 @@ function episode(target) {
     p.audio = [];
     p.subtitles = [];
     subtitleIndex = -1;
+    audioIndex = 0;
     cues = [];
+    media = null;
     header();
     buildRow();
-    open(e.url, 0);
+    video.pause();
+    showNote('Loading…');
+    // The episode's own tracks and HDR decide its stream, as for the first one.
+    const asked = e.item;
+    fetchMedia(e.item, e.url, (info) => {
+      if (leaving || p.report.item !== asked) return;
+      if (info) media = LumaMedia.describe(info);
+      applyHdr();
+      chooseStream(e.url, (url) => open(url, 0));
+    });
     return;
   }
 }
@@ -1116,18 +1338,25 @@ function start() {
   $('tracks').classList.add('hidden');
   applyAccent();
   music = null;
+  media = null;
   document.body.classList.remove('music');
   $('music').classList.add('hidden');
   if (p.music && (p.music.songs || []).length) {
+    applyHdr();
     startMusic();
     render();
     renderMusic();
     return;
   }
+  media = p.media ? LumaMedia.describe(p.media) : null;
+  applyHdr();
   header();
   buildRow();
   if (typeof p.subtitle === 'number' && p.subtitle >= 0) setSubtitle(p.subtitle);
-  open(p.url, (p.resumeMs || 0) / 1000);
+  const resume = (p.resumeMs || 0) / 1000;
+  chooseStream(p.url, (url) => {
+    if (!leaving) open(url, resume);
+  });
   reveal();
   render();
 }

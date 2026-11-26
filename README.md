@@ -54,6 +54,8 @@ Free and open source (MIT). Fork it, change it, ship it.
 - A **Libraries** row for Jellyfin: every library on the server as a wide banner card with its own picture and item count, like the shelves of a console store. A card opens the whole library, with one tab per library and search. New Jellyfin sign-ins get it automatically; otherwise add it in **Settings › Stacks** (Collection › Libraries).
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
+- The player starts on the best English audio track (lossless first, then the most channels, codec and bitrate; commentary and audio description only if nothing else is English). The TV is asked which audio codecs it plays before anything is converted: a track it plays is copied as is, and one it can't is re-encoded to Dolby Digital Plus rather than falling back to a Dolby Digital track. Only a TV without Dolby Digital Plus gets the best track it plays as is.
+- Over HDR video, the player's controls and captions are drawn at a fixed brightness, 150 nits by default. Change it in **Settings › General › Player controls in HDR** (OK steps through 80 to 200 nits; Left and Right adjust by 10).
 - Music: albums, songs and a now-playing screen.
 - Plex support is new and less tested than Jellyfin.
 
@@ -212,11 +214,11 @@ you only need one of the two.
 
 Download `com.archbtw.luma_2.4.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.0.11_all.ipk`.
+`ares-install`. To play Jellyfin and Plex videos, also install `com.archbtw.luma.player_0.0.12_all.ipk`.
 
 ```sh
 ares-install --device tv com.archbtw.luma_2.4.0_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.0.11_all.ipk
+ares-install --device tv com.archbtw.luma.player_0.0.12_all.ipk
 ```
 
 Coming from the original Luma? It stays installed as a separate app (`com.denisefremov.luma`) with its

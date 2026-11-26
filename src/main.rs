@@ -346,6 +346,7 @@ fn effects(
                         selected_subtitle: None,
                         report: None,
                         music: None,
+                        media: None,
                     };
                     if let Ok(request) = request.sanitize() {
                         open_player(state, platform, request);
@@ -535,6 +536,7 @@ fn effects(
                     selected_subtitle: None,
                     report: None,
                     music: None,
+                    media: None,
                 };
                 match request.sanitize() {
                     Ok(request) => open_player(state, platform, request),
@@ -1785,6 +1787,13 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
         "accentB": hex(if gradient { b } else { a }),
         "accentKind": if gradient { "gradient" } else { "solid" },
         "accentInk": ink,
+        "hdrUiNits": state.preferences.hdr_ui_nits(),
+        "media": request.media.as_ref().map(|m| serde_json::json!({
+            "service": m.service,
+            "streams": m.streams,
+            "hls": m.hls,
+            "part": m.part,
+        })),
     })
 }
 

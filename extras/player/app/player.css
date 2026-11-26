@@ -115,6 +115,14 @@ body.controls #controls {
   opacity: 1;
   pointer-events: auto;
 }
+
+/* HDR titles: controls, captions and notes at the level set in Luma. */
+body.hdr #controls,
+body.hdr #caption,
+body.hdr #tracks,
+body.hdr #note {
+  filter: brightness(var(--hdr-ui, 1));
+}
 #topShade {
   position: absolute;
   left: 0;

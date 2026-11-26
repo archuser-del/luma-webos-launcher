@@ -258,6 +258,13 @@
     "zh": "24 小时制",
     "pt": "24 horas"
   },
+  "hdrPlayerUi": {
+    "en": "Player controls in HDR",
+    "de": "Player-Steuerung bei HDR",
+    "es": "Controles del reproductor en HDR",
+    "zh": "HDR 播放器控件亮度",
+    "pt": "Controles do player em HDR"
+  },
   "reducedMotion": {
     "en": "Reduced motion",
     "de": "Bewegungen reduzieren",

@@ -337,6 +337,9 @@ pub(super) fn page_head(
         } else {
             744.
         }
+    } else if state.section == 0 && state.subpage.is_none() {
+        // Six rows, the last the HDR player level.
+        (2. * S32 + 6. * 92.).max(PREVIEW_MIN)
     } else if state.section == crate::state::SYSTEM_SECTION
         && state.subpage.is_none()
         && state.root.is_some()
