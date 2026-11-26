@@ -496,12 +496,36 @@
     };
   }
 
+  /**
+   * Jellyfin's VideoRangeType as people say it. Dual-layer Dolby Vision is
+   * streamed with the enhancement layer removed, which leaves its HDR10 base.
+   */
+  function rangeName(range, streamed) {
+    const r = String(range || '');
+    if (/^DOVIWithEL/i.test(r)) {
+      return streamed ? 'HDR10 (Dolby Vision layer removed)' : 'Dolby Vision';
+    }
+    if (/^DOVI/i.test(r)) return 'Dolby Vision';
+    if (r === 'HDR10Plus') return 'HDR10+';
+    return r;
+  }
+
+  /**
+   * CSS brightness() for controls meant to show at `nits` when the TV draws
+   * full-white graphics at `white` nits over HDR. brightness() scales the
+   * gamma-encoded (sRGB) values, so the linear ratio takes a 1/2.2 power.
+   * 1 (untouched) when the TV is already at or below the level.
+   */
+  function hdrBrightness(nits, white) {
+    return nits > 0 && white > 0 && nits < white ? Math.pow(nits / white, 1 / 2.2) : 1;
+  }
+
   /** "Direct Play · HDR10 · TrueHD → FLAC" for the player's info line. */
   function label(method, info, track, convertedTo, videoReencoded, swappedFrom) {
     const parts = [method];
     if (info.video.hdr) {
       parts.push(
-        videoReencoded ? 'SDR (converted)' : info.video.range.replace('DOVI', 'Dolby Vision'),
+        videoReencoded ? 'SDR (converted)' : rangeName(info.video.range, method !== 'Direct Play'),
       );
     }
     if (track && convertedTo) parts.push(`${codecName(track.codec)} → ${codecName(convertedTo)}`);
@@ -549,7 +573,10 @@
   function trickplay(item, ctx, sourceId) {
     const all = item && item.Trickplay;
     if (!all) return null;
-    const byWidth = all[sourceId] || all[Object.keys(all)[0]];
+    // The version that has trickplay: the one playing, else the first listed.
+    // Its own ID goes in the address, or Jellyfin looks for the wrong files.
+    const owner = all[sourceId] ? sourceId : Object.keys(all)[0];
+    const byWidth = all[owner];
     if (!byWidth) return null;
     const widths = Object.keys(byWidth)
       .map(Number)
@@ -570,7 +597,8 @@
     if (runMs > 0 && count * t.Interval < runMs / 2) {
       count = Math.ceil(runMs / t.Interval);
     }
-    const source = sourceId ? `MediaSourceId=${encodeURIComponent(sourceId)}&` : '';
+    const source = owner ? `MediaSourceId=${encodeURIComponent(owner)}&` : '';
+    const token = `ApiKey=${encodeURIComponent(ctx.token)}`;
     return {
       width,
       height: t.Height || Math.round((width * 9) / 16),
@@ -579,9 +607,17 @@
       count,
       reported,
       interval: t.Interval,
+      owner,
       // Images cannot send a header: the token goes in the address.
-      tile: (i) =>
-        `${ctx.base}/Videos/${ctx.item}/Trickplay/${key}/${i}.jpg?${source}ApiKey=${encodeURIComponent(ctx.token)}`,
+      tile: (i) => `${ctx.base}/Videos/${ctx.item}/Trickplay/${key}/${i}.jpg?${source}${token}`,
+      // The version's own address, tried when the server refuses the first.
+      tileDirect: (i) =>
+        `${ctx.base}/Videos/${owner || ctx.item}/Trickplay/${key}/${i}.jpg?${token}`,
+      // For the log: where tiles come from, without the token.
+      where: (direct) =>
+        direct
+          ? `/Videos/${owner || ctx.item}/Trickplay/${key}/<n>.jpg`
+          : `/Videos/${ctx.item}/Trickplay/${key}/<n>.jpg?MediaSourceId=${owner}`,
     };
   }
 
@@ -600,7 +636,7 @@
     const w = tp.width * scale;
     const h = tp.height * scale;
     return {
-      url: tp.tile(Math.floor(n / per)),
+      url: (tp.direct ? tp.tileDirect : tp.tile)(Math.floor(n / per)),
       width: Math.round(w),
       height: Math.round(h),
       size: `${tp.cols * w}px ${tp.rows * h}px`,
@@ -618,6 +654,8 @@
     fallbackTrack,
     bestTrack,
     canAudio,
+    rangeName,
+    hdrBrightness,
     plexAudio,
     plexProfileExtra,
     chapters,

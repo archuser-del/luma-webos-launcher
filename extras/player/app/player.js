@@ -7,6 +7,20 @@ function plog() {
   if (window.LumaLog) window.LumaLog.line.apply(null, arguments);
 }
 window.addEventListener('unhandledrejection', (e) => plog('unhandled rejection:', e.reason));
+// A page that is closed or reloaded says so, and sends its lines first: a
+// second start in the log can then be told apart from a crash.
+window.addEventListener('pagehide', (e) => {
+  plog(`page closing${e.persisted ? ' (kept in memory)' : ''}`);
+  if (window.LumaLog) window.LumaLog.flush();
+});
+function pageLoad() {
+  try {
+    const nav = performance.getEntriesByType('navigation')[0];
+    return nav ? nav.type : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 window.onerror = (message, source, line) => {
   plog(`script error: ${message} (${String(source).split('/').pop()}:${line})`);
   const n = document.getElementById('note');
@@ -23,10 +37,11 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.6.0';
-// In HDR the TV puts the white of the graphics layer at the BT.2408
-// reference level, 203 nits; the controls are scaled down from there.
-const HDR_REFERENCE_NITS = 203;
+const PLAYER_VERSION = '0.6.1';
+// Over HDR video, LG TVs draw app graphics far brighter than over SDR, and
+// webOS does not say how bright. Luma's setting "TV graphics white in HDR"
+// says it (400 nits unless calibrated); the controls are scaled from there.
+const HDR_GRAPHICS_WHITE = 400;
 const HDR_UI_NITS = 150; // Luma's default (Settings › General)
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
@@ -138,12 +153,19 @@ function hdrPlaying() {
 }
 function applyHdr() {
   const nits = p.hdrUiNits === undefined ? HDR_UI_NITS : +p.hdrUiNits || 0;
-  const on = hdrPlaying() && nits > 0 && nits < HDR_REFERENCE_NITS;
-  const k = on ? Math.pow(nits / HDR_REFERENCE_NITS, 1 / 2.2) : 1;
-  document.documentElement.style.setProperty('--hdr-ui', k.toFixed(3));
-  if (document.body.classList.contains('hdr') !== on) {
-    plog(on ? `HDR: controls at ${nits} nits` : 'HDR: controls at full brightness');
+  const white = +p.hdrGraphicsWhite > 0 ? +p.hdrGraphicsWhite : HDR_GRAPHICS_WHITE;
+  const k = hdrPlaying() ? window.LumaStreams.hdrBrightness(nits, white) : 1;
+  const on = k < 1;
+  const key = on ? `${nits}/${white}` : 'off';
+  if (applyHdr.last !== key) {
+    applyHdr.last = key;
+    plog(
+      on
+        ? `HDR: controls at ${nits} nits, TV graphics white ${white} nits: brightness ${k.toFixed(3)}`
+        : `HDR: controls at full brightness${hdrPlaying() ? ` (${nits} of ${white} nits)` : ''}`,
+    );
   }
+  document.documentElement.style.setProperty('--hdr-ui', k.toFixed(3));
   document.body.classList.toggle('hdr', on);
 }
 function applyAccent() {
@@ -315,7 +337,9 @@ function drawPreview(d) {
           ? pos()
           : null;
   const S = window.LumaStreams;
-  const have = jf && (jf.trickplay || (jf.chapters && jf.chapters.length));
+  // Trickplay the server refused counts as none: the preview shows text only.
+  const tp = jf && jf.trickplay && !jf.trickplay.off ? jf.trickplay : null;
+  const have = jf && (tp || (jf.chapters && jf.chapters.length));
   if (!have || sec === null || !d || panel) {
     box.classList.add('hidden');
     previewKey = '';
@@ -326,10 +350,10 @@ function drawPreview(d) {
   $('previewTime').textContent = clock(sec);
   const at = S.chapterAt(jf.chapters || [], sec);
   $('previewName').textContent = at >= 0 ? jf.chapters[at].name : '';
-  box.classList.toggle('textOnly', !jf.trickplay);
-  if (jf.trickplay) {
-    wantTilesAround(jf.trickplay, sec);
-    const f = S.trickplayFrame(jf.trickplay, sec, 320);
+  box.classList.toggle('textOnly', !tp);
+  if (tp) {
+    wantTilesAround(tp, sec);
+    const f = S.trickplayFrame(tp, sec, 320);
     const key = `${f.url} ${f.position}`;
     if (key !== previewKey) {
       previewKey = key;
@@ -399,7 +423,23 @@ function jfExtras() {
 const TILES_KEPT = 6;
 let tiles = new Map(); // tile index -> Image, oldest first
 let tileReported = false;
+// The server refused a tile: try the version's own address once, then stop
+// asking for this title (each refusal is a request and a log line).
+function tileRefused(tp, i, want) {
+  if (jf !== want || jf.trickplay !== tp || tp.off) return;
+  if (!tp.direct) {
+    plog(`trickplay: tile ${i} refused at ${tp.where(false)}; trying ${tp.where(true)}`);
+    tp.direct = true;
+    tiles = new Map();
+    wantTilesAround(tp, pos());
+    return;
+  }
+  tp.off = true;
+  tiles = new Map();
+  plog(`trickplay: tile ${i} refused at ${tp.where(true)} too: no preview pictures for this title`);
+}
 function wantTile(tp, i) {
+  if (tp.off) return;
   const last = Math.ceil(tp.count / (tp.cols * tp.rows)) - 1;
   if (i < 0 || i > last) return;
   if (tiles.has(i)) {
@@ -416,8 +456,8 @@ function wantTile(tp, i) {
       plog(`trickplay: tile ${i} loaded, ${img.naturalWidth}x${img.naturalHeight}`);
     }
   };
-  img.onerror = () => plog(`trickplay: tile ${i} did not load`);
-  img.src = tp.tile(i);
+  img.onerror = () => tileRefused(tp, i, want);
+  img.src = tp.direct ? tp.tileDirect(i) : tp.tile(i);
   tiles.set(i, img);
   while (tiles.size > TILES_KEPT) tiles.delete(tiles.keys().next().value);
 }
@@ -1838,7 +1878,8 @@ function start() {
           : 'url',
     next.title ? `"${next.title}"` : '',
     next.resumeMs ? `resume at ${clock(next.resumeMs / 1000)}` : '',
-    `· player ${PLAYER_VERSION} · ${navigator.userAgent}`,
+    `· player ${PLAYER_VERSION} · page ${pageLoad()}, up ${Math.round(performance.now())} ms`,
+    `· ${navigator.userAgent}`,
   );
   leaving = false;
   p = next;

@@ -258,6 +258,13 @@
     "zh": "24 小时制",
     "pt": "24 horas"
   },
+  "hdrGraphicsWhite": {
+    "en": "TV graphics white in HDR",
+    "de": "Grafik-Weiß des TV bei HDR",
+    "es": "Blanco de gráficos del TV en HDR",
+    "zh": "电视 HDR 图形白色亮度",
+    "pt": "Branco dos gráficos da TV em HDR"
+  },
   "hdrPlayerUi": {
     "en": "Player controls in HDR",
     "de": "Player-Steuerung bei HDR",

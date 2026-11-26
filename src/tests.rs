@@ -2713,8 +2713,9 @@ fn settings_backdrops_stay_in_place_during_content_cascade_and_height_change() {
     for r in panels {
         assert!(r.y == 184. || r.y == 192.);
         assert!(r.x == crate::state::HOME_STRIP_LEFT || r.x == 832.);
+        // Root (792) easing to General (seven rows: 32 + 7 x 92 + 32 = 708).
         assert!(
-            r.h < 696. && r.h > 568.,
+            r.h < 792. && r.h > 708.,
             "height should ease between pages: {}",
             r.h
         );
@@ -5030,6 +5031,10 @@ fn hdr_player_level_defaults_to_150_nits_and_stays_in_bounds() {
     assert_eq!(low.hdr_ui_nits(), crate::model::HDR_UI_NITS_MIN);
     let high: Preferences = serde_json::from_value(json!({"hdr_ui_nits": 4000})).unwrap();
     assert_eq!(high.hdr_ui_nits(), crate::model::HDR_UI_NITS_MAX);
+    assert_eq!(Preferences::default().hdr_graphics_white(), 400);
+    assert_eq!(old.hdr_graphics_white(), 400);
+    let dim: Preferences = serde_json::from_value(json!({"hdr_graphics_white": 10})).unwrap();
+    assert_eq!(dim.hdr_graphics_white(), crate::model::HDR_WHITE_MIN);
 }
 
 #[test]
@@ -5064,11 +5069,11 @@ fn general_settings_set_the_hdr_player_level() {
     assert_eq!(state.focus, Target::Setting(15));
     // OK steps through the levels and wraps around.
     assert_eq!(state.activate(), vec![Effect::Save]);
-    assert_eq!(state.preferences.hdr_ui_nits, 180);
-    state.activate();
     assert_eq!(state.preferences.hdr_ui_nits, 200);
-    state.activate();
-    assert_eq!(state.preferences.hdr_ui_nits, 80);
+    for want in [250, 300, 80] {
+        state.activate();
+        assert_eq!(state.preferences.hdr_ui_nits, want);
+    }
     // Left and Right fine-tune by 10 nits, within bounds.
     assert_eq!(
         state.direction(Direction::Right, &controls(&state)),
@@ -5080,6 +5085,35 @@ fn general_settings_set_the_hdr_player_level() {
     }
     assert_eq!(state.preferences.hdr_ui_nits, crate::model::HDR_UI_NITS_MIN);
     assert_eq!(state.focus, Target::Setting(15));
+    // Below it, the calibration: how bright the TV draws graphics in HDR.
+    state.direction(Direction::Down, &controls(&state));
+    assert_eq!(state.focus, Target::Setting(16));
+    assert!(
+        scene(&state)
+            .draw
+            .iter()
+            .any(|d| matches!(d, Draw::Text(t, ..) if t == "400 nits"))
+    );
+    state.activate();
+    assert_eq!(state.preferences.hdr_graphics_white, 500);
+    state.direction(Direction::Right, &controls(&state));
+    assert_eq!(state.preferences.hdr_graphics_white, 550);
+    for _ in 0..30 {
+        state.direction(Direction::Left, &controls(&state));
+    }
+    assert_eq!(
+        state.preferences.hdr_graphics_white,
+        crate::model::HDR_WHITE_MIN
+    );
+    assert_eq!(state.focus, Target::Setting(16));
+    // Both rows fit inside the panel.
+    let shown = scene(&state);
+    let last = shown
+        .controls
+        .iter()
+        .find(|c| c.target == Target::Setting(16))
+        .unwrap();
+    assert!(last.rect.y + last.rect.h <= 184. + 2. * 32. + 7. * 92. + 1.);
 }
 
 #[test]
@@ -5093,6 +5127,7 @@ fn web_player_gets_the_hdr_level_and_plex_streams() {
     );
     let params = super::web_player_params(&state, &request);
     assert_eq!(params["hdrUiNits"], 120);
+    assert_eq!(params["hdrGraphicsWhite"], 400);
     assert_eq!(params["plex"]["part"], "7");
     assert_eq!(params["plex"]["streams"][0]["codec"], "truehd");
     request.plex = None;

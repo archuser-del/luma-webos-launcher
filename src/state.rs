@@ -3043,24 +3043,41 @@ impl State {
                 }
             }
             // Settings › General: Left and Right step the HDR player level by
-            // 10 nits, as Appearance's size rows do.
+            // 10 nits and its calibration by 50, as Appearance's size rows do.
             if self.page == Page::Settings
                 && self.subpage.is_none()
                 && self.settings_level == SettingsLevel::Section
-                && self.focus == Target::Setting(15)
+                && matches!(self.focus, Target::Setting(15 | 16))
                 && matches!(direction, Direction::Left | Direction::Right)
             {
-                let step = crate::model::HDR_UI_NITS_STEP as i32;
-                let delta = if matches!(direction, Direction::Right) {
-                    step
+                use crate::model::*;
+                let white = self.focus == Target::Setting(16);
+                let (now, step, min, max) = if white {
+                    (
+                        self.preferences.hdr_graphics_white(),
+                        HDR_WHITE_STEP,
+                        HDR_WHITE_MIN,
+                        HDR_WHITE_MAX,
+                    )
                 } else {
-                    -step
+                    (
+                        self.preferences.hdr_ui_nits(),
+                        HDR_UI_NITS_STEP,
+                        HDR_UI_NITS_MIN,
+                        HDR_UI_NITS_MAX,
+                    )
                 };
-                let now = self.preferences.hdr_ui_nits() as i32;
-                self.preferences.hdr_ui_nits = (now + delta).clamp(
-                    crate::model::HDR_UI_NITS_MIN as i32,
-                    crate::model::HDR_UI_NITS_MAX as i32,
-                ) as u16;
+                let next = if matches!(direction, Direction::Right) {
+                    now.saturating_add(step)
+                } else {
+                    now.saturating_sub(step)
+                }
+                .clamp(min, max);
+                if white {
+                    self.preferences.hdr_graphics_white = next;
+                } else {
+                    self.preferences.hdr_ui_nits = next;
+                }
                 self.dirty = true;
                 return vec![Effect::Save];
             }
@@ -5492,6 +5509,14 @@ impl State {
                             .into_iter()
                             .find(|&n| n > now)
                             .unwrap_or(crate::model::HDR_UI_NITS_LEVELS[0]);
+                        self.dirty = true;
+                    }
+                    16 => {
+                        let now = self.preferences.hdr_graphics_white();
+                        self.preferences.hdr_graphics_white = crate::model::HDR_WHITE_LEVELS
+                            .into_iter()
+                            .find(|&n| n > now)
+                            .unwrap_or(crate::model::HDR_WHITE_LEVELS[0]);
                         self.dirty = true;
                     }
                     7 => return vec![Effect::Launch("com.webos.app.home".into())],

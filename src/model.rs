@@ -368,6 +368,10 @@ pub struct Preferences {
     /// Brightness of the player's controls and captions over HDR video, in
     /// nits (Settings › General).
     pub hdr_ui_nits: u16,
+    /// How bright the TV draws full-white app graphics over HDR video, in
+    /// nits (Settings › General). webOS does not report it; the player's HDR
+    /// level is worked out from it.
+    pub hdr_graphics_white: u16,
     /// Home widgets right of the headline (Settings › Widgets).
     pub widgets: crate::widgets::WidgetPrefs,
     /// ImmichFrame server for the photo wallpaper (Settings › Wallpaper).
@@ -375,18 +379,30 @@ pub struct Preferences {
 }
 
 /// Player controls over HDR video: default, bounds and the levels OK steps
-/// through, in nits. The TV draws graphics white at about 203 nits in HDR
-/// (BT.2408), so 200 is the brightest level.
+/// through, in nits.
 pub const HDR_UI_NITS_DEFAULT: u16 = 150;
 pub const HDR_UI_NITS_MIN: u16 = 50;
-pub const HDR_UI_NITS_MAX: u16 = 200;
+pub const HDR_UI_NITS_MAX: u16 = 300;
 pub const HDR_UI_NITS_STEP: u16 = 10;
-pub const HDR_UI_NITS_LEVELS: [u16; 6] = [80, 100, 120, 150, 180, 200];
+pub const HDR_UI_NITS_LEVELS: [u16; 7] = [80, 100, 120, 150, 200, 250, 300];
+/// How bright the TV draws full-white app graphics over HDR video. LG TVs
+/// draw them far brighter than the 203-nit HDR reference white (BT.2408)
+/// and webOS does not say how bright, so it is a calibration: 400 nits
+/// unless set, in steps of 50.
+pub const HDR_WHITE_DEFAULT: u16 = 400;
+pub const HDR_WHITE_MIN: u16 = 200;
+pub const HDR_WHITE_MAX: u16 = 1000;
+pub const HDR_WHITE_STEP: u16 = 50;
+pub const HDR_WHITE_LEVELS: [u16; 7] = [250, 300, 400, 500, 600, 800, 1000];
 
 impl Preferences {
     /// The saved HDR level within its bounds, whatever the file held.
     pub fn hdr_ui_nits(&self) -> u16 {
         self.hdr_ui_nits.clamp(HDR_UI_NITS_MIN, HDR_UI_NITS_MAX)
+    }
+    /// The TV's graphics white in HDR within its bounds.
+    pub fn hdr_graphics_white(&self) -> u16 {
+        self.hdr_graphics_white.clamp(HDR_WHITE_MIN, HDR_WHITE_MAX)
     }
 }
 
@@ -445,6 +461,7 @@ impl Default for Preferences {
             playback_progress: BTreeMap::new(),
             luma_player: true,
             hdr_ui_nits: HDR_UI_NITS_DEFAULT,
+            hdr_graphics_white: HDR_WHITE_DEFAULT,
             widgets: Default::default(),
             immich: Default::default(),
         }

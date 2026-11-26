@@ -67,7 +67,7 @@ Free and open source (MIT). Fork it, change it, ship it.
 - Movie and series pages with backdrop, cast, seasons, episodes and "More like this".
 - **Direct Play first.** Luma Player asks the TV which video and audio codecs it decodes, then plays Jellyfin files (MKV included) untouched whenever it can. When only the audio is the problem (TrueHD or DTS on many TVs), the video is copied bit for bit over HLS (fMP4), as Jellyfin's own webOS app streams, and just that audio track is converted: to E-AC-3 5.1 for surround, or FLAC (lossless) for stereo, since webOS refuses FLAC with more than two channels. Should the TV refuse that, Luma Player steps down to AC-3, then AAC, still with the original video. webOS rarely admits to decoding TrueHD or DTS even where it does: **Settings › System › Dolby TrueHD audio** and **DTS audio** are _Ask the TV_ (default), _TV plays it_ (the file plays untouched) or _Convert it_. If a TV set to play it refuses a film after all, Luma Player converts that one and carries on.
 - **The best English audio track.** Unless you pick one, Luma Player starts on the first English track in the highest source quality: lossless first, then the most channels, then the codec and bitrate. Commentary and audio description play only when nothing else is English. A track the TV can't decode is re-encoded to Dolby Digital Plus (E-AC-3) rather than swapped for a lesser Dolby Digital track; only a TV without E-AC-3 plays the file's own Dolby Digital companion instead. On Plex the same track is chosen and set on the server before the stream starts.
-- **Calm controls over HDR.** Over HDR video the player's controls and captions are drawn at a fixed brightness, 150 nits by default, instead of the TV's full graphics white. Change it in **Settings › General › Player controls in HDR** (OK steps through 80 to 200 nits; Left and Right adjust by 10).
+- **Calm controls over HDR.** Over HDR video the player's controls and captions are drawn at a fixed brightness, 150 nits by default, instead of the TV's full graphics white. Change it in **Settings › General › Player controls in HDR** (OK steps through 80 to 300 nits; Left and Right adjust by 10). LG TVs draw app graphics far brighter over HDR than over SDR and webOS doesn't say how bright, so the level is worked out from **TV graphics white in HDR** (400 nits by default; OK steps 250 to 1000, Left and Right by 50). If the controls look brighter than the level you set, raise it; if dimmer, lower it. With a light meter: if white controls read R nits with the level at L and this at W, set this to R × W ÷ L (225 read at 150 with 400 means 600).
 - **HDR stays HDR.** HDR10, HLG and Dolby Vision video is never re-encoded (Jellyfin would turn it into SDR), so HDR titles offer no lower qualities. Burning an image subtitle into an HDR film is the one exception, and that subtitle is labelled "burned in, SDR" so it is your choice.
 - **Version and Quality pickers** on the title card: choose between a title's versions (for example 4K HDR and 1080p) and between "Original" and lower qualities for SDR files. Audio, subtitles and quality can also be changed while playing.
 - A built-in HTML5 player (`com.archbtw.luma.player`) with audio and subtitle track selection, quality and seek previews. Playback progress syncs back to your server.
@@ -288,15 +288,15 @@ player keeps up to 400 lines and sends them the next time it starts.
 
 ### Manual (IPK)
 
-Download `com.archbtw.luma_2.10.0_arm.ipk` from [Releases](../../releases/latest), or build it yourself
+Download `com.archbtw.luma_2.10.1_arm.ipk` from [Releases](../../releases/latest), or build it yourself
 (see below), and install it with [webOS Dev Manager](https://github.com/webosbrew/dev-manager-desktop) or
-`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.6.0_all.ipk` plays
+`ares-install`. Two small companion apps come with it: `com.archbtw.luma.player_0.6.1_all.ipk` plays
 Jellyfin and Plex videos, and `com.archbtw.luma.aerials_0.1.1_all.ipk` is the full-screen video library
 (**Settings › System › Video library · full screen**).
 
 ```sh
-ares-install --device tv com.archbtw.luma_2.10.0_arm.ipk
-ares-install --device tv com.archbtw.luma.player_0.6.0_all.ipk
+ares-install --device tv com.archbtw.luma_2.10.1_arm.ipk
+ares-install --device tv com.archbtw.luma.player_0.6.1_all.ipk
 ares-install --device tv com.archbtw.luma.aerials_0.1.1_all.ipk
 ```
 
@@ -329,7 +329,7 @@ rustup target add armv7-unknown-linux-gnueabi
 pnpm install --frozen-lockfile
 pnpm sdk                     # downloads the webOS NDK into .build/
 export WEBOS_NDK="$PWD/.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot"
-pnpm run package             # → dist/com.archbtw.luma_2.10.0_arm.ipk, player and aerials IPKs, sha256sums, repo.json
+pnpm run package             # → dist/com.archbtw.luma_2.10.1_arm.ipk, player and aerials IPKs, sha256sums, repo.json
 ```
 
 Desktop preview with sample data (no TV needed):

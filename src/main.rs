@@ -1839,6 +1839,7 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
         "plex": request.plex,
         // Settings › General: player controls over HDR video, in nits.
         "hdrUiNits": state.preferences.hdr_ui_nits(),
+        "hdrGraphicsWhite": state.preferences.hdr_graphics_white(),
         // While the debug log is on: where the player sends its lines.
         "debugLog": debug_log::player_sink(),
         // Settings › System: TrueHD and DTS asked of the TV, or set by hand.

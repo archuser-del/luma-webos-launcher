@@ -507,3 +507,49 @@ test('trickplay imported by Jellyfin counts tiles, not frames: the film length d
   assert.equal(ok.count, 4089);
   assert.equal(ok.reported, 4089);
 });
+
+test('HDR controls: 150 nits on a TV drawing graphics white at 400 nits', () => {
+  // brightness() scales gamma-encoded values: (150/400)^(1/2.2).
+  assert.ok(Math.abs(S.hdrBrightness(150, 400) - 0.6405) < 0.001);
+  assert.ok(Math.abs(S.hdrBrightness(150, 203) - 0.8715) < 0.001);
+  // Back to linear light the controls land on the level asked for.
+  assert.ok(Math.abs(Math.pow(S.hdrBrightness(120, 600), 2.2) * 600 - 120) < 0.01);
+  assert.equal(S.hdrBrightness(300, 250), 1, 'never brighter than the TV');
+  assert.equal(S.hdrBrightness(0, 400), 1);
+});
+
+test('trickplay asks for the version that has it, by its own ID', () => {
+  const item = {
+    RunTimeTicks: 7508e7,
+    Trickplay: {
+      other: {
+        320: {
+          Width: 320,
+          Height: 136,
+          TileWidth: 10,
+          TileHeight: 10,
+          Interval: 2000,
+          ThumbnailCount: 3755,
+        },
+      },
+    },
+  };
+  const tp = S.trickplay(item, { base: 'http://jf', item: 'item1', token: 'tok' }, 'playing');
+  assert.equal(tp.owner, 'other');
+  assert.match(
+    tp.tile(0),
+    /\/Videos\/item1\/Trickplay\/320\/0\.jpg\?MediaSourceId=other&ApiKey=tok$/,
+  );
+  assert.equal(tp.tileDirect(3), 'http://jf/Videos/other/Trickplay/320/3.jpg?ApiKey=tok');
+  assert.ok(!tp.where(false).includes('tok') && !tp.where(true).includes('tok'));
+  tp.direct = true;
+  assert.match(S.trickplayFrame(tp, 0, 320).url, /\/Videos\/other\/Trickplay\//);
+});
+
+test('dual-layer Dolby Vision is labelled by what plays', () => {
+  assert.equal(S.rangeName('DOVIWithEL', true), 'HDR10 (Dolby Vision layer removed)');
+  assert.equal(S.rangeName('DOVIWithEL', false), 'Dolby Vision');
+  assert.equal(S.rangeName('DOVIWithHDR10', true), 'Dolby Vision');
+  assert.equal(S.rangeName('HDR10Plus', true), 'HDR10+');
+  assert.equal(S.rangeName('HDR10', false), 'HDR10');
+});

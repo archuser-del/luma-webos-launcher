@@ -3731,6 +3731,7 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
     match state.section {
         0 => {
             let hdr_nits = format!("{} nits", state.preferences.hdr_ui_nits());
+            let hdr_white = format!("{} nits", state.preferences.hdr_graphics_white());
             for (position, (index, key, icon, value, chevron)) in [
                 (0, "appNames", "type", None, true),
                 (1, "clock", "clock", None, true),
@@ -3758,6 +3759,13 @@ fn legacy_settings_body(out: &mut Scene, state: &State, assets: &Assets) {
                     true,
                 ),
                 (15, "hdrPlayerUi", "tv", Some(hdr_nits.as_str()), false),
+                (
+                    16,
+                    "hdrGraphicsWhite",
+                    "tv",
+                    Some(hdr_white.as_str()),
+                    false,
+                ),
             ]
             .into_iter()
             .enumerate()
