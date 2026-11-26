@@ -3042,6 +3042,28 @@ impl State {
                     return vec![];
                 }
             }
+            // Settings › General: Left and Right step the HDR player level by
+            // 10 nits, as Appearance's size rows do.
+            if self.page == Page::Settings
+                && self.subpage.is_none()
+                && self.settings_level == SettingsLevel::Section
+                && self.focus == Target::Setting(15)
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                let step = crate::model::HDR_UI_NITS_STEP as i32;
+                let delta = if matches!(direction, Direction::Right) {
+                    step
+                } else {
+                    -step
+                };
+                let now = self.preferences.hdr_ui_nits() as i32;
+                self.preferences.hdr_ui_nits = (now + delta).clamp(
+                    crate::model::HDR_UI_NITS_MIN as i32,
+                    crate::model::HDR_UI_NITS_MAX as i32,
+                ) as u16;
+                self.dirty = true;
+                return vec![Effect::Save];
+            }
             if self.page == Page::Settings && self.subpage.is_none() {
                 // Appearance owns Left/Right to move among swatches. Only the
                 // dedicated Back control and the physical BACK key navigate
@@ -5463,6 +5485,14 @@ impl State {
                         };
                         self.dirty = true;
                         return vec![Effect::Root(Some(change))];
+                    }
+                    15 => {
+                        let now = self.preferences.hdr_ui_nits();
+                        self.preferences.hdr_ui_nits = crate::model::HDR_UI_NITS_LEVELS
+                            .into_iter()
+                            .find(|&n| n > now)
+                            .unwrap_or(crate::model::HDR_UI_NITS_LEVELS[0]);
+                        self.dirty = true;
                     }
                     7 => return vec![Effect::Launch("com.webos.app.home".into())],
                     8 => return vec![Effect::Launch(crate::platform::AERIALS_ID.into())],

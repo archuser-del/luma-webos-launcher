@@ -388,6 +388,7 @@ fn effects(
                         report: None,
                         music: None,
                         jellyfin: None,
+                        plex: None,
                     };
                     if let Ok(request) = request.sanitize() {
                         open_player(state, platform, request);
@@ -576,6 +577,7 @@ fn effects(
                     report: None,
                     music: None,
                     jellyfin: None,
+                    plex: None,
                 };
                 match request.sanitize() {
                     Ok(request) => open_player(state, platform, request),
@@ -1834,6 +1836,9 @@ fn web_player_params(state: &State, request: &player::OpenRequest) -> serde_json
             })).collect::<Vec<_>>(),
         })),
         "jellyfin": request.jellyfin,
+        "plex": request.plex,
+        // Settings › General: player controls over HDR video, in nits.
+        "hdrUiNits": state.preferences.hdr_ui_nits(),
         // While the debug log is on: where the player sends its lines.
         "debugLog": debug_log::player_sink(),
         // Settings › System: TrueHD and DTS asked of the TV, or set by hand.

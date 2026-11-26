@@ -1009,6 +1009,7 @@ fn play_album(
         selected_subtitle: None,
         report: Some(report),
         jellyfin: None,
+        plex: None,
         music: Some(crate::player::Music {
             album: title,
             artist,
@@ -1633,6 +1634,7 @@ fn play(reply: &mpsc::Sender<Response>, link: &JellyfinLink, request: PlayReques
         report: Some(report),
         music: None,
         jellyfin: Some(plan),
+        plex: None,
     })));
 }
 

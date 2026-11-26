@@ -23,7 +23,11 @@ window.onerror = (message, source, line) => {
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 const LUMA = 'com.archbtw.luma';
-const PLAYER_VERSION = '0.5.3';
+const PLAYER_VERSION = '0.6.0';
+// In HDR the TV puts the white of the graphics layer at the BT.2408
+// reference level, 203 nits; the controls are scaled down from there.
+const HDR_REFERENCE_NITS = 203;
+const HDR_UI_NITS = 150; // Luma's default (Settings › General)
 const HIDE_MS = 4000;
 const SEEK_STEP = 10;
 const SEEK_SETTLE_MS = 450;
@@ -121,6 +125,26 @@ function mixHex(a, b, t) {
       .padStart(2, '0'),
   );
   return '#' + c.join('');
+}
+// ---------- HDR ----------
+// Controls and captions over HDR video are drawn at the level chosen in Luma
+// (150 nits unless changed). The brightness filter scales gamma-encoded
+// values, hence the 1/2.2 power on the linear light ratio. A transcode is
+// tone-mapped to SDR by Jellyfin, so it is left alone.
+function hdrPlaying() {
+  if (music) return false;
+  if (jf) return !!(jf.info.video.hdr && jf.plan && jf.plan.method !== 'Transcode');
+  return !!(p.plex && p.plex.hdr);
+}
+function applyHdr() {
+  const nits = p.hdrUiNits === undefined ? HDR_UI_NITS : +p.hdrUiNits || 0;
+  const on = hdrPlaying() && nits > 0 && nits < HDR_REFERENCE_NITS;
+  const k = on ? Math.pow(nits / HDR_REFERENCE_NITS, 1 / 2.2) : 1;
+  document.documentElement.style.setProperty('--hdr-ui', k.toFixed(3));
+  if (document.body.classList.contains('hdr') !== on) {
+    plog(on ? `HDR: controls at ${nits} nits` : 'HDR: controls at full brightness');
+  }
+  document.body.classList.toggle('hdr', on);
 }
 function applyAccent() {
   const a = hex(p.accentA, '#7ee8a5');
@@ -857,7 +881,11 @@ function jfStart(at) {
   cues = [];
   jf.plan = S.plan(jfContext());
   logPlan('plan');
+  // The track the plan plays (the best English one unless one was picked).
+  const planned = info.audio.findIndex((a) => a.index === jf.plan.audioIndex);
+  if (planned >= 0) audioIndex = planned;
   showSwap();
+  applyHdr();
   header();
   buildRow();
   if (sub >= 0) {
@@ -910,6 +938,7 @@ function jfReplan() {
   const old = jf.plan;
   jf.plan = next;
   logPlan('new plan');
+  applyHdr();
   header();
   if (old && old.url === next.url) {
     enableTrack(next.audioPosition);
@@ -1827,6 +1856,7 @@ function start() {
   $('music').classList.add('hidden');
   if (p.music && (p.music.songs || []).length) {
     startMusic();
+    applyHdr();
     render();
     renderMusic();
     return;
@@ -1838,12 +1868,84 @@ function start() {
     render();
     return;
   }
+  applyHdr();
+  const resume = (p.resumeMs || 0) / 1000;
+  const plexed = p.plex && p.report && p.report.service === 'plex' && window.LumaStreams;
+  const url = plexed ? plexStream() : null;
   header();
   buildRow();
   if (typeof p.subtitle === 'number' && p.subtitle >= 0) setSubtitle(p.subtitle);
-  open(p.url, (p.resumeMs || 0) / 1000);
+  if (url) plexSelect(url, () => !leaving && open(url.href, resume));
+  else open(p.url, resume);
   reveal();
   render();
+}
+
+// ---------- Plex ----------
+// The best English track (as for Jellyfin), checked against what the TV
+// decodes. A file plays as is when the TV decodes that track and can reach
+// it; otherwise Plex streams it (HLS), with the track set on the part first
+// and converted to E-AC-3 when the TV cannot decode it. Only a TV without
+// E-AC-3 gets a playable companion track instead. Returns null for the file
+// as is, else {href, track}.
+function plexStream() {
+  const S = window.LumaStreams;
+  const caps = S.capabilities(video, p.audioSupport);
+  const audio = S.plexAudio(p.plex.streams);
+  const best = S.bestTrack(audio);
+  if (!best) return null;
+  const decodes = (t) => S.canAudio(caps, t.codec, t.channels);
+  const reach = (t) => t.position === 0 || 'audioTracks' in HTMLMediaElement.prototype;
+  p.audio = audio.map((a) => a.name);
+  plog(
+    'plex audio:',
+    audio.map((a) => a.codec + (a.isDefault ? '*' : '')).join(','),
+    '· best:',
+    best.name,
+    decodes(best) ? '(TV decodes it)' : caps.audio.eac3 ? '(to E-AC-3)' : '(TV cannot decode it)',
+  );
+  if (p.url !== p.plex.hls && decodes(best) && reach(best)) {
+    audioIndex = best.position;
+    return null;
+  }
+  const track = S.fallbackTrack({ audio }, caps, best) || best;
+  // A Plex stream carries the one track it was asked for.
+  p.audio = [track.name];
+  audioIndex = 0;
+  let href = p.plex.hls;
+  const extra = S.plexProfileExtra(caps);
+  if (extra) href = setQuery(href, 'X-Plex-Client-Profile-Extra', extra);
+  return { href, track };
+}
+// The part's selected audio stream is what Plex streams.
+function plexSelect(url, done) {
+  const r = p.report;
+  let sent = false;
+  const go = () => {
+    if (!sent) {
+      sent = true;
+      done();
+    }
+  };
+  if (!p.plex.part || url.track.index === undefined) {
+    go();
+    return;
+  }
+  const x = new XMLHttpRequest();
+  x.onloadend = go;
+  x.open(
+    'PUT',
+    `${r.base}/library/parts/${p.plex.part}?audioStreamID=${url.track.index}&allParts=1&X-Plex-Token=${r.token}`,
+  );
+  x.send();
+  setTimeout(go, 2500);
+}
+// Sets one query parameter, leaving the others exactly as they were.
+function setQuery(url, key, value) {
+  const v = encodeURIComponent(String(value));
+  const re = new RegExp('([?&])' + key.replace(/[-.]/g, '\\$&') + '=[^&#]*');
+  if (re.test(url)) return url.replace(re, (_, sep) => `${sep}${key}=${v}`);
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + `${key}=${v}`;
 }
 // With handlesRelaunch, webOS leaves a relaunched app where it is: a player
 // left running in the background (Home pressed during a film) must bring

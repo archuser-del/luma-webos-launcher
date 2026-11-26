@@ -147,6 +147,27 @@ pub struct OpenRequest {
     /// choices. The web player asks the TV what it decodes and picks Direct
     /// Play, Direct Stream or a transcode itself (streams.js). Holds the token.
     pub jellyfin: Option<serde_json::Value>,
+    /// Plex: the first part's video and audio streams, its ID and the HLS
+    /// address, for the web player to choose the audio track on the TV, plus
+    /// whether the video is HDR. Holds no token; the HLS address does.
+    pub plex: Option<serde_json::Value>,
+}
+
+/// Copies only `keys` of each stream, so launch parameters stay small.
+pub fn trim_streams<'a>(
+    streams: impl IntoIterator<Item = &'a serde_json::Value>,
+    keys: &[&str],
+) -> Vec<serde_json::Value> {
+    streams
+        .into_iter()
+        .map(|s| {
+            serde_json::Value::Object(
+                keys.iter()
+                    .filter_map(|k| s.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// Songs the web player plays one after another, with the album's cover.
@@ -279,6 +300,7 @@ impl OpenRequest {
             report: None,
             music: None,
             jellyfin: None,
+            plex: None,
         }
     }
 }

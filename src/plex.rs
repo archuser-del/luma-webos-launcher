@@ -798,13 +798,14 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
     let container = media(&target)
         .map(|m| text(m, "container"))
         .unwrap_or_default();
+    let hls = hls_url(link, &target_key, &session);
     let url = if matches!(container.as_str(), "mp4" | "mov") {
         format!(
             "{}{file}?X-Plex-Token={}",
             link.server_uri, link.server_token
         )
     } else {
-        hls_url(link, &target_key, &session)
+        hls.clone()
     };
     let subtitles: Vec<crate::player::Track> = streams(&target, 3)
         .iter()
@@ -903,13 +904,70 @@ fn play(reply: &mpsc::Sender<Response>, link: &PlexLink, request: PlayRequest) {
         report: Some(report),
         music: None,
         jellyfin: None,
+        plex: Some(player_plex(&target, hls)),
     })));
+}
+
+/// The first part's video and audio streams, its ID, the HLS address and
+/// HDR, for the web player to choose the audio track on the TV.
+fn player_plex(target: &Value, hls: String) -> Value {
+    let streams = crate::player::trim_streams(
+        streams(target, 1).into_iter().chain(streams(target, 2)),
+        &[
+            "streamType",
+            "id",
+            "codec",
+            "profile",
+            "channels",
+            "bitrate",
+            "languageCode",
+            "languageTag",
+            "language",
+            "title",
+            "displayTitle",
+            "extendedDisplayTitle",
+            "default",
+            "selected",
+            "visualImpaired",
+        ],
+    );
+    let part = part(target)
+        .and_then(|p| p.get("id"))
+        .map(|id| match id {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    let hdr = badges(target)
+        .iter()
+        .any(|b| b == "HDR" || b == "Dolby Vision");
+    serde_json::json!({ "streams": streams, "part": part, "hls": hls, "hdr": hdr })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn player_plex_names_the_part_keeps_audio_and_sees_hdr() {
+        let item = json!({"Media": [{"Part": [{"id": 4417, "key": "/library/parts/4417/file.mkv",
+        "Stream": [
+            {"streamType": 1, "id": 1, "codec": "hevc", "DOVIPresent": true, "bitDepth": 10},
+            {"streamType": 2, "id": 2, "codec": "truehd", "languageCode": "eng", "channels": 8},
+            {"streamType": 3, "id": 3, "codec": "srt", "key": "/library/streams/3"}
+        ]}]}]});
+        let info = player_plex(&item, "https://plex.invalid/start.m3u8".into());
+        assert_eq!(info["part"], "4417");
+        assert_eq!(info["hdr"], true);
+        assert_eq!(
+            info["streams"],
+            json!([
+                {"streamType": 1, "id": 1, "codec": "hevc"},
+                {"streamType": 2, "id": 2, "codec": "truehd", "languageCode": "eng", "channels": 8}
+            ])
+        );
+    }
 
     #[test]
     fn episodes_and_seasons_open_their_show() {

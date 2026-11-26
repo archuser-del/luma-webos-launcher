@@ -158,13 +158,16 @@
   const FALLBACK_RANK = ['eac3', 'ac3', 'aac', 'opus', 'flac', 'mp3', 'vorbis', 'mp2', 'pcm'];
 
   /**
-   * The track to play in place of `track` when the TV cannot decode it (a
-   * DTS-HD MA or TrueHD default with an AC-3 or E-AC-3 companion): another
-   * track of the same language, not a commentary, that the TV decodes. Most
-   * channels win, then E-AC-3 over AC-3 over the rest. Null when none fits.
+   * The track to play in place of `track` when the TV cannot decode it and
+   * has no E-AC-3 to convert it into (a TrueHD or DTS-HD MA track with an
+   * AC-3 companion): another track of the same language, not a commentary,
+   * that the TV decodes. Most channels win, then E-AC-3 over AC-3 over the
+   * rest. Null when none fits. A TV with E-AC-3 gets the track converted to
+   * Dolby Digital Plus instead of a lesser companion.
    */
   function fallbackTrack(info, caps, track) {
     if (!track || canAudio(caps, track.codec, track.channels)) return null;
+    if (caps.audio.eac3) return null;
     const rank = (a) => {
       const i = FALLBACK_RANK.indexOf(family(a.codec));
       return i < 0 ? FALLBACK_RANK.length : i;
@@ -179,6 +182,98 @@
     );
     candidates.sort((a, b) => b.channels - a.channels || rank(a) - rank(b));
     return candidates[0] || null;
+  }
+
+  // Source quality of an audio track, for choosing among a language's tracks.
+  function grade(track) {
+    const c = family(track.codec);
+    const d = lower(`${track.profile || ''} ${track.spatial || ''} ${track.name || ''}`);
+    const atmos = /atmos/.test(d);
+    if (c === 'truehd') return { lossless: true, tier: atmos ? 10 : 9 };
+    if (c === 'dts') {
+      if (/dts[:-]?x\b|dtsx/.test(d)) return { lossless: true, tier: 10 };
+      if (/master audio|dts-hd ma|(^|[\s(])ma([\s)]|$)/.test(d)) return { lossless: true, tier: 9 };
+      if (/hra|high resolution/.test(d)) return { lossless: false, tier: 6 };
+      return { lossless: false, tier: 5 };
+    }
+    if (c === 'flac' || c === 'pcm' || c === 'alac') return { lossless: true, tier: 8 };
+    if (c === 'eac3') return { lossless: false, tier: atmos ? 7 : 6 };
+    if (c === 'ac3' || c === 'opus') return { lossless: false, tier: 4 };
+    if (c === 'aac' || c === 'vorbis') return { lossless: false, tier: 3 };
+    if (c === 'mp3') return { lossless: false, tier: 2 };
+    return { lossless: false, tier: c === 'mp2' ? 1 : 0 };
+  }
+  function english(track) {
+    if (track.language) return /^(en|eng)([-_].*)?$/.test(track.language);
+    return /\benglish\b/i.test(track.name || '');
+  }
+
+  /**
+   * The track to start on when the viewer has not picked one: the first
+   * English track in the highest source quality (lossless, then channels,
+   * then codec, then bitrate, then the file's order), commentary only when
+   * nothing else is English. Without English, the file's default track.
+   */
+  function bestTrack(audio) {
+    const all = (audio || []).filter((a) => !a.external);
+    const pool = all.filter(english);
+    if (!pool.length) return all.find((a) => a.isDefault) || all[0] || null;
+    const main = pool.filter((a) => !a.commentary);
+    const list = (main.length ? main : pool).slice();
+    list.sort((a, b) => {
+      const x = grade(a);
+      const y = grade(b);
+      return (
+        y.lossless - x.lossless ||
+        Math.min(b.channels, 8) - Math.min(a.channels, 8) ||
+        y.tier - x.tier ||
+        (b.bitrate || 0) - (a.bitrate || 0) ||
+        a.position - b.position
+      );
+    });
+    return list[0];
+  }
+
+  /** Plex Part.Stream audio entries in the shape sourceInfo gives Jellyfin's. */
+  function plexAudio(streams) {
+    return (streams || [])
+      .filter((s) => s && +s.streamType === 2)
+      .map((s, position) => ({
+        index: s.id,
+        position,
+        codec: family(s.codec),
+        profile: lower(`${s.profile || ''} ${s.codec || ''}`),
+        name:
+          s.extendedDisplayTitle ||
+          s.displayTitle ||
+          s.title ||
+          s.language ||
+          `Track ${position + 1}`,
+        isDefault: !!(s.selected || s.default),
+        channels: s.channels || 0,
+        bitrate: (+s.bitrate || 0) * 1000,
+        external: false,
+        language: lower(s.languageCode || s.languageTag),
+        commentary:
+          s.visualImpaired === true ||
+          /commentary|kommentar|comentario|commentaire|audio description|descriptive/i.test(
+            `${s.title || ''} ${s.extendedDisplayTitle || ''}`,
+          ),
+      }));
+  }
+
+  /**
+   * Plex picks its encode targets from the client profile: the Dolby codecs
+   * the TV decodes are added to it, E-AC-3 first. Empty when the TV has none.
+   */
+  function plexProfileExtra(caps) {
+    return ['eac3', 'ac3']
+      .filter((c) => caps.audio[c])
+      .map(
+        (c) =>
+          `add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=hls&audioCodec=${c})`,
+      )
+      .join('+');
   }
 
   function canVideo(caps, codec) {
@@ -199,11 +294,15 @@
         name: s.DisplayTitle || s.Title || s.Language || `Track ${position + 1}`,
         isDefault: !!s.IsDefault,
         channels: s.Channels || 0,
+        bitrate: s.BitRate || 0,
+        profile: lower(s.Profile),
+        spatial: lower(s.AudioSpatialFormat),
         external: !!s.IsExternal,
         language: lower(s.Language),
-        commentary: /commentary|kommentar|comentario|commentaire/i.test(
-          `${s.Title || ''} ${s.DisplayTitle || ''}`,
-        ),
+        commentary:
+          /commentary|kommentar|comentario|commentaire|audio description|descriptive/i.test(
+            `${s.Title || ''} ${s.DisplayTitle || ''}`,
+          ),
       }));
     const subtitles = streams
       .filter((s) => s.Type === 'Subtitle')
@@ -273,9 +372,10 @@
     const info = ctx.info;
     const caps = ctx.caps;
     const chosen = info.audio.find((a) => a.index === ctx.audio) || null;
-    const preferred = chosen || info.audio.find((a) => a.isDefault) || info.audio[0] || null;
-    // A track the viewer picked is played as picked (converted if need be);
-    // a default the TV cannot decode gives way to a playable companion track.
+    const preferred = chosen || bestTrack(info.audio);
+    // A track the viewer picked is played as picked (converted if need be).
+    // The best English track is converted to E-AC-3 when the TV cannot
+    // decode it; only a TV without E-AC-3 gets a playable companion instead.
     const replacement = chosen ? null : fallbackTrack(info, caps, preferred);
     const track = replacement || preferred;
     const swapped = replacement ? codecName(preferred.codec) : null;
@@ -516,6 +616,10 @@
     subtitleUrl,
     plan,
     fallbackTrack,
+    bestTrack,
+    canAudio,
+    plexAudio,
+    plexProfileExtra,
     chapters,
     chapterAt,
     trickplay,

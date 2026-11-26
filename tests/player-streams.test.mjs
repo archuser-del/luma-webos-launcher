@@ -266,8 +266,24 @@ test('a failed direct play can be retried as a stream copy', () => {
   assert.equal(params(p.url).get('AllowVideoStreamCopy'), 'true');
 });
 
-test('a TrueHD default the TV cannot decode gives way to its AC-3 companion, played directly', () => {
+// A TV like the 2021 OLED, but without Dolby Digital Plus.
+const noEac3 = () => tv([], ['audio/mp4; codecs="ec-3"']);
+
+test('TrueHD the TV cannot decode is re-encoded to E-AC-3, not swapped for the AC-3 track', () => {
   const caps = S.capabilities(tv());
+  const p = S.plan(ctx(hdrRemux, caps));
+  assert.equal(p.method, 'DirectStream');
+  assert.equal(p.audioIndex, 1);
+  assert.equal(p.audioSwappedFrom, null);
+  const q = params(p.url);
+  assert.equal(q.get('AudioStreamIndex'), '1');
+  assert.equal(q.get('AudioCodec').split(',')[0], 'eac3');
+  assert.equal(q.get('AllowVideoStreamCopy'), 'true', 'the HDR video is still copied');
+  assert.equal(p.label, 'Direct Stream · HDR10 · TrueHD → E-AC-3');
+});
+
+test('without E-AC-3 on the TV, the TrueHD default gives way to its AC-3 companion', () => {
+  const caps = S.capabilities(noEac3());
   const p = S.plan(ctx(hdrRemux, caps));
   assert.equal(p.method, 'DirectPlay');
   assert.equal(p.audioIndex, 2);
@@ -283,21 +299,84 @@ const withTracks = (video, ...audio) => ({
 });
 const hevc = stream(0, 'Video', 'hevc', { VideoRange: 'HDR', VideoRangeType: 'HDR10' });
 
-test('the fallback keeps the language, skips commentary and prefers more channels, then E-AC-3', () => {
-  const caps = S.capabilities(tv());
+const dtsFilm = withTracks(
+  hevc,
+  ['dts', { IsDefault: true, Channels: 8, Language: 'eng', DisplayTitle: 'DTS-HD MA 7.1' }],
+  ['eac3', { Channels: 6, Language: 'ger' }],
+  ['ac3', { Channels: 2, Language: 'eng', Title: 'Director Commentary' }],
+  ['ac3', { Channels: 6, Language: 'eng' }],
+  ['aac', { Channels: 2, Language: 'eng' }],
+);
+
+test('the DTS-HD MA track wins and is converted to E-AC-3 when the TV has it', () => {
+  const p = S.plan(ctx(dtsFilm, S.capabilities(tv())));
+  assert.equal(p.audioIndex, 1);
+  assert.equal(p.method, 'DirectStream');
+  assert.match(p.label, /DTS → E-AC-3/);
+});
+
+test('the fallback keeps the language, skips commentary and prefers more channels', () => {
+  const p = S.plan(ctx(dtsFilm, S.capabilities(noEac3())));
+  assert.equal(p.audioIndex, 4, 'English AC-3 5.1');
+  assert.equal(p.method, 'DirectPlay');
+  assert.match(p.label, /AC-3 \(in place of DTS\)/);
+});
+
+test('with nothing picked, the first English track in the highest quality plays', () => {
+  const caps = S.capabilities(tv(['audio/mp4; codecs="mlpa"']));
   const film = withTracks(
     hevc,
-    ['dts', { IsDefault: true, Channels: 8, Language: 'eng', DisplayTitle: 'DTS-HD MA 7.1' }],
-    ['eac3', { Channels: 6, Language: 'ger' }],
-    ['ac3', { Channels: 2, Language: 'eng', Title: 'Director Commentary' }],
-    ['ac3', { Channels: 6, Language: 'eng' }],
-    ['eac3', { Channels: 6, Language: 'eng' }],
-    ['aac', { Channels: 2, Language: 'eng' }],
+    ['ac3', { IsDefault: true, Channels: 6, Language: 'fre' }],
+    ['ac3', { Channels: 6, Language: 'eng', BitRate: 448000 }],
+    ['truehd', { Channels: 8, Language: 'eng', Profile: 'TrueHD + Atmos' }],
+    ['ac3', { Channels: 6, Language: 'eng', BitRate: 640000 }],
+    ['flac', { Channels: 2, Language: 'eng', Title: 'Commentary' }],
   );
   const p = S.plan(ctx(film, caps));
-  assert.equal(p.audioIndex, 5, 'English E-AC-3 5.1');
+  assert.equal(p.audioIndex, 3, 'the TrueHD track, not the French default');
   assert.equal(p.method, 'DirectPlay');
-  assert.match(p.label, /E-AC-3 \(in place of DTS\)/);
+  // A track the viewer picks is still played as picked.
+  assert.equal(S.plan(ctx(film, caps, { audio: 1 })).audioIndex, 1);
+});
+
+test('track quality: lossless, then channels, then codec, then bitrate, then order', () => {
+  const info = S.sourceInfo(
+    withTracks(
+      hevc,
+      ['eac3', { Channels: 2, Language: 'eng' }],
+      ['ac3', { Channels: 6, Language: 'eng', BitRate: 448000 }],
+      ['ac3', { Channels: 6, Language: 'eng', BitRate: 640000 }],
+      ['ac3', { Channels: 6, Language: 'eng', BitRate: 640000 }],
+      ['dts', { Channels: 2, Language: 'eng', Profile: 'DTS-HD MA' }],
+    ),
+  );
+  assert.equal(S.bestTrack(info.audio).index, 5);
+  assert.equal(S.bestTrack(info.audio.slice(0, 4)).index, 3);
+  const german = S.sourceInfo(
+    withTracks(hevc, ['ac3', { Language: 'ger' }], ['aac', { Language: 'fre', IsDefault: true }]),
+  );
+  assert.equal(S.bestTrack(german.audio).index, 2, 'no English: the default');
+});
+
+test('Plex tracks: English DTS-HD MA chosen, Dolby targets only the TV decodes', () => {
+  const audio = S.plexAudio([
+    { streamType: 1, id: 1, codec: 'hevc' },
+    { streamType: 2, id: 11, codec: 'ac3', languageCode: 'eng', channels: 6, bitrate: 640 },
+    { streamType: 2, id: 12, codec: 'dca', profile: 'ma', languageCode: 'eng', channels: 8 },
+  ]);
+  assert.equal(audio[0].bitrate, 640000);
+  assert.equal(S.bestTrack(audio).index, 12);
+  const extra = S.plexProfileExtra(S.capabilities(tv()));
+  assert.match(
+    extra,
+    /^add-transcode-target-audio-codec\(.*audioCodec=eac3\)\+.*audioCodec=ac3\)$/,
+  );
+  assert.equal(
+    S.plexProfileExtra(
+      S.capabilities(tv([], ['audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="ac-3"'])),
+    ),
+    '',
+  );
 });
 
 test('with no playable track in the language, the default is converted as before', () => {
@@ -316,7 +395,7 @@ test('with no playable track in the language, the default is converted as before
 });
 
 test('dual-layer Dolby Vision streams (to strip the layer) with the AC-3 companion copied', () => {
-  const caps = S.capabilities(tv());
+  const caps = S.capabilities(noEac3());
   const film = withTracks(
     stream(0, 'Video', 'hevc', { VideoRange: 'HDR', VideoRangeType: 'DOVIWithEL' }),
     ['truehd', { IsDefault: true, Channels: 8, Language: 'eng' }],

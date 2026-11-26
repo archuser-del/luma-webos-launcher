@@ -365,10 +365,29 @@ pub struct Preferences {
     pub playback_progress: BTreeMap<String, u64>,
     /// Play opens Luma's own player instead of the TV's (Settings › Player).
     pub luma_player: bool,
+    /// Brightness of the player's controls and captions over HDR video, in
+    /// nits (Settings › General).
+    pub hdr_ui_nits: u16,
     /// Home widgets right of the headline (Settings › Widgets).
     pub widgets: crate::widgets::WidgetPrefs,
     /// ImmichFrame server for the photo wallpaper (Settings › Wallpaper).
     pub immich: crate::immich_frame::ImmichFrameLink,
+}
+
+/// Player controls over HDR video: default, bounds and the levels OK steps
+/// through, in nits. The TV draws graphics white at about 203 nits in HDR
+/// (BT.2408), so 200 is the brightest level.
+pub const HDR_UI_NITS_DEFAULT: u16 = 150;
+pub const HDR_UI_NITS_MIN: u16 = 50;
+pub const HDR_UI_NITS_MAX: u16 = 200;
+pub const HDR_UI_NITS_STEP: u16 = 10;
+pub const HDR_UI_NITS_LEVELS: [u16; 6] = [80, 100, 120, 150, 180, 200];
+
+impl Preferences {
+    /// The saved HDR level within its bounds, whatever the file held.
+    pub fn hdr_ui_nits(&self) -> u16 {
+        self.hdr_ui_nits.clamp(HDR_UI_NITS_MIN, HDR_UI_NITS_MAX)
+    }
 }
 
 impl Default for Preferences {
@@ -425,6 +444,7 @@ impl Default for Preferences {
             games: Default::default(),
             playback_progress: BTreeMap::new(),
             luma_player: true,
+            hdr_ui_nits: HDR_UI_NITS_DEFAULT,
             widgets: Default::default(),
             immich: Default::default(),
         }
